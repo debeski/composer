@@ -1,4 +1,4 @@
-# Ignore Python and OS bytecode files
+# Ignored Python and OS bytecode files
 *.pyc
 *.pyo
 __pycache__/
@@ -8,17 +8,20 @@ autorun.ini
 .codex
 tracker.md
 
-# Ignore Docker-related files
+# Ignored Docker-related files
 Dockerfile
+dockerfile
 compose.yml
 docker-compose.yml
+compose.dev.yml
+docker-compose.dev.yml
 
-# Ignore git-related files
+# Ignored git-related files
 .git/
 .gitignore
 .gitattributes
 
-# Ignore app directories
+# Ignored app directories
 logs/
 media/
 staticfiles/
@@ -39,17 +42,18 @@ codex/
 agents/
 .agents/
 .xpose/
+scratch/
 
-
-# Ignore celery-related files
+# Ignored celery-related files
 celerybeat-schedule
 celerybeat-schedule-shm
 celerybeat-schedule-wal
 
-# Ignore Sensetive Secrets
+# Ignored Sensetive Secrets
 .env
 .key
-secrets.enc
+*.enc
+
+# Ignored side-files
 start.sh
 start.ps1
-test_render.py

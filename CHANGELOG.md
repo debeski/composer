@@ -1,8 +1,10 @@
 # Changelog
 
-- **v1.0.13** - Added `--update` flag to wrapper scripts (`start.sh`, `start.ps1`) to explicitly update the Decrypter Docker image. Removed automatic image pull on every run.
+- **v2.0.0** - Relaunched under the `Composer` name, replaced the old `Decrypter` branding, removed obsolete passphrase-based encryption/decryption support, improved the modular structure and terminal UI, and released the image as `debeski/composer:latest`.
 
-- **v1.0.12** - Added `-p`/`--passphrase` flag for passphrase-based encryption/decryption as an alternative to AGE keys. Works with `encrypt`/`decrypt` entrypoint shortcuts and `--encrypt`/`--decrypt` orchestrator modes.
+- **v1.0.14** - Improved compose file reporting by listing all active filenames in the UI and debug logs. Standardized compose file resolution (including `docker-compose.yml` fallback) across all orchestration steps.
+
+- **v1.0.13** - Added `--update` flag to wrapper scripts (`start.sh`, `start.ps1`) to explicitly update the Docker image. Removed automatic image pull on every run.
 
 - **v1.0.11** - Separated progress messages from state circles to prevent terminal output overwrites, and added dynamic waiting/failing status output during the health check loop to clearly identify stuck containers.
 
@@ -12,7 +14,7 @@
 
 - **v1.0.8** - Fixed a visual bug where the end result erased previous terminal output.
 
-- **v1.0.7** - Passed the Decrypter version into Compose and automatically injected `DECRYPTER_VERSION` into all launched services via a generated runtime override, so deployed projects can read the orchestrator version without per-project compose edits.
+- **v1.0.7** - Passed the launcher version into Compose and automatically injected it into all launched services via a generated runtime override, so deployed projects can read the Composer version without per-project compose edits.
 
 - **v1.0.6** - Fixed launcher UI redraw issues that could repeat header lines, kept compose/pull progress on a single in-place status line, improved compose startup diagnostics, and accepted quoted `DEBUG_STATUS` values such as `"True"` when parsing compose config.
 

@@ -1,5 +1,8 @@
 FROM python:3.14-slim
 
+WORKDIR /app
+ENV PYTHONPATH=/app
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -26,10 +29,10 @@ RUN ARCH=$(dpkg --print-architecture) && \
     curl -sL "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.${SOPS_ARCH}" -o /usr/local/bin/sops && \
     chmod +x /usr/local/bin/sops
 
-COPY start.py /app/start.py
+COPY composer /app/composer
 COPY VERSION /app/VERSION
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/start.py /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Forward arguments from the wrapper script to the entrypoint router
 ENTRYPOINT ["/app/entrypoint.sh"]
