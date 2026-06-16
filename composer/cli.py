@@ -60,6 +60,12 @@ def parse_args():
         help="Remove volumes when using --down",
     )
     parser.add_argument(
+        "-p",
+        "--purge",
+        action="store_true",
+        help="Purge with --down: remove built untagged images, volumes, networks, orphans, and dangling build cache",
+    )
+    parser.add_argument(
         "--decrypt",
         action="store_true",
         help="Decrypt an encrypted file and print to stdout",

@@ -39,6 +39,7 @@ class DockerComposeLauncher(
         self.pull_service = None
         self.down_mode = False
         self.down_volumes = False
+        self.purge = False
         self.last_progress_text = ""
         self.last_progress_label = ""
         self.last_runtime_diagnostic = ""
@@ -99,6 +100,7 @@ class DockerComposeLauncher(
                     self.pull_service = args.update
             self.down_mode = args.down
             self.down_volumes = args.volumes
+            self.purge = args.purge
 
             self.extract_config()
 
@@ -164,12 +166,18 @@ class DockerComposeLauncher(
 
             if self.down_mode:
                 print("🛑 Stopping and removing containers...")
-                if self.down_volumes:
+                if self.down_volumes or self.purge:
                     print("   (Volumes will be removed)")
+                if self.purge:
+                    print("   (Purging built images, networks, orphans, and build cache)")
                 ok, err = self.down_containers()
                 if not ok:
                     print(f"✖ Failed to stop containers:\n  {err.strip()}")
                     sys.exit(1)
+                if self.purge:
+                    cache_ok, cache_err = self.prune_build_cache()
+                    if not cache_ok:
+                        print(f"⚠ Failed to prune build cache:\n  {cache_err.strip()}")
                 print("✅ Containers stopped")
                 return
 

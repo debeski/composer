@@ -43,6 +43,7 @@ Feed it a key and it starts the services.
 | `-b`, `--build` | Rebuild images during startup. |
 | `--down` | Stop everything. |
 | `-v`, `--volumes` | Remove volumes too. |
+| `-p`, `--purge` | With `--down`: also remove built untagged images, volumes, networks, orphans, and dangling build cache. |
 | `--encrypt` | Encrypt a dotenv file with an AGE public key. |
 | `--decrypt` | Decrypt an encrypted dotenv file. |
 

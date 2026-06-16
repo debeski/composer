@@ -250,10 +250,24 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
 
     def down_containers(self) -> Tuple[bool, str]:
         down_args = ["down"]
-        if self.down_volumes:
+        # --purge implies volume removal even when -v is omitted.
+        if self.down_volumes or self.purge:
             down_args.append("-v")
+        if self.purge:
+            # Remove locally built (untagged) images and any orphaned containers
+            # for this compose. Networks are already removed by `down` itself.
+            down_args.extend(["--rmi", "local", "--remove-orphans"])
         ok, _, err = self.run_docker_compose(down_args)
         return ok, err
+
+    def prune_build_cache(self) -> Tuple[bool, str]:
+        # BuildKit cache cannot be scoped to a single compose project, so prune
+        # only dangling/unreferenced cache layers (safe for other projects).
+        success, _, err = self.run_command(
+            ["docker", "builder", "prune", "-f"],
+            timeout=120,
+        )
+        return success, err
 
     def pull_images(self) -> Tuple[bool, str, str]:
         pull_args = ["pull"]
