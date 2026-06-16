@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.1
+- **Runtime-Gated Image Publishing**: Added `scripts/smoke-test.sh`, which runs the built image and asserts `--version` matches the `VERSION` file, `--help` exposes the core flags (`--down`/`--purge`/`--volumes`/`--update`/`--build`/`--encrypt`/`--decrypt`), the bundled `age`/`sops`/`docker`/`docker compose` binaries are runnable, the `keygen` entrypoint route emits an AGE key, and an end-to-end age+sops encrypt/decrypt round trip succeeds. `.github/workflows/release.yml` now builds the amd64 image with `load: true` and runs the smoke tests **before** the multi-arch Docker Hub push, so a runtime-broken image can no longer be published. `.github/workflows/ci.yml` runs the same smoke tests on every push/PR to `main`.
+
 ## v1.0.0
 - **Composer Rebrand**: Relaunched under the `Composer` name, replaced the old `Decrypter` branding, removed obsolete passphrase-based encryption/decryption support, and improved the modular package structure (`composer/` mixins) and single-status-line terminal UI.
 - **Purge Flag (`-p`/`--purge`)**: Added a `--down` child flag in `composer/cli.py` driving a full compose teardown in `DockerComposeMixin.down_containers()` — appends `-v` (implies volume removal even without `-v`), `--rmi local` to drop built untagged images, and `--remove-orphans`. Adds `DockerComposeMixin.prune_build_cache()` running `docker builder prune -f` for dangling BuildKit cache (not compose-scopeable). Wired through `down_volumes`/`purge` on `DockerComposeLauncher`.

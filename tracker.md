@@ -6,8 +6,9 @@
 - The modular implementation now lives under `composer/` with entrypoints `python -m composer` and `python composer/main.py`.
 - `composer/main.py` delegates to `DockerComposeLauncher` in `composer/launcher.py`.
 - Mixins split behavior into CLI parsing, config extraction, Docker Compose operations, health monitoring, rendering, secrets handling, subprocess running, post-start hooks, output utilities, and version loading.
-- `composer/version.py` reads the repo-level `VERSION` file; the current repo version is `1.0.0` (renumbered: old history folded into `v0.1.0`–`v0.1.13`, rebrand promoted to `v1.0.0`).
-- Tag-driven release via `.github/workflows/release.yml` (`v*` tags → verify tag==VERSION → multi-arch buildx → push `debeski/composer:<ver>` + `:latest` to Docker Hub → GitHub Release from CHANGELOG section). `.github/workflows/ci.yml` runs compileall + CLI smoke + no-push docker build on main. Needs repo secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`. See `docs/RELEASING.md`.
+- `composer/version.py` reads the repo-level `VERSION` file; the current repo version is `1.0.1` (history folded into `v0.1.0`–`v0.1.13`; `v1.0.0` published to Docker Hub).
+- Tag-driven release via `.github/workflows/release.yml` (`v*` tags → verify tag==VERSION → build amd64 + `scripts/smoke-test.sh` gate → multi-arch buildx push `debeski/composer:<ver>` + `:latest` to Docker Hub → GitHub Release from CHANGELOG section). `.github/workflows/ci.yml` runs compileall + CLI smoke + amd64 build + smoke tests on main. Needs repo secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`. See `docs/RELEASING.md`.
+- `scripts/smoke-test.sh <image>` runtime-gates pushes: version==VERSION, `--help` flags, age/sops/docker/compose runnable, keygen route, age+sops encrypt/decrypt round trip.
 - Runtime compose override injection now exports `COMPOSER_VERSION` in `composer/docker_compose_manager.py`.
 - Wrapper scripts now target `debeski/composer:latest`.
 - Dockerfile copies `composer/` to `/app/composer`, sets `WORKDIR /app`, exports `PYTHONPATH=/app`, copies `VERSION`, and uses `/app/entrypoint.sh`.
@@ -72,13 +73,14 @@
   - [x] Built and loaded `debeski/composer:latest` and verified version/help output after the rename cleanup.
   - [x] Updated tracker to required structure.
   - [x] Added `-p`/`--purge` `--down` child flag (cli, launcher, docker_compose_manager) with dangling build-cache prune; reused the freed `-p` short flag.
-  - [x] Renumbered CHANGELOG to `## vX.Y.Z` headers (history → `v0.1.x`, rebrand → `v1.0.0`), set `VERSION` to `1.0.0`, added Docker Hub release + CI workflows and `docs/RELEASING.md`.
+  - [x] Renumbered CHANGELOG to `## vX.Y.Z` headers (history → `v0.1.x`, rebrand → `v1.0.0`), added Docker Hub release + CI workflows and `docs/RELEASING.md`; `v1.0.0` published to Docker Hub + GitHub.
+  - [x] Added `scripts/smoke-test.sh` runtime gate, wired it into release (pre-push) and CI; bumped `VERSION`→`1.0.1` with `## v1.0.1` CHANGELOG entry.
 
 ### One-line info about last verified Tests:
-- Verified on 2026-06-16: `compileall composer`, `--help` (shows `-p`/`--purge`), YAML-lint of both workflows, and CHANGELOG section-extraction for `v1.0.0`/`v0.1.13` passed; Docker runtime purge + live release run still pending.
+- Verified on 2026-06-16: local `docker build` of current source + `scripts/smoke-test.sh debeski/composer:ci-test` passed all 5 checks (version 1.0.1 match, help flags, tooling, keygen, age+sops round trip); both workflow YAMLs lint and `v1.0.1` CHANGELOG extraction OK.
 
 ### One-line info about last time edited Docs:
-- Edited `README.md`, `CHANGELOG.md`, `docs/RELEASING.md`, `tracker.md` on 2026-06-16 for the purge flag and the tag-driven Docker Hub release pipeline.
+- Edited `CHANGELOG.md` (`v1.0.1`), `tracker.md` on 2026-06-16 for the runtime smoke-test publishing gate.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:
