@@ -6,9 +6,9 @@
 - The modular implementation now lives under `composer/` with entrypoints `python -m composer` and `python composer/main.py`.
 - `composer/main.py` delegates to `DockerComposeLauncher` in `composer/launcher.py`.
 - Mixins split behavior into CLI parsing, config extraction, Docker Compose operations, health monitoring, rendering, secrets handling, subprocess running, post-start hooks, output utilities, and version loading.
-- `composer/version.py` reads the repo-level `VERSION` file; the current repo version is `1.1.1` (`v1.0.0`/`v1.0.1`/`v1.1.0` tagged+published; `v1.1.1` in-progress, NOT yet tagged — start/append its own CHANGELOG entry, do not touch released `v1.1.0`).
+- `composer/version.py` reads the repo-level `VERSION` file; the current repo version is `1.1.2` (`v1.0.0`/`v1.0.1`/`v1.1.0`/`v1.1.1` tagged+published; `v1.1.2` in-progress, NOT yet tagged). ALWAYS re-run `git tag` before editing CHANGELOG — releases get tagged mid-session; never edit a tagged version's entry.
 - Default secrets flow is plaintext-first: `SecretsMixin.resolve_secrets()` tries `.env`→`secrets/.env`→`.secrets/.env`, using the first that satisfies `ConfigMixin.required_compose_vars()`; else falls back to encrypted `secrets.enc`/`secrets/secrets.enc`/`.secrets/secrets.enc`, prompting for the AGE key unless `-k`/positional/`SOPS_AGE_KEY` given.
-- `required_compose_vars()` = `${VAR}` refs (skips `:-`/`-`/`:+`/`+` defaults) MINUS `$$`-escaped shell vars MINUS vars the compose supplies itself. `_compose_env_keys()` collects `environment:` keys assigned a concrete literal value (mapping + list form); bare `- KEY` pass-throughs and interpolated `KEY: ${KEY}` values stay required. `-sd`/`--skip-decrypt` removed entirely. `launcher.secrets_source` drives the UI label/flag.
+- `required_compose_vars()` = `${VAR}` refs (skips `:-`/`-`/`:+`/`+` defaults) MINUS YAML-comment refs (strips full-line + trailing ` #…`, keeps mid-token `url#frag`) MINUS `$$`-escaped shell vars MINUS vars the compose supplies itself. `_compose_env_keys()` collects `environment:` keys assigned a concrete literal value (mapping + list form); bare `- KEY` pass-throughs and interpolated `KEY: ${KEY}` values stay required. `-sd`/`--skip-decrypt` removed entirely. `launcher.secrets_source` drives the UI label/flag.
 - `-d`/`--dev` = compose.dev.yml two-file override AND forces debug on: `sync_runtime_compose_override()` injects `DEBUG: "True"` + `DEBUG_STATUS: "True"` into every service (override applied last, wins over compose), `build_compose_env()` exports `DEBUG`/`DEBUG_STATUS=True` (for `${...}` interpolation), launcher forces `debug_mode` UI flag, and `DEBUG`+`DEBUG_STATUS`+`NGINX_PORT` are in `resolve_secrets()`'s injected set so they never read as missing required vars.
 - Tag-driven release via `.github/workflows/release.yml` (`v*` tags → verify tag==VERSION → build amd64 + `scripts/smoke-test.sh` gate → multi-arch buildx push `debeski/composer:<ver>` + `:latest` to Docker Hub → GitHub Release from CHANGELOG section). `.github/workflows/ci.yml` runs compileall + CLI smoke + amd64 build + smoke tests on main. Needs repo secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`. See `docs/RELEASING.md`.
 - `scripts/smoke-test.sh <image>` runtime-gates pushes: version==VERSION, `--help` flags, age/sops/docker/compose runnable, keygen route, age+sops encrypt/decrypt round trip.
@@ -65,6 +65,7 @@
 - Priority 2:
   - [ ] Manually verify `start.ps1` behavior on Windows after the Composer rename.
 - Completed Recently:
+  - [x] (v1.1.2) `required_compose_vars()` now strips YAML comments (`_COMMENT_RE`) so commented-out `${VAR}` refs aren't required; new `## v1.1.2` entry, VERSION→1.1.2 (v1.1.1 already tagged/published).
   - [x] (v1.1.1) Fixed required-var false positives: strip `$$` escapes before scanning and subtract literal-valued `environment:` keys via `ConfigMixin._compose_env_keys()`; new `## v1.1.1` CHANGELOG entry, VERSION→1.1.1 (v1.1.0 already tagged/published).
   - [x] Made plaintext-first secrets resolution the default, removed `-sd`/`--skip-decrypt` (cli/launcher/rendering/secrets_manager), added `required_compose_vars()` + `resolve_secrets()`, refreshed the UI panel, bumped VERSION→1.1.0 with `## v1.1.0` CHANGELOG + README updates.
   - [x] Made `-d`/`--dev` force `DEBUG=True` into every service (runtime override + compose env + UI flag), excluded from required-secret check.
@@ -84,10 +85,10 @@
   - [x] Added `scripts/smoke-test.sh` runtime gate, wired it into release (pre-push) and CI; bumped `VERSION`→`1.0.1` with `## v1.0.1` CHANGELOG entry.
 
 ### One-line info about last verified Tests:
-- Verified on 2026-06-25 (v1.1.1): `python3 -m compileall composer` OK; unit-tested `required_compose_vars()` now ignores `$$`-escaped shell vars (`$$attempts`/`$$max_attempts`/`$$backup_file`) and subtracts literal-valued `environment:` keys (mapping+list), while passthrough/interpolated (`KEY: ${KEY}`, `- KEY`) and default-bearing (`:-`) stay correct — only genuinely-missing vars remain. Earlier v1.1.0 checks (resolve_secrets, dev-mode DEBUG/DEBUG_STATUS injection, `--help` sans `-sd`, render panel) still hold. Docker/sops runtime path still pending.
+- Verified on 2026-06-25 (v1.1.2): `python3 -m compileall composer` OK; unit-tested `required_compose_vars()` skips full-line + trailing `#…` comment refs while keeping mid-token `url#frag` (so `${KEPT}` after it stays required). Earlier checks still hold: ignores `$$`-escaped shell vars, subtracts literal-valued `environment:` keys, keeps passthrough/interpolated + default-bearing correct; resolve_secrets, dev-mode DEBUG/DEBUG_STATUS injection, `--help` sans `-sd`, render panel. Docker/sops runtime path still pending.
 
 ### One-line info about last time edited Docs:
-- Edited `CHANGELOG.md` (new `v1.1.1` entry — released `v1.1.0` left untouched), `tracker.md` on 2026-06-25 for smarter required-var detection; bumped `VERSION`→`1.1.1`.
+- Edited `CHANGELOG.md` (new `v1.1.2` entry — released `v1.1.1` restored/left untouched), `tracker.md` on 2026-06-25 for comment-skipping in required-var scan; bumped `VERSION`→`1.1.2`.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

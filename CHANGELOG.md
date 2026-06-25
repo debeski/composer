@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.2
+- **Skip Commented-Out Var Refs**: `required_compose_vars()` now strips YAML comments before scanning, so a `${VAR}` inside a full-line or trailing ` # …` comment is no longer counted as required. A mid-token `#` (e.g. `url#frag`) is preserved, so a real `${VAR}` after it still counts. Adds `ConfigMixin._COMMENT_RE`.
+
 ## v1.1.1
 - **Smarter Required-Var Detection**: `required_compose_vars()` no longer produces false "missing variable" failures. It strips `$$` escapes before scanning (so shell variables in command/healthcheck scripts like `$$attempts` are not mistaken for compose interpolations), and subtracts variables the compose already supplies itself — `ConfigMixin._compose_env_keys()` collects keys an `environment:` block assigns a concrete **literal** value to (mapping and list syntax), while bare pass-throughs (`- KEY`) and interpolated values (`KEY: ${KEY}`) are still treated as needing a value.
 

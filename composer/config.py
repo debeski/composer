@@ -7,6 +7,9 @@ _VAR_REF_RE = re.compile(r"\$\{([A-Za-z_]\w*)((?::?[-+?])[^}]*)?\}|\$([A-Za-z_]\
 # `$$` is the compose escape for a literal `$` (e.g. `$$VAR` is a shell
 # variable, not an interpolation). Collapse escapes before scanning for refs.
 _ESCAPED_DOLLAR_RE = re.compile(r"\$\$")
+# YAML line comment: a `#` at line start or preceded by whitespace through
+# end of line. (`#` mid-token, e.g. `url#frag`, is not a comment.)
+_COMMENT_RE = re.compile(r"(^|\s)#.*$", re.M)
 # Entries in an `environment:` block — mapping (`KEY: value`) or list
 # (`- KEY=value` / `- KEY`) form. Group 2 is the assigned value (if any).
 _ENV_MAP_ENTRY_RE = re.compile(r"^([A-Za-z_]\w*)\s*:\s*(.*)$")
@@ -43,7 +46,7 @@ class ConfigMixin:
                 continue
             text = p.read_text()
             defined |= self._compose_env_keys(text)
-            scannable = _ESCAPED_DOLLAR_RE.sub("", text)
+            scannable = _ESCAPED_DOLLAR_RE.sub("", _COMMENT_RE.sub(r"\1", text))
             for braced, op, bare in _VAR_REF_RE.findall(scannable):
                 name = braced or bare
                 if not name:
