@@ -28,17 +28,28 @@ To decrypt `secrets.enc`:
 ```
 
 ### 2. deployment
-Feed it a key and it starts the services.
+Just start it.
 
 ```bash
-./start.sh -k <private_key>
+./start.sh
+```
+
+Composer resolves secrets automatically. It first looks for a plaintext env
+file — `.env`, `secrets/.env`, then `.secrets/.env` — and uses the first one
+that supplies every variable the compose file requires. If none qualify, it
+falls back to an encrypted file (`secrets.enc`, `secrets/secrets.enc`,
+`.secrets/secrets.enc`) and prompts for the AGE private key (unless given with
+`-k`).
+
+```bash
+./start.sh -k <private_key>   # skip the prompt for the encrypted path
 ```
 
 ## the surface
 | flag | result |
 | :--- | :--- |
-| `-k`, `--key` | AGE private key for decrypt/start flows. |
-| `-d`, `--dev` | Development mode. Reads `.secrets/.env` directly. |
+| `-k`, `--key` | AGE private key for the encrypted-secrets path. |
+| `-d`, `--dev` | Development mode. Loads `compose.dev.yml` on top of the base compose file (two files) and forces `DEBUG=True` / `DEBUG_STATUS=True` into every service. |
 | `-u`, `--update` | Pull the latest Composer image. |
 | `-b`, `--build` | Rebuild images during startup. |
 | `--down` | Stop everything. |
@@ -48,6 +59,7 @@ Feed it a key and it starts the services.
 | `--decrypt` | Decrypt an encrypted dotenv file. |
 
 ## mechanics
+- **Secrets**: Plaintext env first (must satisfy the compose's required vars), encrypted `secrets.enc` as fallback.
 - **Version**: Every service gets `COMPOSER_VERSION`.
 - **UI**: Progress stays on one status line.
 - **Image**: Wrapper scripts target `debeski/composer:latest`.

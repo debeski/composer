@@ -10,7 +10,7 @@ def parse_args():
         "-d",
         "--dev",
         action="store_true",
-        help="Development mode: uses compose.dev.yml override and reads .secrets/.env directly (no decryption)",
+        help="Development mode: also load the compose.dev.yml override (two compose files)",
     )
     parser.add_argument(
         "-nm",
@@ -28,12 +28,6 @@ def parse_args():
         "-a",
         "--app",
         help="Target app for initialization (passed to migrator)",
-    )
-    parser.add_argument(
-        "-sd",
-        "--skip-decrypt",
-        action="store_true",
-        help="Bypass decryption and read .secrets/.env directly",
     )
     parser.add_argument(
         "-u",
@@ -92,8 +86,4 @@ def parse_args():
     )
     parser.add_argument("key_positional", nargs="?", help="AGE secret key (positional)")
 
-    args = parser.parse_args()
-    if args.dev:
-        args.skip_decrypt = False
-
-    return args
+    return parser.parse_args()

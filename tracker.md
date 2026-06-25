@@ -6,7 +6,9 @@
 - The modular implementation now lives under `composer/` with entrypoints `python -m composer` and `python composer/main.py`.
 - `composer/main.py` delegates to `DockerComposeLauncher` in `composer/launcher.py`.
 - Mixins split behavior into CLI parsing, config extraction, Docker Compose operations, health monitoring, rendering, secrets handling, subprocess running, post-start hooks, output utilities, and version loading.
-- `composer/version.py` reads the repo-level `VERSION` file; the current repo version is `1.0.1` (history folded into `v0.1.0`–`v0.1.13`; `v1.0.0` published to Docker Hub).
+- `composer/version.py` reads the repo-level `VERSION` file; the current repo version is `1.1.0` (`v1.0.0`/`v1.0.1` tagged+published; `v1.1.0` in-progress, NOT yet tagged — append to its CHANGELOG entry).
+- Default secrets flow is plaintext-first: `SecretsMixin.resolve_secrets()` tries `.env`→`secrets/.env`→`.secrets/.env`, using the first that satisfies `ConfigMixin.required_compose_vars()` (parses `${VAR}` refs, skips `:-`/`-`/`:+`/`+` defaults); else falls back to encrypted `secrets.enc`/`secrets/secrets.enc`/`.secrets/secrets.enc`, prompting for the AGE key unless `-k`/positional/`SOPS_AGE_KEY` given. `-sd`/`--skip-decrypt` removed entirely. `launcher.secrets_source` drives the UI label/flag.
+- `-d`/`--dev` = compose.dev.yml two-file override AND forces debug on: `sync_runtime_compose_override()` injects `DEBUG: "True"` + `DEBUG_STATUS: "True"` into every service (override applied last, wins over compose), `build_compose_env()` exports `DEBUG`/`DEBUG_STATUS=True` (for `${...}` interpolation), launcher forces `debug_mode` UI flag, and `DEBUG`+`DEBUG_STATUS`+`NGINX_PORT` are in `resolve_secrets()`'s injected set so they never read as missing required vars.
 - Tag-driven release via `.github/workflows/release.yml` (`v*` tags → verify tag==VERSION → build amd64 + `scripts/smoke-test.sh` gate → multi-arch buildx push `debeski/composer:<ver>` + `:latest` to Docker Hub → GitHub Release from CHANGELOG section). `.github/workflows/ci.yml` runs compileall + CLI smoke + amd64 build + smoke tests on main. Needs repo secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`. See `docs/RELEASING.md`.
 - `scripts/smoke-test.sh <image>` runtime-gates pushes: version==VERSION, `--help` flags, age/sops/docker/compose runnable, keygen route, age+sops encrypt/decrypt round trip.
 - Runtime compose override injection now exports `COMPOSER_VERSION` in `composer/docker_compose_manager.py`.
@@ -54,6 +56,7 @@
 
 ### Incomplete Tasks:
 - Priority 1:
+  - [ ] Manually verify plaintext-first resolution against a real compose project (complete `.env` → no key prompt; incomplete `.env` → encrypted fallback + key prompt; encrypted-only project).
   - [ ] Manually verify `python -m composer` startup against a compose project with a service `build:` step.
   - [ ] Manually verify a launched container can read `COMPOSER_VERSION`.
   - [ ] Manually verify failure output for a container that exits with code 1.
@@ -61,6 +64,8 @@
 - Priority 2:
   - [ ] Manually verify `start.ps1` behavior on Windows after the Composer rename.
 - Completed Recently:
+  - [x] Made plaintext-first secrets resolution the default, removed `-sd`/`--skip-decrypt` (cli/launcher/rendering/secrets_manager), added `required_compose_vars()` + `resolve_secrets()`, refreshed the UI panel, bumped VERSION→1.1.0 with `## v1.1.0` CHANGELOG + README updates.
+  - [x] Made `-d`/`--dev` force `DEBUG=True` into every service (runtime override + compose env + UI flag), excluded from required-secret check.
   - [x] Reviewed modular package split against current `start.py` behavior.
   - [x] Fixed secret env isolation in `composer/secrets_manager.py`.
   - [x] Fixed command preparation in `composer/subprocess_runner.py`.
@@ -77,10 +82,10 @@
   - [x] Added `scripts/smoke-test.sh` runtime gate, wired it into release (pre-push) and CI; bumped `VERSION`→`1.0.1` with `## v1.0.1` CHANGELOG entry.
 
 ### One-line info about last verified Tests:
-- Verified on 2026-06-16: local `docker build` of current source + `scripts/smoke-test.sh debeski/composer:ci-test` passed all 5 checks (version 1.0.1 match, help flags, tooling, keygen, age+sops round trip); both workflow YAMLs lint and `v1.0.1` CHANGELOG extraction OK.
+- Verified on 2026-06-25: `python3 -m compileall composer` OK; unit-tested `required_compose_vars()` regex (required vs `:-`/`-`/`:+`/`+`/`:?` operators), `resolve_secrets()` (skips incomplete `.env`, picks complete `.secrets/.env`, errors when no source), and dev-mode DEBUG injection (override file has `DEBUG: "True"` per service + `build_compose_env()['DEBUG']=='True'`; absent when non-dev); `--help` no longer lists `-sd`; render panel smoke-printed. Docker/sops runtime path still pending.
 
 ### One-line info about last time edited Docs:
-- Edited `CHANGELOG.md` (`v1.0.1`), `tracker.md` on 2026-06-16 for the runtime smoke-test publishing gate.
+- Edited `CHANGELOG.md` (`v1.1.0`), `README.md` (default secrets flow + `-d`/`-k` surface), `tracker.md` on 2026-06-25 for plaintext-first secrets resolution.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

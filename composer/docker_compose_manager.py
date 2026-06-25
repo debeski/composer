@@ -30,6 +30,11 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         env = os.environ.copy()
         if self.dev_mode and not self.compose_file:
             env["NGINX_PORT"] = "81"
+        if self.dev_mode:
+            # Dev mode forces debug on, overriding any DEBUG value the
+            # environment/compose may carry (covers ${DEBUG} interpolation).
+            env["DEBUG"] = "True"
+            env["DEBUG_STATUS"] = "True"
         env["COMPOSER_VERSION"] = self.composer_version
         env.setdefault("BUILDKIT_PROGRESS", "plain")
         return env
@@ -155,11 +160,19 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
 
         lines = ["services:"]
         for service in self.services:
+            service_env = [
+                f"      COMPOSER_VERSION: {json.dumps(self.composer_version)}",
+            ]
+            if self.dev_mode:
+                # Override file is applied last, so this wins over any DEBUG the
+                # project's compose files declare for the service.
+                service_env.append(f"      DEBUG: {json.dumps('True')}")
+                service_env.append(f"      DEBUG_STATUS: {json.dumps('True')}")
             lines.extend(
                 [
                     f"  {service}:",
                     "    environment:",
-                    f"      COMPOSER_VERSION: {json.dumps(self.composer_version)}",
+                    *service_env,
                 ]
             )
 

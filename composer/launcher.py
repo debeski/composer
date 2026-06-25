@@ -30,7 +30,7 @@ class DockerComposeLauncher(
         self.debug_mode = False
         self.no_migrate = False
         self.force_makemigrations = False
-        self.skip_decrypt = False
+        self.secrets_source = None
         self.compose_file = None
         self.active_compose_files: List[str] = []
         self.dev_mode = False
@@ -78,7 +78,6 @@ class DockerComposeLauncher(
             self.no_migrate = args.no_migrate
             self.force_makemigrations = args.make_migrations
             self.dev_mode = args.dev
-            self.skip_decrypt = args.skip_decrypt or self.dev_mode
             self.compose_file = args.file
 
             if self.compose_file:
@@ -103,6 +102,10 @@ class DockerComposeLauncher(
             self.purge = args.purge
 
             self.extract_config()
+            if self.dev_mode:
+                # Dev mode always runs with debug on, regardless of the
+                # compose's DEBUG/DEBUG_STATUS value or its absence.
+                self.debug_mode = True
 
             self.discover_services(silent=True)
 
@@ -188,30 +191,11 @@ class DockerComposeLauncher(
             self.sections["secrets"] = RUNNING
             self.render()
 
-            if self.skip_decrypt:
-                if not self.load_secrets_from_file():
-                    self.sections["secrets"] = ERROR
-                    self.render("Failed to load secrets from file")
-                    sys.exit(1)
-            else:
-                key = (
-                    args.key
-                    or args.key_positional
-                    or os.environ.get("SOPS_AGE_KEY")
-                    or input("Paste AGE key: ").strip()
-                )
-                ok, out = self.decrypt_secrets_raw(key=key)
-
-                if not ok:
-                    self.sections["secrets"] = ERROR
-                    self.render("Failed to decrypt secrets")
-                    sys.exit(1)
-
-                for line in out.splitlines():
-                    if "=" in line:
-                        k, v = line.split("=", 1)
-                        os.environ[k] = v.strip("'\"")
-                        self.loaded_secrets.append(k)
+            ok, err = self.resolve_secrets(args)
+            if not ok:
+                self.sections["secrets"] = ERROR
+                self.render(err)
+                sys.exit(1)
             self.sections["secrets"] = OK
 
             if self.update_images:

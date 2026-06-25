@@ -12,37 +12,43 @@ from .constants import (
 )
 
 
+RULE = "━" * 49
+
+
 class RenderingMixin:
     def render(self, error_message: str = None):
         lines: List[str] = [
             "",
-            "🛡️  COMPOSER - Orchestrator for Docker Compose",
-            "█████████████████████████████████████████████████",
+            " \033[1m🛡️  COMPOSER\033[0m · Orchestrator for Docker Compose",
+            RULE,
         ]
         active_flags: List[str] = []
         if self.dev_mode:
             active_flags.append("\033[91m🛠️  DEV MODE\033[0m")
         if self.debug_mode:
             active_flags.append("\033[93m🪲  DEBUG MODE\033[0m")
-        if self.skip_decrypt and not self.dev_mode:
-            active_flags.append("\033[93m⚠️  BYPASS DECRYPTION\033[0m")
+        if self.secrets_source:
+            kind, path = self.secrets_source
+            if kind == "encrypted":
+                active_flags.append(f"\033[92m🔐 DECRYPTED {path}\033[0m")
+            else:
+                active_flags.append(f"\033[93m🔓 PLAINTEXT {path}\033[0m")
         if self.no_migrate:
             active_flags.append("\033[93m⏭️  SKIP MIGRATIONS\033[0m")
         if self.force_makemigrations:
             active_flags.append("\033[93m🔄 FORCE MIGRATIONS\033[0m")
-        if self.active_compose_files:
-            files_str = ", ".join(self.active_compose_files)
-            active_flags.append(f"📂  COMPOSE: {files_str}")
         if self.target_app:
-            active_flags.append("🎯  TARGET APP")
+            active_flags.append(f"🎯  APP: {self.target_app}")
         if self.build_images:
             active_flags.append("\033[96m🏗️  FORCE BUILD\033[0m")
         if active_flags:
-            lines.append("  •  ".join(active_flags))
+            lines.append(" " + "  •  ".join(active_flags))
+        if self.active_compose_files:
+            lines.append(f" 📂 {', '.join(self.active_compose_files)}")
         lines.extend(
             [
-                f"🌐 BASE URL: {self.app_url}",
-                "█████████████████████████████████████████████████",
+                f" 🌐 {self.app_url}",
+                RULE,
                 "",
             ]
         )
@@ -55,17 +61,20 @@ class RenderingMixin:
                 ERROR: "✖",
             }[state]
 
-        lines.append(f"{icon(self.sections['secrets'])} Decrypt Secrets")
+        secrets_label = "Load Secrets"
+        if self.secrets_source:
+            secrets_label += f"  ·  {self.secrets_source[1]}"
+        lines.append(f" {icon(self.sections['secrets'])} {secrets_label}")
         if self.update_images:
             pull_label = "Pull Images"
             if isinstance(self.pull_service, str):
                 pull_label += f" ({self.pull_service})"
-            lines.append(f"{icon(self.sections['pull'])} {pull_label}")
+            lines.append(f" {icon(self.sections['pull'])} {pull_label}")
         lines.extend(
             [
-                f"{icon(self.sections['compose'])} Start Compose",
-                f"{icon(self.sections['health'])} Health Check",
-                f"{icon(self.sections['post_start'])} Post-Start Tasks",
+                f" {icon(self.sections['compose'])} Start Compose",
+                f" {icon(self.sections['health'])} Health Check",
+                f" {icon(self.sections['post_start'])} Post-Start Tasks",
                 "",
                 "   " + " ".join(self.service_icon(s) for s in self.services)
                 if self.services
