@@ -34,7 +34,24 @@ def parse_args():
         "--update",
         nargs="?",
         const=True,
-        help="Force docker compose pull before starting",
+        metavar="SERVICE",
+        help="Pull latest image(s) then recreate immediately; pass a service name to update and recreate only that service",
+    )
+    parser.add_argument(
+        "-uo",
+        "--update-only",
+        nargs="?",
+        const=True,
+        metavar="SERVICE",
+        help="Pull latest image(s) before the normal full startup, without scoping the recreate (optionally a single service)",
+    )
+    parser.add_argument(
+        "-r",
+        "--restart",
+        nargs="?",
+        const=True,
+        metavar="SERVICE",
+        help="Restart running containers (docker compose restart) instead of down + start; pass a service name to restart only that service",
     )
     parser.add_argument(
         "-b",

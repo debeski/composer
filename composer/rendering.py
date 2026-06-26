@@ -70,16 +70,23 @@ class RenderingMixin:
             if isinstance(self.pull_service, str):
                 pull_label += f" ({self.pull_service})"
             lines.append(f" {icon(self.sections['pull'])} {pull_label}")
-        lines.extend(
-            [
-                f" {icon(self.sections['compose'])} Start Compose",
-                f" {icon(self.sections['health'])} Health Check",
-                f" {icon(self.sections['post_start'])} Post-Start Tasks",
-                "",
-                "   " + " ".join(self.service_icon(s) for s in self.services)
-                if self.services
-                else "",
-            ]
+        if self.restart_mode:
+            compose_label = "Restart Services"
+            if isinstance(self.restart_service, str):
+                compose_label += f" ({self.restart_service})"
+        else:
+            compose_label = "Start Compose"
+            if isinstance(self.up_service, str):
+                compose_label += f" ({self.up_service})"
+        lines.append(f" {icon(self.sections['compose'])} {compose_label}")
+        lines.append(f" {icon(self.sections['health'])} Health Check")
+        if not self.restart_mode:
+            lines.append(f" {icon(self.sections['post_start'])} Post-Start Tasks")
+        lines.append("")
+        lines.append(
+            "   " + " ".join(self.service_icon(s) for s in self.services)
+            if self.services
+            else ""
         )
 
         if error_message:

@@ -3,8 +3,9 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# Check for --update flag to pull latest composer image
-if [[ "${1:-}" == "--update" ]]; then
+# `--update` as the *only* argument self-updates the Composer tool image.
+# `--update <service>` (and -u/-uo/-r) pass through to the app instead.
+if [[ $# -eq 1 && "${1:-}" == "--update" ]]; then
     # Show current version from image's VERSION file
     echo "=== Current Composer Version ==="
     docker run --rm --entrypoint cat debeski/composer:latest /app/VERSION 2>/dev/null || echo "  (not present locally)"

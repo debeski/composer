@@ -50,7 +50,9 @@ falls back to an encrypted file (`secrets.enc`, `secrets/secrets.enc`,
 | :--- | :--- |
 | `-k`, `--key` | AGE private key for the encrypted-secrets path. |
 | `-d`, `--dev` | Development mode. Loads `compose.dev.yml` on top of the base compose file (two files) and forces `DEBUG=True` / `DEBUG_STATUS=True` into every service. |
-| `-u`, `--update` | Pull the latest Composer image. |
+| `-u`, `--update [service]` | Pull the latest image(s) then recreate immediately. Pass a service name to update and recreate only that service (Compose still starts its dependencies; dependents aren't auto-restarted unless their own image changed). |
+| `-uo`, `--update-only [service]` | Pull the latest image(s) before the normal full startup, without scoping the recreate. Optionally a single service. |
+| `-r`, `--restart [service]` | Restart running containers via `docker compose restart` instead of a `--down` + start. Containers are preserved, so baked-in env vars survive. Pass a service name to restart only that service. |
 | `-b`, `--build` | Rebuild images during startup. |
 | `--down` | Stop everything. |
 | `-v`, `--volumes` | Remove volumes too. |

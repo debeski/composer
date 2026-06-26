@@ -256,9 +256,24 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         up_args = ["up", "-d"]
         if self.build_images:
             up_args.append("--build")
+        # -u <service> scopes the recreate to that service (Compose recreates it
+        # only if its image/config changed and starts its dependencies).
+        if isinstance(self.up_service, str):
+            up_args.append(self.up_service)
         return self.run_docker_compose_streaming(
             up_args,
             progress_callback=lambda line: self.emit_progress("Compose", line),
+        )
+
+    def restart_containers(self) -> Tuple[bool, str, str]:
+        self.last_progress_text = ""
+        self.last_progress_label = ""
+        restart_args = ["restart"]
+        if isinstance(self.restart_service, str):
+            restart_args.append(self.restart_service)
+        return self.run_docker_compose_streaming(
+            restart_args,
+            progress_callback=lambda line: self.emit_progress("Restart", line),
         )
 
     def down_containers(self) -> Tuple[bool, str]:

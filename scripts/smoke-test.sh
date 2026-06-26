@@ -21,7 +21,7 @@ echo "    version: image='$actual' file='$expected'"
 
 # 2. --help exposes the key CLI flags.
 help="$(run --help)"
-for flag in --down --purge --volumes --update --build --encrypt --decrypt; do
+for flag in --down --purge --volumes --update --update-only --restart --build --encrypt --decrypt; do
   echo "$help" | grep -q -- "$flag" || { echo "::error::--help is missing '$flag'"; exit 1; }
 done
 echo "    help: all expected flags present"

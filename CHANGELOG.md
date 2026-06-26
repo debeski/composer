@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.3
+- **Update-Then-Recreate (`-u`/`--update [service]`)**: `-u` now pulls the latest image(s) **and** recreates immediately in one step. With a service name it scopes both the pull and the recreate — `composer/cli.py` keeps `nargs="?"`/`const=True`, `DockerComposeLauncher` now sets `up_service` alongside `pull_service`, and `DockerComposeMixin.launch_containers()` appends the service to `up -d` so only that service is recreated (Compose still starts its dependencies; recreate is image/config-change driven, no `--force-recreate`). Native Compose semantics: dependents aren't auto-restarted unless their own image changed.
+- **Update-Only (`-uo`/`--update-only [service]`)**: New flag preserving the previous `-u` behavior — pull (optionally one service) before the normal full `up -d` startup, without scoping the recreate. Maps to `update_images`/`pull_service` without setting `up_service`.
+- **Restart (`-r`/`--restart [service]`)**: New flag that runs `docker compose restart [service]` instead of `--down` + start, preserving containers so baked-in env vars survive. Added `DockerComposeMixin.restart_containers()` and a dedicated launcher branch that resolves secrets, restarts, then monitors health (no post-start/migration hooks). `RenderingMixin.render()` is restart-aware: shows "Restart Services (svc)", hides the Pull/Post-Start rows, and labels a scoped `-u` recreate as "Start Compose (svc)".
+
 ## v1.1.2
 - **Skip Commented-Out Var Refs**: `required_compose_vars()` now strips YAML comments before scanning, so a `${VAR}` inside a full-line or trailing ` # …` comment is no longer counted as required. A mid-token `#` (e.g. `url#frag`) is preserved, so a real `${VAR}` after it still counts. Adds `ConfigMixin._COMMENT_RE`.
 

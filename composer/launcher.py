@@ -37,6 +37,9 @@ class DockerComposeLauncher(
         self.target_app = None
         self.update_images = False
         self.pull_service = None
+        self.up_service = None
+        self.restart_mode = False
+        self.restart_service = None
         self.down_mode = False
         self.down_volumes = False
         self.purge = False
@@ -94,9 +97,24 @@ class DockerComposeLauncher(
             self.target_app = args.app
             self.build_images = args.build
             if args.update:
+                # -u: pull then recreate. A service name scopes both the pull
+                # and the recreate so only that service is updated and restarted
+                # (Compose still starts its dependencies; dependents are left
+                # untouched unless their own image changed).
                 self.update_images = True
                 if isinstance(args.update, str):
                     self.pull_service = args.update
+                    self.up_service = args.update
+            elif args.update_only:
+                # -uo: pull (optionally one service) before the normal full
+                # startup, without scoping the recreate.
+                self.update_images = True
+                if isinstance(args.update_only, str):
+                    self.pull_service = args.update_only
+            if args.restart:
+                self.restart_mode = True
+                if isinstance(args.restart, str):
+                    self.restart_service = args.restart
             self.down_mode = args.down
             self.down_volumes = args.volumes
             self.purge = args.purge
@@ -182,6 +200,44 @@ class DockerComposeLauncher(
                     if not cache_ok:
                         print(f"⚠ Failed to prune build cache:\n  {cache_err.strip()}")
                 print("✅ Containers stopped")
+                return
+
+            if self.restart_mode:
+                if self.services:
+                    self.update_service_states()
+                self.render()
+
+                self.sections["secrets"] = RUNNING
+                self.render()
+                ok, err = self.resolve_secrets(args)
+                if not ok:
+                    self.sections["secrets"] = ERROR
+                    self.render(err)
+                    sys.exit(1)
+                self.sections["secrets"] = OK
+
+                self.sections["compose"] = RUNNING
+                self.render()
+                ok, out, err = self.restart_containers()
+                if not ok:
+                    self.sections["compose"] = ERROR
+                    diagnostics = self.collect_service_diagnostics()
+                    detail = self.build_failure_detail(out, err, diagnostics)
+                    self.render(f"Failed to restart containers\n\n{detail}")
+                    sys.exit(1)
+                self.sections["compose"] = OK
+
+                self.sections["health"] = RUNNING
+                self.render()
+                health_ok, health_detail = self.monitor_health()
+                if not health_ok:
+                    self.sections["health"] = ERROR
+                    self.render(health_detail)
+                    sys.exit(1)
+                self.sections["health"] = OK
+                self.render()
+
+                print("\n🎉 Services restarted")
                 return
 
             if self.services:

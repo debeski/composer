@@ -1,7 +1,8 @@
 Set-StrictMode -Version Latest
 
-# Check for --update flag to pull latest composer image
-if ($args[0] -eq "--update") {
+# `--update` as the *only* argument self-updates the Composer tool image.
+# `--update <service>` (and -u/-uo/-r) pass through to the app instead.
+if ($args.Count -eq 1 -and $args[0] -eq "--update") {
     Write-Host "=== Current Composer Version ==="
     $currentVersion = docker run --rm --entrypoint cat debeski/composer:latest /app/VERSION 2>$null
     if ($currentVersion) {
