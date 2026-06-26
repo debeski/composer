@@ -46,6 +46,51 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             ["docker-compose"] + base_args + args,
         ]
 
+    def resolve_compose_cli(self) -> List[str]:
+        """Pick the working Compose CLI once.
+
+        Interactive exec/run inherit the terminal and can't inspect captured
+        output, so the usual streaming fallback doesn't apply. Probe the plugin
+        form quietly and fall back to the legacy `docker-compose` binary.
+        """
+        ok, out, err = self.run_command(["docker", "compose", "version"], timeout=10)
+        if ok:
+            return ["docker", "compose"]
+        if self.should_fallback_to_docker_compose(out, err):
+            return ["docker-compose"]
+        return ["docker", "compose"]
+
+    def exec_in_service(
+        self,
+        service: str,
+        command: List[str],
+        manage: bool = False,
+        shell: bool = False,
+        fresh: bool = False,
+    ) -> int:
+        """Run a command inside a Compose service, attached to the terminal.
+
+        Defaults to `docker compose exec` (the running container); `fresh` uses
+        `docker compose run --rm` for a one-off container. `manage` prepends the
+        Django entrypoint; `shell` wraps the command in `sh -c`. Returns the
+        child exit code.
+        """
+        cmd = list(command)
+        if manage:
+            cmd = ["python", "manage.py"] + cmd
+        if shell:
+            cmd = ["sh", "-c", " ".join(cmd)]
+
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        action = ["run", "--rm"] if fresh else ["exec"]
+        if not interactive:
+            # Disable TTY allocation for piped/non-interactive use (CI, scripts).
+            action.append("-T")
+        action.append(service)
+
+        argv = self.resolve_compose_cli() + self.build_compose_base_args() + action + cmd
+        return self.run_command_interactive(argv, env=self.build_compose_env())
+
     def should_fallback_to_docker_compose(self, stdout: str, stderr: str) -> bool:
         combined = f"{stdout}\n{stderr}".lower()
         if "is not a docker command" in combined:

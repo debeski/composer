@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .cli import parse_args
+from .cli import parse_args, parse_run_args
 from .config import ConfigMixin
 from .constants import ERROR, IDLE, OK, RUNNING
 from .docker_compose_manager import DockerComposeMixin
@@ -71,8 +71,49 @@ class DockerComposeLauncher(
             print("\r\033[2K", end="")
         print("\nInterrupted by user. Exiting cleanly.", flush=True)
 
+    def resolve_active_compose_files(self):
+        """Populate self.active_compose_files from self.compose_file/self.dev_mode."""
+        if self.compose_file:
+            self.active_compose_files = [self.compose_file]
+            return
+        base_file = "compose.yml"
+        if not Path(base_file).exists() and Path("docker-compose.yml").exists():
+            base_file = "docker-compose.yml"
+        self.active_compose_files = [base_file]
+        if self.dev_mode:
+            self.active_compose_files.append("compose.dev.yml")
+
+    def handle_run(self, argv):
+        """`composer run [opts] <service> <command...>` — exec into a service."""
+        run_args = parse_run_args(argv)
+        if not run_args.command:
+            print(
+                "✖ run: no command given.\n"
+                "  Usage: composer run [-m] [-s] [-F] <service> <command...>",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        self.compose_file = run_args.file
+        self.dev_mode = run_args.dev
+        self.resolve_active_compose_files()
+
+        code = self.exec_in_service(
+            run_args.service,
+            run_args.command,
+            manage=run_args.manage,
+            shell=run_args.shell,
+            fresh=run_args.fresh,
+        )
+        sys.exit(code)
+
     def run(self):
         try:
+            argv = sys.argv[1:]
+            if argv and argv[0] == "run":
+                self.handle_run(argv[1:])
+                return
+
             args = parse_args()
 
             if args.version:
@@ -82,17 +123,7 @@ class DockerComposeLauncher(
             self.force_makemigrations = args.make_migrations
             self.dev_mode = args.dev
             self.compose_file = args.file
-
-            if self.compose_file:
-                self.active_compose_files = [self.compose_file]
-            else:
-                base_file = "compose.yml"
-                if not Path(base_file).exists() and Path("docker-compose.yml").exists():
-                    base_file = "docker-compose.yml"
-
-                self.active_compose_files = [base_file]
-                if self.dev_mode:
-                    self.active_compose_files.append("compose.dev.yml")
+            self.resolve_active_compose_files()
 
             self.target_app = args.app
             self.build_images = args.build

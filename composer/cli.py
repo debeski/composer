@@ -3,7 +3,18 @@ import argparse
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Launch Docker Compose environments with secrets")
+    parser = argparse.ArgumentParser(
+        description="Launch Docker Compose environments with secrets",
+        epilog=(
+            "subcommands:\n"
+            "  run [-m] [-s] [-F] <service> <command...>\n"
+            "      Run a command inside a service (docker compose exec).\n"
+            "      -m/--manage prepends 'python manage.py'; -s/--shell runs via 'sh -c';\n"
+            "      -F/--fresh starts a one-off container (docker compose run --rm).\n"
+            "      Run 'composer run --help' for details."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("-k", "--key", help="AGE secret key")
     parser.add_argument("-f", "--file", help="Specify an alternate compose file")
     parser.add_argument(
@@ -104,3 +115,43 @@ def parse_args():
     parser.add_argument("key_positional", nargs="?", help="AGE secret key (positional)")
 
     return parser.parse_args()
+
+
+def parse_run_args(argv):
+    """Parse arguments for the `run` subcommand (composer run ...)."""
+    parser = argparse.ArgumentParser(
+        prog="composer run",
+        description="Run a command inside a Compose service (docker compose exec/run).",
+    )
+    parser.add_argument(
+        "-m",
+        "--manage",
+        action="store_true",
+        help="Run as a Django management command (prepends 'python manage.py')",
+    )
+    parser.add_argument(
+        "-s",
+        "--shell",
+        action="store_true",
+        help="Run the command through a shell (sh -c) so pipes/&&/redirection work",
+    )
+    parser.add_argument(
+        "-F",
+        "--fresh",
+        action="store_true",
+        help="Start a one-off container (docker compose run --rm) instead of exec into the running one",
+    )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    parser.add_argument("service", help="Compose service name")
+    parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Command (and its arguments) to run inside the service",
+    )
+    return parser.parse_args(argv)

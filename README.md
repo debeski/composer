@@ -46,6 +46,9 @@ falls back to an encrypted file (`secrets.enc`, `secrets/secrets.enc`,
 ```
 
 ## the surface
+
+`composer run [-m] [-s] [-F] [-f FILE] [-d] <service> <command...>` runs a command inside a service instead of typing `docker exec`/`docker run` by hand. Defaults to `docker compose exec <service> …`; `-m`/`--manage` prepends `python manage.py` (e.g. `./start.sh run -m web migrate --noinput`), `-s`/`--shell` runs the command via `sh -c` so pipes/`&&` work, and `-F`/`--fresh` uses a one-off `docker compose run --rm`. TTY is auto-detected. See `composer run --help`.
+
 | flag | result |
 | :--- | :--- |
 | `-k`, `--key` | AGE private key for the encrypted-secrets path. |

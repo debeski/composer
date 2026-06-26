@@ -24,6 +24,8 @@ help="$(run --help)"
 for flag in --down --purge --volumes --update --update-only --restart --build --encrypt --decrypt; do
   echo "$help" | grep -q -- "$flag" || { echo "::error::--help is missing '$flag'"; exit 1; }
 done
+echo "$help" | grep -q -- "run " || { echo "::error::--help is missing the 'run' subcommand"; exit 1; }
+run run --help >/dev/null || { echo "::error::'run --help' failed"; exit 1; }
 echo "    help: all expected flags present"
 
 # 3. Bundled tooling is present and runnable inside the image.

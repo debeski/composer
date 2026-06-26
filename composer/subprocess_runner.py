@@ -33,6 +33,31 @@ class SubprocessRunnerMixin:
         except Exception as e:
             return False, "", str(e)
 
+    def run_command_interactive(
+        self,
+        cmd: List[str],
+        env: Optional[Dict[str, str]] = None,
+    ) -> int:
+        """Run a command attached to the current terminal (inherit stdin/out/err).
+
+        Used by the `run` subcommand so the user can drive interactive programs
+        (shells, REPLs, prompts). Returns the child's exit code (127 if the
+        executable is missing).
+        """
+        try:
+            result = subprocess.run(
+                self._prepare_command(cmd),
+                shell=sys.platform == "win32",
+                env=env,
+            )
+            return result.returncode
+        except KeyboardInterrupt:
+            raise
+        except FileNotFoundError:
+            return 127
+        except Exception:
+            return 1
+
     def run_command_streaming(
         self,
         cmd: List[str],
