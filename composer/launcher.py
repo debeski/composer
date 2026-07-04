@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .cli import parse_args, parse_run_args
+from .cli import parse_args, parse_run_args, parse_watch_args
 from .config import ConfigMixin
 from .constants import ERROR, IDLE, OK, RUNNING
 from .docker_compose_manager import DockerComposeMixin
@@ -11,7 +11,9 @@ from .health_monitor import HealthMonitorMixin
 from .post_start_hooks import PostStartHooksMixin
 from .rendering import RenderingMixin
 from .secrets_manager import SecretsMixin
+from .status_writer import StatusWriterMixin
 from .version import read_composer_version
+from .version_gate import VersionGateMixin
 
 
 class DockerComposeLauncher(
@@ -19,13 +21,14 @@ class DockerComposeLauncher(
     HealthMonitorMixin,
     ConfigMixin,
     SecretsMixin,
+    VersionGateMixin,
+    StatusWriterMixin,
     DockerComposeMixin,
     RenderingMixin,
 ):
     def __init__(self):
         self.app_url = "http://localhost"
         self.composer_version = read_composer_version()
-        self.enc_file = "./secrets.enc"
         self.loaded_secrets: List[str] = []
         self.debug_mode = False
         self.no_migrate = False
@@ -49,6 +52,17 @@ class DockerComposeLauncher(
         self.last_render_line_count = 0
         self.compose_runtime_override: Optional[Path] = None
         self.build_images = False
+
+        # Status reporting (phase 1) — opt-in via --status-file / COMPOSER_STATUS_FILE.
+        self.status_file: Optional[str] = None
+        # Version gate (phase 2) — opt-in via COMPOSER_ACTIVE_VERSION_FILE.
+        self.force = False
+        self.version_label: Optional[str] = None
+        self.active_version_file: Optional[str] = None
+        self.active_version_key: Optional[str] = None
+        self.gate_images: List[str] = []
+        self.gate_target_version: Optional[str] = None
+        self.gate_active_version: Optional[str] = None
 
         self.sections = {
             "secrets": IDLE,
@@ -113,6 +127,10 @@ class DockerComposeLauncher(
             if argv and argv[0] == "run":
                 self.handle_run(argv[1:])
                 return
+            if argv and argv[0] == "watch":
+                from .watcher import run_watch
+
+                sys.exit(run_watch(parse_watch_args(argv[1:])))
 
             args = parse_args()
 
@@ -150,6 +168,13 @@ class DockerComposeLauncher(
             self.down_volumes = args.volumes
             self.purge = args.purge
 
+            # Status reporting + version gate config (env, overridable by flags).
+            self.status_file = args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
+            self.force = args.force
+            self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
+            self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None
+            self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
+
             self.extract_config()
             if self.dev_mode:
                 # Dev mode always runs with debug on, regardless of the
@@ -157,64 +182,6 @@ class DockerComposeLauncher(
                 self.debug_mode = True
 
             self.discover_services(silent=True)
-
-            if args.encrypt:
-                public_key = (
-                    args.key
-                    or args.key_positional
-                    or os.environ.get("SOPS_AGE_PUBLIC_KEY")
-                    or input("Paste AGE public key: ").strip()
-                )
-                if public_key.startswith("AGE-SECRET-KEY-"):
-                    print(
-                        "✖ Expected a public key (age1...) but got a private key (AGE-SECRET-KEY-...)",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                in_path = args.input or ".secrets/.env"
-                out_path = args.output or self.enc_file
-                ok, out = self.encrypt_secrets_raw(
-                    public_key=public_key,
-                    input_file=args.input,
-                    output_file=args.output,
-                )
-                if not ok:
-                    print(f"✖ Encryption failed: {out}", file=sys.stderr)
-                    sys.exit(1)
-                print(f"✅ Encrypted {in_path} → {out_path}")
-                return
-
-            if args.decrypt:
-                key = (
-                    args.key
-                    or args.key_positional
-                    or os.environ.get("SOPS_AGE_KEY")
-                    or input("Paste AGE key: ").strip()
-                )
-                in_path = args.input or self.enc_file
-                out_path = args.output
-                ok, out = self.decrypt_secrets_raw(
-                    key=key,
-                    input_file=args.input,
-                    output_file=args.output,
-                )
-                if not ok:
-                    print(f"✖ Decryption failed: {out}", file=sys.stderr)
-                    if "no identity matched" in out:
-                        print(
-                            "   Hint: verify the private key matches the public key used for encryption.",
-                            file=sys.stderr,
-                        )
-                        print(
-                            "   Run: age-keygen -y .secrets/.key  (compare output with the recipient in the error above)",
-                            file=sys.stderr,
-                        )
-                    sys.exit(1)
-                if out_path:
-                    print(f"✅ Decrypted {in_path} → {out_path}")
-                else:
-                    print(out)
-                return
 
             if self.down_mode:
                 print("🛑 Stopping and removing containers...")
@@ -234,15 +201,17 @@ class DockerComposeLauncher(
                 return
 
             if self.restart_mode:
+                self.write_status("restarting")
                 if self.services:
                     self.update_service_states()
                 self.render()
 
                 self.sections["secrets"] = RUNNING
                 self.render()
-                ok, err = self.resolve_secrets(args)
+                ok, err = self.resolve_secrets()
                 if not ok:
                     self.sections["secrets"] = ERROR
+                    self.write_status("failed", error=err)
                     self.render(err)
                     sys.exit(1)
                 self.sections["secrets"] = OK
@@ -254,6 +223,7 @@ class DockerComposeLauncher(
                     self.sections["compose"] = ERROR
                     diagnostics = self.collect_service_diagnostics()
                     detail = self.build_failure_detail(out, err, diagnostics)
+                    self.write_status("failed", error=detail)
                     self.render(f"Failed to restart containers\n\n{detail}")
                     sys.exit(1)
                 self.sections["compose"] = OK
@@ -263,14 +233,17 @@ class DockerComposeLauncher(
                 health_ok, health_detail = self.monitor_health()
                 if not health_ok:
                     self.sections["health"] = ERROR
+                    self.write_status("failed", error=health_detail)
                     self.render(health_detail)
                     sys.exit(1)
                 self.sections["health"] = OK
                 self.render()
 
+                self.write_status("ready")
                 print("\n🎉 Services restarted")
                 return
 
+            self.write_status("starting")
             if self.services:
                 self.update_service_states()
             self.render()
@@ -278,32 +251,45 @@ class DockerComposeLauncher(
             self.sections["secrets"] = RUNNING
             self.render()
 
-            ok, err = self.resolve_secrets(args)
+            ok, err = self.resolve_secrets()
             if not ok:
                 self.sections["secrets"] = ERROR
+                self.write_status("failed", error=err)
                 self.render(err)
                 sys.exit(1)
             self.sections["secrets"] = OK
 
             if self.update_images:
                 self.sections["pull"] = RUNNING
+                self.write_status("pulling")
                 self.render()
                 ok, out, err = self.pull_images()
                 if not ok:
                     self.sections["pull"] = ERROR
                     detail = self.build_failure_detail(out, err)
+                    self.write_status("failed", error=detail)
                     self.render(f"Failed to pull images\n\n{detail}")
                     sys.exit(1)
                 self.sections["pull"] = OK
 
+                # Preflight version gate: refuse to recreate onto an older image
+                # version than the deployment's active one (opt-in; see
+                # VersionGateMixin). Runs after pull so the target label is local.
+                gate_ok, gate_msg = self.preflight_version_gate()
+                if not gate_ok:
+                    self.sections["compose"] = ERROR
+                    self.write_status("failed", error=gate_msg)
+                    self.render(gate_msg)
+                    sys.exit(1)
+
             self.sections["compose"] = RUNNING
+            self.write_status("recreating")
             self.render()
             if not self.discover_services():
                 self.sections["compose"] = ERROR
-                self.render(
-                    "Failed to read compose services\n\n"
-                    + (self.last_runtime_diagnostic or "Check the compose file and environment values.")
-                )
+                detail = self.last_runtime_diagnostic or "Check the compose file and environment values."
+                self.write_status("failed", error=detail)
+                self.render("Failed to read compose services\n\n" + detail)
                 sys.exit(1)
 
             ok, out, err = self.launch_containers()
@@ -311,6 +297,7 @@ class DockerComposeLauncher(
                 self.sections["compose"] = ERROR
                 diagnostics = self.collect_service_diagnostics()
                 detail = self.build_failure_detail(out, err, diagnostics)
+                self.write_status("failed", error=detail)
                 self.render(f"Failed to start containers\n\n{detail}")
                 sys.exit(1)
             self.sections["compose"] = OK
@@ -321,18 +308,22 @@ class DockerComposeLauncher(
             health_ok, health_detail = self.monitor_health()
             if not health_ok:
                 self.sections["health"] = ERROR
+                self.write_status("failed", error=health_detail)
                 self.render(health_detail)
                 sys.exit(1)
             self.sections["health"] = OK
 
             self.sections["post_start"] = RUNNING
+            self.write_status("migrating")
             self.render()
             hooks_ok, hooks_detail = self.run_post_start_hooks()
             if not hooks_ok:
                 self.sections["post_start"] = ERROR
+                self.write_status("failed", error=hooks_detail)
                 self.render(f"Failed to execute post_start commands\n\n{hooks_detail}")
             else:
                 self.sections["post_start"] = OK
+                self.write_status("ready")
                 self.render()
 
             print("\n🎉 Environment ready")

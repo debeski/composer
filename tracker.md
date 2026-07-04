@@ -2,23 +2,24 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Docker Compose orchestration tool for SOPS-encrypted secrets, health checks, and post-start hooks.
+- Composer is a Docker Compose orchestration tool for plaintext env secrets, health checks, and post-start hooks.
+- (v1.1.5) SOPS/AGE removed entirely: secrets resolve ONLY from a plaintext env file (`.env`→`secrets/.env`→`.secrets/.env`). Dropped from `secrets_manager.py`: `decrypt/encrypt_secrets_raw()`, `encrypted_secrets_path()`, `ENCRYPTED_CANDIDATES`, `parse_dotenv_text()`, `enc_file`; `resolve_secrets()` takes NO args. CLI dropped `-k`/`--encrypt`/`--decrypt`/`-i`/`-o`/`key_positional`. `Dockerfile` no longer installs `age`/`sops`; `entrypoint.sh` = `exec python -m composer "$@"` only; `smoke-test.sh` crypto checks removed. `secrets_source` is now a plaintext path string; render always shows `🔓 PLAINTEXT <path>`.
 - The modular implementation now lives under `composer/` with entrypoints `python -m composer` and `python composer/main.py`.
 - `composer/main.py` delegates to `DockerComposeLauncher` in `composer/launcher.py`.
-- Mixins split behavior into CLI parsing, config extraction, Docker Compose operations, health monitoring, rendering, secrets handling, subprocess running, post-start hooks, output utilities, and version loading.
-- `composer/version.py` reads the repo-level `VERSION` file; the current repo version is `1.1.3` (`v1.0.0`→`v1.1.2` all tagged+published; `v1.1.3` in-progress, NOT yet tagged). ALWAYS re-run `git tag` before editing CHANGELOG — releases get tagged mid-session; never edit a tagged version's entry.
+- Mixins split behavior into CLI parsing, config extraction, Docker Compose operations, health monitoring, rendering, secrets handling, subprocess running, post-start hooks, output utilities, version loading, deploy-status writing (`status_writer.py`), and the preflight version gate (`version_gate.py`). Subcommands intercepted before flat parse: `run` (exec/run) and `watch` (resident updater → `watcher.py:run_watch()`).
+- `watch` subcommand (v1.1.5): `composer watch --trigger-file PATH [--interval N][--status-file PATH][-f][-d][--once]` watches a trigger file; on a new token (or file mtime) shells `python -m composer -uo` in a child (keeps one-shot semantics), writes `<trigger>.ack` (atomic, token+exit+ts) so a request runs once + survives restart. Child owns `COMPOSER_STATUS_FILE`; watcher owns ack. Trigger-driven, NOT registry-polling. `cli.parse_watch_args()`.
+- `composer/version.py` reads the repo-level `VERSION` file; the current repo version is `1.1.5` (`v1.0.0`→`v1.1.4` all tagged+published; `v1.1.5` in-progress, NOT yet tagged). ALWAYS re-run `git tag` before editing CHANGELOG — releases get tagged mid-session; never edit a tagged version's entry.
 - Update/restart flags (v1.1.3): `-u`/`--update [svc]` pulls then recreates immediately (scoped pull+`up -d <svc>` when a service is named; native Compose recreate-if-changed, no force, dependents not cascaded). `-uo`/`--update-only [svc]` = the old `-u` (pull then full `up -d`, no scoped recreate). `-r`/`--restart [svc]` runs `docker compose restart [svc]` via a dedicated launcher branch (resolve secrets → restart → health; no post-start hooks), preserving containers/env. Launcher fields `up_service`/`restart_mode`/`restart_service`; `DockerComposeMixin.restart_containers()`; render restart-aware. Wrapper `start.sh`/`start.ps1` self-update only when `--update` is the SOLE arg, so `--update <svc>` passes through.
 - `run` subcommand (v1.1.3): `composer run [-m][-s][-F][-f FILE][-d] <service> <command...>` → `docker compose exec <svc> <cmd...>` (or `run --rm` with `-F`). `-m`=prepend `python manage.py`, `-s`=`sh -c` wrap, TTY auto (`-T` when non-interactive). Intercepted as `argv[1]=="run"` BEFORE flat `parse_args()` (avoids `key_positional` clash) → `handle_run()` → `exec_in_service()`; new `SubprocessRunnerMixin.run_command_interactive()` (inherited stdio) + `DockerComposeMixin.resolve_compose_cli()` (one-shot plugin/legacy probe). Compose-file resolution extracted to `launcher.resolve_active_compose_files()` (reused by both paths). No secret resolution (exec uses container's baked env; Compose only warns on unset vars). `cli.parse_run_args()`; documented in main `--help` epilog + `composer run --help`.
-- Default secrets flow is plaintext-first: `SecretsMixin.resolve_secrets()` tries `.env`→`secrets/.env`→`.secrets/.env`, using the first that satisfies `ConfigMixin.required_compose_vars()`; else falls back to encrypted `secrets.enc`/`secrets/secrets.enc`/`.secrets/secrets.enc`, prompting for the AGE key unless `-k`/positional/`SOPS_AGE_KEY` given.
+- Secrets flow is plaintext-only: `SecretsMixin.resolve_secrets()` tries `.env`→`secrets/.env`→`.secrets/.env`, using the first that satisfies `ConfigMixin.required_compose_vars()`; no encrypted fallback (removed v1.1.5). On failure it reports the missing vars from the first incomplete candidate, or "No secrets source found".
 - `required_compose_vars()` = `${VAR}` refs (skips `:-`/`-`/`:+`/`+` defaults) MINUS YAML-comment refs (strips full-line + trailing ` #…`, keeps mid-token `url#frag`) MINUS `$$`-escaped shell vars MINUS vars the compose supplies itself. `_compose_env_keys()` collects `environment:` keys assigned a concrete literal value (mapping + list form); bare `- KEY` pass-throughs and interpolated `KEY: ${KEY}` values stay required. `-sd`/`--skip-decrypt` removed entirely. `launcher.secrets_source` drives the UI label/flag.
 - `-d`/`--dev` = compose.dev.yml two-file override AND forces debug on: `sync_runtime_compose_override()` injects `DEBUG: "True"` + `DEBUG_STATUS: "True"` into every service (override applied last, wins over compose), `build_compose_env()` exports `DEBUG`/`DEBUG_STATUS=True` (for `${...}` interpolation), launcher forces `debug_mode` UI flag, and `DEBUG`+`DEBUG_STATUS`+`NGINX_PORT` are in `resolve_secrets()`'s injected set so they never read as missing required vars.
 - Tag-driven release via `.github/workflows/release.yml` (`v*` tags → verify tag==VERSION → build amd64 + `scripts/smoke-test.sh` gate → multi-arch buildx push `debeski/composer:<ver>` + `:latest` to Docker Hub → GitHub Release from CHANGELOG section). `.github/workflows/ci.yml` runs compileall + CLI smoke + amd64 build + smoke tests on main. Needs repo secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`. See `docs/RELEASING.md`.
-- `scripts/smoke-test.sh <image>` runtime-gates pushes: version==VERSION, `--help` flags, age/sops/docker/compose runnable, keygen route, age+sops encrypt/decrypt round trip.
+- `scripts/smoke-test.sh <image>` runtime-gates pushes: version==VERSION, `--help` flags (`--down`/`--purge`/`--volumes`/`--update`/`--update-only`/`--restart`/`--build`), `run` subcommand + `run --help`, docker/compose runnable. (Crypto checks removed v1.1.5.)
 - Runtime compose override injection now exports `COMPOSER_VERSION` in `composer/docker_compose_manager.py`.
 - Wrapper scripts now target `debeski/composer:latest`.
 - Dockerfile copies `composer/` to `/app/composer`, sets `WORKDIR /app`, exports `PYTHONPATH=/app`, copies `VERSION`, and uses `/app/entrypoint.sh`.
-- `entrypoint.sh` routes default app behavior to `python -m composer "$@"`.
-- AGE key-based encryption/decryption remains supported; passphrase-based encryption/decryption has been removed as obsolete.
+- `entrypoint.sh` is now just `exec python -m composer "$@"` (all crypto/keygen routes removed v1.1.5).
 - `start.sh` now targets `debeski/composer:latest` and only passes `-it` when run from an interactive terminal.
 - `composer/__pycache__/` is generated by local Python checks and should not be committed.
 - `-p`/`--purge` is a `--down` child: `down --rmi local -v --remove-orphans` + `docker builder prune -f` (dangling BuildKit cache); implies `-v`.
@@ -39,60 +40,40 @@
 - Do not commit generated caches such as `__pycache__`.
 
 ### Cross-Cutting Audits if any:
-- Modular review found and fixed:
-  - [x] `sops` key handling no longer mutates global `os.environ`.
-  - [x] Cleanup no longer removes a user's pre-existing `SOPS_AGE_KEY`.
-  - [x] Windows subprocess calls convert argv lists to a shell-safe command string when `shell=True`.
-  - [x] Compose fallback now tries `docker-compose` when the `docker` executable is missing, not only when the compose plugin is missing.
-  - [x] Removed generated `composer/__pycache__/` from the worktree after review checks.
-- Image wiring/build audit found and fixed:
-  - [x] Dockerfile no longer copies deleted `start.py`; it copies `composer/`.
-  - [x] Dockerfile sets `WORKDIR /app` so `python -m composer` imports correctly.
-  - [x] Dockerfile exports `PYTHONPATH=/app` so wrapper `-w <project>` does not break module imports.
-  - [x] Entrypoint default path now runs `python -m composer`.
-  - [x] Keygen route suppresses duplicate `age-keygen` public-key output.
-  - [x] Removed obsolete passphrase branches from Python and shell entrypoints.
+- Prior audits (resolved): Windows `shell=True` argv → shell-safe string; compose fallback to `docker-compose` when `docker` exe missing; Dockerfile copies `composer/`, sets `WORKDIR /app`+`PYTHONPATH=/app`; no `__pycache__` committed. (SOPS/keygen/passphrase audit items obsolete after v1.1.5 crypto removal.)
 
 ### Current Project's Unsolved Known Bugs:
 - No new code-level bugs verified in `composer/` after the current review/build pass.
 - Manual Docker runtime validations are still pending because they require a compose fixture/project and Docker daemon behavior.
 
-### Incomplete Tasks:
-- Priority 1:
-  - [ ] Manually verify plaintext-first resolution against a real compose project (complete `.env` → no key prompt; incomplete `.env` → encrypted fallback + key prompt; encrypted-only project).
-  - [ ] Manually verify `python -m composer` startup against a compose project with a service `build:` step.
-  - [ ] Manually verify a launched container can read `COMPOSER_VERSION`.
-  - [ ] Manually verify failure output for a container that exits with code 1.
-  - [ ] Manually verify failure output for a failing `post_start` command.
-- Priority 2:
-  - [ ] Manually verify `start.ps1` behavior on Windows after the Composer rename.
+### Incomplete Tasks (Composer-as-updater project — cross-repo; backend DONE+tested):
+- Priority 1 (remaining):
+  - [ ] dlux FRONTEND: wire image-update button + status into `dlux/static/dlux/main/js/updater.js` + `dlux/templates/dlux/includes/options.html` (backend API `POST sys/api/dlux-update/image/` + state fields `image_update_available`/`image_update` are done). Only remaining piece; browser-untestable here.
+  - [ ] LIVE verification (needs a real stack + Docker daemon): end-to-end image update — dlux queue → backup → maintenance → composer pull/gate/recreate/migrator → new dlux boot finalizes from deploy-status.json; confirm maintenance lifts correctly (reconcile clears on baked advance; finalize clears on gate-block/no-recreate).
+  - [ ] Build/push `debeski/composer:1.1.5` (compose pins it) and confirm slimmer image runs the smoke test.
+- Design notes (verified):
+  - dlux `reconcile()`→`_reset_to_baked_image` already resets runtime→baked AND clears maintenance (service.py:341) on image swap; composer does NOT manage the runtime volume.
+  - HAZARD avoided: `_recover_interrupted_run` (service.py:373-426) false-fails any active non-queued run on boot → image updates use a SEPARATE `DluxImageUpdate` path (no `active_run_token`), so that recovery never touches them.
+- Priority 2 (verification, still pending):
+  - [ ] Verify plaintext resolution against a real compose project (complete `.env` → ok; incomplete `.env` → clear missing-vars error).
+  - [ ] Verify `python -m composer` startup with a service `build:` step; container reads `COMPOSER_VERSION`; failure output for exit-1 container and failing `post_start`.
+  - [ ] Rebuild/push `debeski/composer:1.1.5` and confirm the slimmer image (no age/sops) still runs the smoke test.
 - Completed Recently:
-  - [x] (v1.1.3) Added `run` subcommand (`composer run [-m][-s][-F] <svc> <cmd...>` → compose exec/run) with interactive stdio runner, compose-CLI probe, REMAINDER command capture, main-help epilog + `run --help`, smoke-test checks; appended to `## v1.1.3` CHANGELOG + README.
-  - [x] (v1.1.3) Redefined `-u`/`--update` to pull+recreate (scoped `up -d <svc>`), added `-uo`/`--update-only` (old `-u` behavior) and `-r`/`--restart [svc]` (`docker compose restart`, secrets+health, no hooks); restart-aware render; wrappers self-update only on sole `--update`; smoke-test asserts new flags; README/CHANGELOG/VERSION→1.1.3 (v1.1.2 already tagged/published).
-  - [x] (v1.1.2) `required_compose_vars()` now strips YAML comments (`_COMMENT_RE`) so commented-out `${VAR}` refs aren't required; new `## v1.1.2` entry, VERSION→1.1.2 (v1.1.1 already tagged/published).
-  - [x] (v1.1.1) Fixed required-var false positives: strip `$$` escapes before scanning and subtract literal-valued `environment:` keys via `ConfigMixin._compose_env_keys()`; new `## v1.1.1` CHANGELOG entry, VERSION→1.1.1 (v1.1.0 already tagged/published).
-  - [x] Made plaintext-first secrets resolution the default, removed `-sd`/`--skip-decrypt` (cli/launcher/rendering/secrets_manager), added `required_compose_vars()` + `resolve_secrets()`, refreshed the UI panel, bumped VERSION→1.1.0 with `## v1.1.0` CHANGELOG + README updates.
-  - [x] Made `-d`/`--dev` force `DEBUG=True` into every service (runtime override + compose env + UI flag), excluded from required-secret check.
-  - [x] Reviewed modular package split against current `start.py` behavior.
-  - [x] Fixed secret env isolation in `composer/secrets_manager.py`.
-  - [x] Fixed command preparation in `composer/subprocess_runner.py`.
-  - [x] Fixed compose fallback detection in `composer/docker_compose_manager.py`.
-  - [x] Built and loaded `debeski/composer:alpha` during earlier image wiring checks.
-  - [x] Smoke-tested image version, direct module import, bundled VERSION path, keygen route, SOPS, and Docker Compose plugin.
-  - [x] Fixed wrapper workdir import failure reported from `./start.sh --version`.
-  - [x] Updated `start.sh` and `start.ps1` to use `debeski/composer:latest`.
-  - [x] Removed obsolete `--passphrase` / `-p` support from CLI, launcher, secrets manager, shell entrypoint, and docs.
-  - [x] Built and loaded `debeski/composer:latest` and verified version/help output after the rename cleanup.
-  - [x] Updated tracker to required structure.
-  - [x] Added `-p`/`--purge` `--down` child flag (cli, launcher, docker_compose_manager) with dangling build-cache prune; reused the freed `-p` short flag.
-  - [x] Renumbered CHANGELOG to `## vX.Y.Z` headers (history → `v0.1.x`, rebrand → `v1.0.0`), added Docker Hub release + CI workflows and `docs/RELEASING.md`; `v1.0.0` published to Docker Hub + GitHub.
-  - [x] Added `scripts/smoke-test.sh` runtime gate, wired it into release (pre-push) and CI; bumped `VERSION`→`1.0.1` with `## v1.0.1` CHANGELOG entry.
+  - [x] (cross-repo) decrees `v2.1.6`: 3+1 network model (frontend/egress/internal/docker_proxy), `docker-socket-proxy` (least-priv) + `composer-updater` (`watch`, pinned 1.1.5, `${PWD}:${PWD}`, gate-wired) services; `docker compose config` validates clean. Dockerfile `LABEL org.decrees.dlux_baked_version` + release.yml build-arg (→1.2.10). CHANGELOG + config/VERSION→2.1.6.
+  - [x] (cross-repo) dlux `v1.3.1`: SEPARATE lightweight image-update path — `DluxImageUpdate` model + migration 0008 (additive/inline-safe), `updater/image_update.py` (availability/queue/trigger/serialize), `UpdateService.tick_image_update/_begin/_finalize/_complete/_fail`, worker-loop wiring, `POST .../dlux-update/image/` view + state-endpoint fields. Reuses `_create_backup`/maintenance/check-interval. Does NOT touch DluxUpdateRun recovery. TESTED vs real DB (availability, queue guard, begin→trigger, finalize wait/ready/failed + maintenance) and existing 45 updater tests still pass; `makemigrations --check` clean. Manifest→1.3.1 + CHANGELOG. Frontend UI pending.
+  - [x] (v1.1.5) `watch` resident-updater subcommand (`watcher.py`, `cli.parse_watch_args`, launcher `argv[1]=="watch"` intercept): trigger-file → child `-uo` → `<trigger>.ack`. Verified via stubbed subprocess: token detect (json/mtime/missing), process-once+ack, idempotent same-token, re-run new-token. README/CHANGELOG/smoke-test updated.
+  - [x] (v1.1.5) Phase 1 status writer: `status_writer.py` `StatusWriterMixin.write_status()` (atomic JSON temp+replace, opt-in via `--status-file`/`COMPOSER_STATUS_FILE`); launcher writes starting/pulling/recreating/migrating/ready/failed (+ restart branch restarting/ready/failed). Payload: status, updated_at(UTC ISO), composer_version, compose_files, +gate fields. Verified via stubbed unit test.
+  - [x] (v1.1.5) Phase 2 version gate: `version_gate.py` `VersionGateMixin.preflight_version_gate()` runs after pull (before recreate) on `-u`/`-uo`; reads target via `docker image inspect` label (`COMPOSER_VERSION_LABEL`, default `org.opencontainers.image.version`) + active via JSON `COMPOSER_ACTIVE_VERSION_FILE`+`COMPOSER_ACTIVE_VERSION_KEY`(default `version`). Blocks target<active unless `--force`; disabled if no active-version file; dep-free `parse_version`. Added `--force`+`--status-file` CLI. Verified: block/pass/force/disabled/no-label + status write all pass.
+  - [x] (v1.1.5) Phase 2 decrees hook: `project-decrees/Dockerfile` adds `ARG DLUX_BAKED_VERSION` + `LABEL org.decrees.dlux_baked_version`; `release.yml` derives it from pinned `django-lux[updater]==1.2.10` in requirements.txt and passes `build-args`. Extraction verified →`1.2.10`.
+  - [x] (v1.1.5) Removed SOPS/AGE entirely (secrets_manager/cli/launcher/rendering, Dockerfile age+sops, entrypoint routes, smoke-test crypto, README); plaintext-only secrets; VERSION→1.1.5, `## v1.1.5` CHANGELOG (v1.1.4 already tagged/published). Verified: `compileall` OK, no leftover crypto refs, `--version`=1.1.5, `--help` clean.
+  - [x] (v1.1.2-1.1.4) `run` subcommand, `-u`/`-uo`/`-r` update/restart flags, `required_compose_vars()` YAML-comment/`$$`/literal-env handling, plaintext-first default (`-sd` removed), `-d`/`--dev` forces `DEBUG=True`. (See snapshot.)
+  - [x] (v1.0.x) Composer rebrand, `-p`/`--purge`, tag-driven release + CI workflows + `docs/RELEASING.md`, `scripts/smoke-test.sh` gate.
 
 ### One-line info about last verified Tests:
-- Verified on 2026-06-26 (v1.1.3): `python3 -m compileall composer` OK; argparse confirms `-uo`≠`-u` and all flags accept `[SERVICE]`; `run` argv assembly correct for exec/`-m`/`-s`(single `sh -c` token)/`-F`/`-d`/`-f`; `run --help` + main-help epilog render; restart/scoped-update render panels OK. Docker runtime path (live pull/recreate/restart + `run` exec against a running project) still pending.
+- Verified 2026-07-04 (v1.1.5): `compileall composer` OK; no leftover crypto refs; `--version`→1.1.5; `--help` has `--force`/`--status-file`, no crypto flags. Stubbed unit tests: `parse_version`/`_version_lt`, `read_active_version`(+dotted key/broken json), gate block/pass/force/disabled/no-label, atomic status write w/ gate fields. Decrees baked-version grep→`1.2.10`. Docker image rebuild + live runtime path still pending.
 
 ### One-line info about last time edited Docs:
-- Edited `README.md` (flag table + `run` blurb), `CHANGELOG.md` (`## v1.1.3`: update/restart flags + `run` subcommand), `tracker.md` on 2026-06-26; `VERSION`→`1.1.3`.
+- Edited `README.md` (status file + version gate + new flags; SOPS/AGE removed), `CHANGELOG.md` (`## v1.1.5`: status writer + version gate + SOPS/AGE removal), `tracker.md` on 2026-07-04; `VERSION`→`1.1.5`.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:
@@ -101,11 +82,10 @@
 - `collect_service_diagnostics()` gathers `docker compose ps --all` plus targeted failed-service logs.
 - `read_composer_version()` reads the bundled/repo `VERSION` file and falls back to `0.0.0`.
 - `sync_runtime_compose_override()` writes a temporary compose override to inject `COMPOSER_VERSION`.
-- `encrypt_secrets_raw(public_key=...)` and `decrypt_secrets_raw(key=...)` support AGE-key workflows.
 
 ### Global Rulesets:
 - Down mode bypasses normal startup flow: no secrets, no health checks, no post-start hooks.
-- If compose config depends on decrypted env vars, allow initial service discovery to fail and retry after secrets load.
+- If compose config depends on env vars not yet loaded, allow initial service discovery to fail and retry after secrets load.
 - If launcher-owned values should reach all containers, prefer generating a temporary compose override.
 - Preserve existing user/worktree changes; do not revert unrelated modified files.
 - Re-read `tracker.md` at the start of every turn and update it after meaningful project state changes.

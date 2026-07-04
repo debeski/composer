@@ -11,11 +11,14 @@ def parse_args():
             "      Run a command inside a service (docker compose exec).\n"
             "      -m/--manage prepends 'python manage.py'; -s/--shell runs via 'sh -c';\n"
             "      -F/--fresh starts a one-off container (docker compose run --rm).\n"
-            "      Run 'composer run --help' for details."
+            "      Run 'composer run --help' for details.\n"
+            "  watch --trigger-file PATH [--interval N]\n"
+            "      Resident updater: watch a trigger file and run a full update\n"
+            "      (pull + version gate + recreate + health + post_start) on each\n"
+            "      new request. Run 'composer watch --help' for details."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-k", "--key", help="AGE secret key")
     parser.add_argument("-f", "--file", help="Specify an alternate compose file")
     parser.add_argument(
         "-d",
@@ -71,6 +74,16 @@ def parse_args():
         help="Force build of images before starting containers (--build)",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the preflight version gate (allow updating onto an older image version)",
+    )
+    parser.add_argument(
+        "--status-file",
+        metavar="PATH",
+        help="Write a JSON deploy-status file to PATH (overrides COMPOSER_STATUS_FILE)",
+    )
+    parser.add_argument(
         "--down",
         action="store_true",
         help="Run docker compose down instead of up",
@@ -88,31 +101,10 @@ def parse_args():
         help="Purge with --down: remove built untagged images, volumes, networks, orphans, and dangling build cache",
     )
     parser.add_argument(
-        "--decrypt",
-        action="store_true",
-        help="Decrypt an encrypted file and print to stdout",
-    )
-    parser.add_argument(
-        "--encrypt",
-        action="store_true",
-        help="Encrypt a plaintext file (requires -k for public key)",
-    )
-    parser.add_argument(
-        "-i",
-        "--input",
-        help="Input file path for --encrypt/--decrypt (default: .secrets/.env or secrets.enc)",
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        help="Output file path for --encrypt/--decrypt (default: stdout for decrypt, secrets.enc for encrypt)",
-    )
-    parser.add_argument(
         "--version",
         action="store_true",
         help="Print Composer version and exit",
     )
-    parser.add_argument("key_positional", nargs="?", help="AGE secret key (positional)")
 
     return parser.parse_args()
 
@@ -153,5 +145,50 @@ def parse_run_args(argv):
         "command",
         nargs=argparse.REMAINDER,
         help="Command (and its arguments) to run inside the service",
+    )
+    return parser.parse_args(argv)
+
+
+def parse_watch_args(argv):
+    """Parse arguments for the `watch` subcommand (composer watch ...)."""
+    parser = argparse.ArgumentParser(
+        prog="composer watch",
+        description=(
+            "Resident updater. Watches a trigger file and, on each new request "
+            "(a changed token / mtime), runs a full update via 'composer -uo' "
+            "(pull + version gate + recreate + health + post_start). Records the "
+            "processed token in <trigger-file>.ack so a request survives restarts "
+            "and is not re-run."
+        ),
+    )
+    parser.add_argument(
+        "--trigger-file",
+        required=True,
+        metavar="PATH",
+        help="File watched for update requests (JSON with a 'token', or any file — mtime is the token)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=15.0,
+        metavar="SECONDS",
+        help="Seconds between trigger checks (default: 15, min 2)",
+    )
+    parser.add_argument(
+        "--status-file",
+        metavar="PATH",
+        help="Deploy-status file for each update run (exported as COMPOSER_STATUS_FILE to the child)",
+    )
+    parser.add_argument("-f", "--file", help="Alternate compose file (passed through to each update)")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Use the dev compose files for each update (adds compose.dev.yml)",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Process at most one pending request, then exit (for testing)",
     )
     return parser.parse_args(argv)

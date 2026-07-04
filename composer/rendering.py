@@ -28,11 +28,7 @@ class RenderingMixin:
         if self.debug_mode:
             active_flags.append("\033[93m🪲  DEBUG MODE\033[0m")
         if self.secrets_source:
-            kind, path = self.secrets_source
-            if kind == "encrypted":
-                active_flags.append(f"\033[92m🔐 DECRYPTED {path}\033[0m")
-            else:
-                active_flags.append(f"\033[93m🔓 PLAINTEXT {path}\033[0m")
+            active_flags.append(f"\033[93m🔓 PLAINTEXT {self.secrets_source}\033[0m")
         if self.no_migrate:
             active_flags.append("\033[93m⏭️  SKIP MIGRATIONS\033[0m")
         if self.force_makemigrations:
@@ -63,7 +59,7 @@ class RenderingMixin:
 
         secrets_label = "Load Secrets"
         if self.secrets_source:
-            secrets_label += f"  ·  {self.secrets_source[1]}"
+            secrets_label += f"  ·  {self.secrets_source}"
         lines.append(f" {icon(self.sections['secrets'])} {secrets_label}")
         if self.update_images:
             pull_label = "Pull Images"
