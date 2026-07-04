@@ -23,7 +23,72 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
+
+from .registry import remote_tag_digest
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _local_repo_digest(image: str) -> Optional[str]:
+    """The digest the local image for `image` was pulled at (its RepoDigest),
+    via `docker image inspect` (honors DOCKER_HOST). None if not present."""
+    repo = str(image).split("@", 1)[0].rsplit(":", 1)[0]
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        digests = json.loads(proc.stdout.strip() or "[]")
+    except ValueError:
+        return None
+    for entry in digests:
+        if isinstance(entry, str) and entry.startswith(f"{repo}@"):
+            return entry.split("@", 1)[1]
+    if digests and isinstance(digests[0], str) and "@" in digests[0]:
+        return digests[0].split("@", 1)[1]
+    return None
+
+
+def check_availability(images: List[str]) -> Tuple[bool, list]:
+    """Compare each image's remote tag digest to its local pulled digest."""
+    token = os.environ.get("COMPOSER_REGISTRY_TOKEN") or None
+    results = []
+    any_new = False
+    for image in images:
+        remote = remote_tag_digest(image, token=token)
+        local = _local_repo_digest(image)
+        # A difference (or a remote we have never pulled) means an update exists.
+        # An unreadable remote is "unknown" — never a false positive.
+        new = bool(remote) and remote != local
+        any_new = any_new or new
+        results.append({
+            "image": image,
+            "remote_digest": remote,
+            "local_digest": local,
+            "update_available": new,
+        })
+    return any_new, results
+
+
+def write_availability(path: str, images: List[str]):
+    any_new, results = check_availability(images)
+    payload = {"available": any_new, "checked_at": _now_iso(), "images": results}
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.tmp")
+        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        pass
 
 
 def _read_request_token(trigger: Path) -> Optional[str]:
@@ -81,14 +146,32 @@ def run_watch(args) -> int:
     if args.status_file:
         env["COMPOSER_STATUS_FILE"] = args.status_file
 
+    # Optional registry-availability check: publish whether a newer image than
+    # the running one exists, so another process (dlux) can offer an update.
+    check_images = list(getattr(args, "check_image", None) or [])
+    availability_file = getattr(args, "availability_file", None)
+    check_interval = max(60.0, float(getattr(args, "check_interval", 3600.0) or 3600.0))
+    availability_enabled = bool(check_images and availability_file)
+    next_check = 0.0  # run the first availability check immediately
+
+    def maybe_check_availability(force=False):
+        nonlocal next_check
+        if not availability_enabled:
+            return
+        if force or time.monotonic() >= next_check:
+            write_availability(availability_file, check_images)
+            next_check = time.monotonic() + check_interval
+
     last_token = _read_ack_token(ack)
     print(
-        f"👀 composer watch — trigger={trigger} interval={interval:g}s "
-        f"(last processed: {last_token or 'none'})",
+        f"👀 composer watch — trigger={trigger} interval={interval:g}s"
+        + (f" · availability check every {check_interval:g}s for {', '.join(check_images)}"
+           if availability_enabled else ""),
         flush=True,
     )
 
     while True:
+        maybe_check_availability()
         token = _read_request_token(trigger)
         if token and token != last_token:
             print(
@@ -100,6 +183,9 @@ def run_watch(args) -> int:
             last_token = token
             result = "ready" if proc.returncode == 0 else f"failed (exit {proc.returncode})"
             print(f"✔ update {token} → {result}", flush=True)
+            # The running image just changed — refresh availability so the
+            # "update available" signal clears promptly.
+            maybe_check_availability(force=True)
             if args.once:
                 return proc.returncode
         elif args.once:

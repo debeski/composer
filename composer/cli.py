@@ -187,6 +187,24 @@ def parse_watch_args(argv):
         help="Use the dev compose files for each update (adds compose.dev.yml)",
     )
     parser.add_argument(
+        "--check-image",
+        action="append",
+        metavar="IMAGE",
+        help="Image ref to poll the registry for a newer digest (repeatable); enables the availability check",
+    )
+    parser.add_argument(
+        "--check-interval",
+        type=float,
+        default=3600.0,
+        metavar="SECONDS",
+        help="Seconds between registry availability checks (default: 3600, min 60)",
+    )
+    parser.add_argument(
+        "--availability-file",
+        metavar="PATH",
+        help="Write image-update availability JSON to PATH (requires --check-image)",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Process at most one pending request, then exit (for testing)",
