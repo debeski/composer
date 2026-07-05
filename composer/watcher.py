@@ -146,6 +146,15 @@ def run_watch(args) -> int:
     if args.status_file:
         env["COMPOSER_STATUS_FILE"] = args.status_file
 
+    # Console log for the live progress page: the -uo child appends clean,
+    # ANSI-free progress lines to this file (via COMPOSER_LOG_FILE). Defaults to
+    # a sibling of the status file so a proxy can serve both from one dir.
+    log_file = getattr(args, "log_file", None)
+    if not log_file and args.status_file:
+        log_file = str(Path(args.status_file).with_name("deploy-log.txt"))
+    if log_file:
+        env["COMPOSER_LOG_FILE"] = log_file
+
     # Optional registry-availability check: publish whether a newer image than
     # the running one exists, so another process (dlux) can offer an update.
     check_images = list(getattr(args, "check_image", None) or [])
@@ -178,6 +187,13 @@ def run_watch(args) -> int:
                 f"⟳ update request {token} — running `composer -uo`",
                 flush=True,
             )
+            # Fresh console log per update run (the child appends to it).
+            if log_file:
+                try:
+                    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+                    Path(log_file).write_text("", encoding="utf-8")
+                except OSError:
+                    pass
             proc = subprocess.run(child, env=env)
             _write_ack(ack, token, proc.returncode)
             last_token = token

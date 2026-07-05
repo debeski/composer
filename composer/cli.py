@@ -179,6 +179,11 @@ def parse_watch_args(argv):
         metavar="PATH",
         help="Deploy-status file for each update run (exported as COMPOSER_STATUS_FILE to the child)",
     )
+    parser.add_argument(
+        "--log-file",
+        metavar="PATH",
+        help="Console log file for each update run (default: 'deploy-log.txt' beside --status-file); exported as COMPOSER_LOG_FILE",
+    )
     parser.add_argument("-f", "--file", help="Alternate compose file (passed through to each update)")
     parser.add_argument(
         "-d",

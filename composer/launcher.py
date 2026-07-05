@@ -55,6 +55,8 @@ class DockerComposeLauncher(
 
         # Status reporting (phase 1) — opt-in via --status-file / COMPOSER_STATUS_FILE.
         self.status_file: Optional[str] = None
+        # Console log — opt-in via COMPOSER_LOG_FILE (set by `composer watch`).
+        self.log_file: Optional[str] = None
         # Version gate (phase 2) — opt-in via COMPOSER_ACTIVE_VERSION_FILE.
         self.force = False
         self.version_label: Optional[str] = None
@@ -170,6 +172,7 @@ class DockerComposeLauncher(
 
             # Status reporting + version gate config (env, overridable by flags).
             self.status_file = args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
+            self.log_file = os.environ.get("COMPOSER_LOG_FILE") or None
             self.force = args.force
             self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
             self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None

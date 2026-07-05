@@ -28,6 +28,12 @@ class StatusWriterMixin:
     )
 
     def write_status(self, state: str, *, error: Optional[str] = None, extra: Optional[dict] = None):
+        # Mirror the phase (and any error) into the console log — independent of
+        # the status file, so a live progress page can show a readable timeline.
+        if hasattr(self, "append_console"):
+            self.append_console(f"— {state} —")
+            if error:
+                self.append_console(str(error))
         path = getattr(self, "status_file", None)
         if not path:
             return

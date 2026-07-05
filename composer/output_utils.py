@@ -83,12 +83,27 @@ class OutputUtilsMixin:
             return line
         return None
 
+    def append_console(self, text: str):
+        """Append a clean, ANSI-free line to COMPOSER_LOG_FILE (if set), so a
+        resident watcher / proxy can serve a live console for the update. The
+        terminal panel is unaffected; this is a separate, append-only record."""
+        path = getattr(self, "log_file", None)
+        if not path:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                for line in str(text).splitlines() or [""]:
+                    handle.write(line.rstrip() + "\n")
+        except OSError:
+            pass
+
     def emit_progress(self, label: str, raw_line: str):
         message = self.extract_progress_message(raw_line)
         if not message or message == self.last_progress_text:
             return
         self.last_progress_text = message
         self.last_progress_label = label
+        self.append_console(f"[{label}] {message}")
         print(f"\r\033[2K   [{label}] {message}", end="", flush=True)
 
     def emit_status(self, label: str, message: str):
@@ -96,4 +111,5 @@ class OutputUtilsMixin:
             return
         self.last_progress_text = message
         self.last_progress_label = label
+        self.append_console(f"[{label}] {message}")
         print(f"\r\033[2K   [{label}] {message}", end="", flush=True)
