@@ -29,6 +29,22 @@ _MANIFEST_ACCEPT = ", ".join([
     "application/vnd.docker.distribution.manifest.v2+json",
 ])
 
+# Single-arch image manifest (used when descending from a multi-arch index) and
+# the image config blob (which carries the labels we read the version from).
+_IMAGE_MANIFEST_ACCEPT = ", ".join([
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+])
+_CONFIG_ACCEPT = ", ".join([
+    "application/vnd.oci.image.config.v1+json",
+    "application/vnd.docker.container.image.v1+json",
+    "application/json",
+])
+
+# Default OCI label GitHub Actions' docker/metadata-action stamps with the
+# release version. Override with COMPOSER_VERSION_LABEL for a custom label.
+_DEFAULT_VERSION_LABEL = "org.opencontainers.image.version"
+
 
 def parse_image_ref(ref: str) -> Tuple[str, str, str]:
     """Split an image reference into (registry, repository, tag).
@@ -74,6 +90,82 @@ def _bearer_token(challenge: str, timeout: float) -> Optional[str]:
     except Exception:
         return None
     return data.get("token") or data.get("access_token")
+
+
+def _fetch_bytes(url: str, accept: str, token: Optional[str], timeout: float) -> Optional[bytes]:
+    """GET ``url`` (with the same 401 Bearer-challenge retry as
+    ``remote_tag_digest``) and return the response body, or None. Never raises."""
+    headers = {"Accept": accept}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        with _open(url, headers, timeout=timeout) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:  # type: ignore[attr-defined]
+        if exc.code != 401 or token:
+            return None
+        bearer = _bearer_token(exc.headers.get("Www-Authenticate", ""), timeout)
+        if not bearer:
+            return None
+        headers["Authorization"] = f"Bearer {bearer}"
+        try:
+            with _open(url, headers, timeout=timeout) as response:
+                return response.read()
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def remote_image_version(
+    ref: str, *, token: Optional[str] = None, timeout: float = 15, label: Optional[str] = None
+) -> Optional[str]:
+    """Best-effort: the remote image's own version from its OCI image label
+    (``org.opencontainers.image.version`` by default). Reads the tag manifest,
+    descends into a concrete manifest for multi-arch indexes, fetches the image
+    config blob, and returns the label value — or None if it can't be determined
+    (private/unsupported registry, missing label, network error). Never raises,
+    so callers degrade gracefully to the digest when this is unavailable."""
+    label = label or _DEFAULT_VERSION_LABEL
+    try:
+        registry, repo, tag = parse_image_ref(ref)
+        base = f"https://{registry}/v2/{repo}"
+        raw = _fetch_bytes(f"{base}/manifests/{tag}", _MANIFEST_ACCEPT, token, timeout)
+        if not raw:
+            return None
+        manifest = json.loads(raw.decode("utf-8"))
+        # Multi-arch index/list: descend into the first concrete image manifest.
+        media = str(manifest.get("mediaType") or "")
+        if "index" in media or "manifest.list" in media or (
+            "manifests" in manifest and "config" not in manifest
+        ):
+            child = next(
+                (m for m in (manifest.get("manifests") or [])
+                 if isinstance(m, dict) and m.get("digest")),
+                None,
+            )
+            if not child:
+                return None
+            raw = _fetch_bytes(f"{base}/manifests/{child['digest']}", _IMAGE_MANIFEST_ACCEPT, token, timeout)
+            if not raw:
+                return None
+            manifest = json.loads(raw.decode("utf-8"))
+        config_digest = (manifest.get("config") or {}).get("digest")
+        if not config_digest:
+            return None
+        raw = _fetch_bytes(f"{base}/blobs/{config_digest}", _CONFIG_ACCEPT, token, timeout)
+        if not raw:
+            return None
+        blob = json.loads(raw.decode("utf-8"))
+        labels = {}
+        for key in ("config", "container_config"):
+            section = blob.get(key)
+            if isinstance(section, dict) and isinstance(section.get("Labels"), dict):
+                labels.update(section["Labels"])
+        version = str(labels.get(label) or "").strip()
+        return version or None
+    except Exception:
+        return None
 
 
 def remote_tag_digest(ref: str, *, token: Optional[str] = None, timeout: float = 15) -> Optional[str]:

@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .registry import remote_tag_digest
+from .registry import remote_image_version, remote_tag_digest
 
 
 def _now_iso() -> str:
@@ -60,6 +60,7 @@ def _local_repo_digest(image: str) -> Optional[str]:
 def check_availability(images: List[str]) -> Tuple[bool, list]:
     """Compare each image's remote tag digest to its local pulled digest."""
     token = os.environ.get("COMPOSER_REGISTRY_TOKEN") or None
+    label = os.environ.get("COMPOSER_VERSION_LABEL") or None
     results = []
     any_new = False
     for image in images:
@@ -69,12 +70,24 @@ def check_availability(images: List[str]) -> Tuple[bool, list]:
         # An unreadable remote is "unknown" — never a false positive.
         new = bool(remote) and remote != local
         any_new = any_new or new
-        results.append({
+        entry = {
             "image": image,
             "remote_digest": remote,
             "local_digest": local,
             "update_available": new,
-        })
+        }
+        # Best-effort: publish the remote image's own version (OCI version label)
+        # so dlux can show "vX available" instead of a digest. Only looked up when
+        # an update exists (avoids an extra registry round-trip on every poll); any
+        # failure is simply omitted and downstream falls back to the digest.
+        if new:
+            try:
+                version = remote_image_version(image, token=token, label=label)
+            except Exception:
+                version = None
+            if version:
+                entry["version"] = version
+        results.append(entry)
     return any_new, results
 
 
