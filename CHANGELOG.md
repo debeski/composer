@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.11
+- **Project-Mount-Independent Runtime Overrides**: Changed `DockerComposeMixin.sync_runtime_compose_override()` to create its atomic `.composer-runtime-*.compose.yml` through Python's verified writable system temporary directory instead of the current project directory. Resident updaters now work with host-owned mode-0755 or read-only project mounts while retaining `cap_drop: [ALL]`; temp-file creation failures become Composer diagnostics instead of uncaught `PermissionError` tracebacks.
+- **Guaranteed Terminal Watcher Failure**: Changed `composer watch` so every non-zero child exit atomically publishes a token-matched `failed` deploy status before writing the request ack, preserving any detailed child error and appending a generic failure to `deploy-log.txt`. Child spawn errors now terminalize with exit 127 instead of crashing the watcher, giving downstream maintenance controllers both status and ack signals even when the one-shot launcher fails before its first phase.
+- **Read-Only Runtime Regression Gates**: Added standard-library unit coverage for override placement, content, cleanup, and creation-failure diagnostics, plus an image smoke test that runs with a read-only image, a read-only mounted Compose project, `--cap-drop ALL`, and writable `/tmp` only, then executes a real merged `docker compose config` through the generated override. CI and release workflows now execute the unit suite before building or publishing images.
+
 ## v1.1.10
 - **Resident Watcher Self-Exclusion**: Added `COMPOSER_EXCLUDE_SERVICES` filtering across service discovery, generated runtime overrides, bulk pulls, version-gate image resolution, bulk `up -d`, health state tracking, and diagnostics; `composer watch` now exports `COMPOSER_EXCLUDE_SERVICES=composer-updater` by default (override with `COMPOSER_WATCH_SELF_SERVICE`) so an in-compose updater does not recreate the container supervising its own app update after the v1.1.9 `watch` → `composer -u` change.
 

@@ -198,13 +198,20 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             return True
 
         if self.compose_runtime_override is None:
-            fd, path = tempfile.mkstemp(
-                prefix=".composer-runtime-",
-                suffix=".compose.yml",
-                dir=os.getcwd(),
-            )
-            os.close(fd)
-            self.compose_runtime_override = Path(path)
+            try:
+                # Compose reads overrides client-side, so this file does not
+                # need to live in (or be writable through) the project mount.
+                fd, path = tempfile.mkstemp(
+                    prefix=".composer-runtime-",
+                    suffix=".compose.yml",
+                )
+                os.close(fd)
+                self.compose_runtime_override = Path(path)
+            except OSError as exc:
+                self.last_runtime_diagnostic = (
+                    f"Failed to create Composer runtime override: {exc}"
+                )
+                return False
 
         lines = ["services:"]
         for service in self.services:

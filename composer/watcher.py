@@ -12,8 +12,9 @@ Contract:
 - Ack file: ``<trigger>.ack`` records the last processed token + child exit
   code + timestamp, so a request is processed once and survives a restart of
   the watcher container.
-- Deploy status: the child writes ``COMPOSER_STATUS_FILE`` throughout the run;
-  the watcher does not touch it (clean ownership split).
+- Deploy status: the child writes ``COMPOSER_STATUS_FILE`` throughout the run.
+  If the child exits non-zero before publishing ``failed``, the watcher writes
+  that terminal state itself so downstream maintenance cannot remain stuck.
 """
 
 import json
@@ -145,6 +146,61 @@ def _write_ack(ack: Path, token: str, exit_code: int):
         pass
 
 
+def _publish_terminal_failure(
+    status_file: str,
+    token: str,
+    exit_code: int,
+    error: str = "",
+) -> bool:
+    """Guarantee a terminal deploy status after a failed child process.
+
+    Preserve a detailed error already published by the child. The request token
+    also lets consumers reject a terminal record from an older update.
+    """
+    target = Path(status_file)
+    try:
+        current = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(current, dict):
+            current = {}
+    except (OSError, ValueError, AttributeError):
+        current = {}
+
+    detail = str(error or "").strip()
+    if not detail and current.get("status") == "failed":
+        detail = str(current.get("error") or "").strip()
+    if not detail:
+        detail = f"Composer update process exited with status {exit_code}."
+
+    payload = {
+        **current,
+        "status": "failed",
+        "updated_at": _now_iso(),
+        "error": detail[:4000],
+        "request_token": token,
+        "exit_code": int(exit_code),
+    }
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.tmp")
+        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+        return True
+    except OSError:
+        return False
+
+
+def _append_terminal_failure(log_file: Optional[str], error: str):
+    if not log_file:
+        return
+    try:
+        target = Path(log_file)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write(f"\nUpdate failed: {error}\n")
+    except OSError:
+        pass
+
+
 def run_watch(args) -> int:
     trigger = Path(args.trigger_file)
     ack = Path(f"{trigger}.ack")
@@ -221,16 +277,31 @@ def run_watch(args) -> int:
                     Path(log_file).write_text("", encoding="utf-8")
                 except OSError:
                     pass
-            proc = subprocess.run(child, env=env)
-            _write_ack(ack, token, proc.returncode)
+            launch_error = ""
+            try:
+                exit_code = subprocess.run(child, env=env).returncode
+            except (OSError, subprocess.SubprocessError) as exc:
+                exit_code = 127
+                launch_error = f"Composer update process could not start: {exc}"
+            if exit_code != 0:
+                fallback_error = launch_error or f"Composer update process exited with status {exit_code}."
+                if args.status_file:
+                    _publish_terminal_failure(
+                        args.status_file,
+                        token,
+                        exit_code,
+                        error=launch_error,
+                    )
+                _append_terminal_failure(log_file, fallback_error)
+            _write_ack(ack, token, exit_code)
             last_token = token
-            result = "ready" if proc.returncode == 0 else f"failed (exit {proc.returncode})"
+            result = "ready" if exit_code == 0 else f"failed (exit {exit_code})"
             print(f"✔ update {token} → {result}", flush=True)
             # The running image just changed — refresh availability so the
             # "update available" signal clears promptly.
             maybe_check_availability(force=True)
             if args.once:
-                return proc.returncode
+                return exit_code
         elif args.once:
             # Nothing pending and we were asked to do a single pass.
             return 0

@@ -35,4 +35,31 @@ docker run --rm --entrypoint docker "$IMAGE" --version >/dev/null
 docker run --rm --entrypoint docker "$IMAGE" compose version >/dev/null
 echo "    tooling: docker, docker compose runnable"
 
+# 4. Runtime overrides and Compose config must work with a read-only project,
+# read-only image filesystem, no Linux capabilities, and writable /tmp only.
+docker run --rm --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --tmpfs /tmp \
+  -v "$PWD/tests/fixtures:/workspace:ro" \
+  -w /workspace \
+  --entrypoint python "$IMAGE" -c '
+from pathlib import Path
+from composer.launcher import DockerComposeLauncher
+
+launcher = DockerComposeLauncher()
+launcher.services = ["web"]
+launcher.active_compose_files = ["read-only-compose.yml"]
+assert launcher.sync_runtime_compose_override(), launcher.last_runtime_diagnostic
+override = launcher.compose_runtime_override
+assert override is not None and override.parent == Path("/tmp")
+assert override.exists()
+ok, out, err = launcher.run_docker_compose(["config"])
+assert ok, err or out
+assert "COMPOSER_VERSION" in out
+assert "/workspace/data" in out
+launcher.remove_runtime_compose_override()
+assert not override.exists()
+'
+echo "    runtime override: merged from /tmp with read-only project and zero capabilities"
+
 echo "==> All runtime smoke tests passed"
