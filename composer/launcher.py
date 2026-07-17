@@ -11,6 +11,7 @@ from .health_monitor import HealthMonitorMixin
 from .post_start_hooks import PostStartHooksMixin
 from .rendering import RenderingMixin
 from .secrets_manager import SecretsMixin
+from .service_selection import parse_service_list
 from .status_writer import StatusWriterMixin
 from .version import read_composer_version
 from .version_gate import VersionGateMixin
@@ -66,6 +67,7 @@ class DockerComposeLauncher(
         self.gate_images: List[str] = []
         self.gate_target_version: Optional[str] = None
         self.gate_active_version: Optional[str] = None
+        self.exclude_services: List[str] = []
 
         self.sections = {
             "secrets": IDLE,
@@ -179,6 +181,7 @@ class DockerComposeLauncher(
             self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
             self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None
             self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
+            self.exclude_services = parse_service_list(os.environ.get("COMPOSER_EXCLUDE_SERVICES"))
 
             self.extract_config()
             if self.dev_mode:

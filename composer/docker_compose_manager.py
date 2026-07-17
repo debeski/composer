@@ -153,11 +153,14 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         if not ok:
             return detail
 
+        excluded = set(getattr(self, "exclude_services", []) or [])
         issues: List[str] = []
         failed_services: List[str] = []
 
         for service in services:
             name = service.get("Service") or service.get("Name") or "unknown"
+            if name in excluded:
+                continue
             state = str(service.get("State", "")).lower()
             health = str(service.get("Health", "")).lower()
             exit_code = str(service.get("ExitCode", "")).strip()
@@ -244,7 +247,15 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             if not silent:
                 self.last_runtime_diagnostic = self.build_failure_detail(out, err)
             return False
-        self.services = [s for s in out.splitlines() if s]
+        discovered = [s for s in out.splitlines() if s]
+        excluded = set(getattr(self, "exclude_services", []) or [])
+        self.services = [s for s in discovered if s not in excluded]
+        if excluded and discovered and not self.services:
+            self.last_runtime_diagnostic = (
+                "No compose services remain after COMPOSER_EXCLUDE_SERVICES="
+                + ",".join(sorted(excluded))
+            )
+            return False
         self.service_state = {s: SERVICE_NOT_SEEN for s in self.services}
         if not self.sync_runtime_compose_override():
             return False
@@ -258,9 +269,12 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             return False
 
         seen = set()
+        excluded = set(getattr(self, "exclude_services", []) or [])
         for svc in services:
             try:
                 name = svc["Service"]
+                if name in excluded:
+                    continue
                 state = str(svc.get("State", "")).lower()
                 health = str(svc.get("Health", "")).lower()
                 exit_code = str(svc.get("ExitCode", "")).strip()
@@ -305,6 +319,13 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         # only if its image/config changed and starts its dependencies).
         if isinstance(self.up_service, str):
             up_args.append(self.up_service)
+        elif getattr(self, "exclude_services", None):
+            if not self.services:
+                return False, "", (
+                    "No compose services remain after COMPOSER_EXCLUDE_SERVICES; "
+                    "refusing to run an unscoped compose up."
+                )
+            up_args.extend(self.services)
         return self.run_docker_compose_streaming(
             up_args,
             progress_callback=lambda line: self.emit_progress("Compose", line),
@@ -346,6 +367,15 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         pull_args = ["pull"]
         if isinstance(self.pull_service, str):
             pull_args.append(self.pull_service)
+        elif getattr(self, "exclude_services", None):
+            if not self.services and not self.discover_services(silent=True):
+                return False, "", self.last_runtime_diagnostic
+            if not self.services:
+                return False, "", (
+                    "No compose services remain after COMPOSER_EXCLUDE_SERVICES; "
+                    "refusing to run an unscoped compose pull."
+                )
+            pull_args.extend(self.services)
         self.last_progress_text = ""
         self.last_progress_label = ""
         return self.run_docker_compose_streaming(

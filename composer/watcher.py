@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .registry import remote_image_version, remote_tag_digest
+from .service_selection import join_service_list, parse_service_list
 
 
 def _now_iso() -> str:
@@ -158,6 +159,19 @@ def run_watch(args) -> int:
     env = os.environ.copy()
     if args.status_file:
         env["COMPOSER_STATUS_FILE"] = args.status_file
+
+    excluded = parse_service_list(env.get("COMPOSER_EXCLUDE_SERVICES"))
+    self_service_raw = env.get("COMPOSER_WATCH_SELF_SERVICE")
+    self_services = (
+        ["composer-updater"]
+        if self_service_raw is None
+        else parse_service_list(self_service_raw)
+    )
+    for service in self_services:
+        if service not in excluded:
+            excluded.append(service)
+    if excluded:
+        env["COMPOSER_EXCLUDE_SERVICES"] = join_service_list(excluded)
 
     # Console log for the live progress page: the -u child appends clean,
     # ANSI-free progress lines to this file (via COMPOSER_LOG_FILE). Defaults to

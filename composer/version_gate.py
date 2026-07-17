@@ -72,6 +72,14 @@ class VersionGateMixin:
         args = ["config", "--images"]
         if isinstance(getattr(self, "pull_service", None), str):
             args.append(self.pull_service)
+        elif getattr(self, "exclude_services", None):
+            if not getattr(self, "services", None):
+                if not self.discover_services(silent=True):
+                    return []
+            services = getattr(self, "services", []) or []
+            if not services:
+                return []
+            args.extend(services)
         ok, out, _ = self.run_docker_compose(args, timeout=15)
         if not ok:
             return []

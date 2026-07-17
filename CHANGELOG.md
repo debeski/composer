@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.10
+- **Resident Watcher Self-Exclusion**: Added `COMPOSER_EXCLUDE_SERVICES` filtering across service discovery, generated runtime overrides, bulk pulls, version-gate image resolution, bulk `up -d`, health state tracking, and diagnostics; `composer watch` now exports `COMPOSER_EXCLUDE_SERVICES=composer-updater` by default (override with `COMPOSER_WATCH_SELF_SERVICE`) so an in-compose updater does not recreate the container supervising its own app update after the v1.1.9 `watch` → `composer -u` change.
+
 ## v1.1.9
 - **Pull-Only Update Flag (`-uo`)**: Changed `DockerComposeLauncher` so `-uo`/`--update-only [service]` now runs only the `pull_images()` phase (scoped by `pull_service` when a service is named), writes the new `pulled` status, renders only the secrets/pull rows, and exits before `preflight_version_gate()`, `launch_containers()`, health checks, or post-start hooks. `composer watch` now shells `python -m composer -u` for the full update pipeline, preserving the existing deploy/update behavior and service-scoped `-u <service>` recreate semantics.
 

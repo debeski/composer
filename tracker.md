@@ -3,10 +3,10 @@
 ## Part 1: Project Related
 ### Current Verified Snapshot:
 - Composer is a Docker Compose orchestration tool for plaintext env secrets, health checks, post-start hooks, status files, and resident image updates.
-- Current repo version is `1.1.9` in progress; verify tags before release edits (`v1.0.0` through `v1.1.8` are tagged locally).
+- Current repo version is `1.1.10` in progress; verify tags before release edits (`v1.0.0` through `v1.1.9` are tagged locally).
 - Implementation lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and wrapper scripts `start.sh`/`start.ps1`.
 - `start.sh` targets `debeski/composer:latest`; only exact sole `--update` self-updates the Composer tool image, while `-u`/`-uo`/`-r` pass through.
-- `watch` shells `python -m composer -u` for trigger-driven app updates and can write deploy status/log/registry availability files.
+- `watch` shells `python -m composer -u`, writes deploy status/log/registry availability files, and defaults `COMPOSER_EXCLUDE_SERVICES=composer-updater` for resident updates.
 
 ### Current Project Adopted Standards:
 - Use argparse for CLI handling; intercept `run` and `watch` before flat parse.
@@ -27,7 +27,7 @@
 - Prior audits resolved: Windows shell-safe fallback, compose fallback, Dockerfile `WORKDIR`/`PYTHONPATH`, no committed `__pycache__`.
 
 ### Current Project's Unsolved Known Bugs:
-- No unresolved code-level `-u`/`-uo` semantics bug remains after v1.1.9 branch tests.
+- No unresolved code-level `-u`/`-uo`/watcher self-targeting bug remains after v1.1.10 stub tests.
 - Manual Docker runtime validations still require a real compose project and Docker daemon behavior.
 
 ### Incomplete Tasks:
@@ -39,16 +39,17 @@
   - [ ] Rebuild/push pending Composer images as needed and confirm runtime smoke tests.
   - [ ] Decrees redeploy note: `down` + `up -d` from project root; named volumes preserved.
 - **Completed Recently:**
+  - [x] v1.1.10: watcher self-exclusion. `COMPOSER_EXCLUDE_SERVICES` filters discovery/runtime override/bulk pull/version-gate images/bulk `up -d`/health/diagnostics; `watch` defaults to excluding `composer-updater` (override `COMPOSER_WATCH_SELF_SERVICE`) so resident updater does not recreate itself after v1.1.9 `watch`→`-u`.
   - [x] v1.1.9: changed `watch` child to `-u`; made `-uo [service]` pull-only with status `pulled` and no gate/compose/health/post-start.
   - [x] composer v1.1.7 watch console log/status integration; switch_pos live progress proxy; dlux image update modal/card redesign.
   - [x] composer v1.1.5 plaintext-only secrets, status writer, version gate, trigger-driven `watch`, SOPS/AGE removal.
   - [x] v1.1.3-v1.1.4 `run` subcommand, `-u` scoped update/recreate, `-uo` legacy full startup update, `-r` restart branch.
 
 ### One-line info about last verified Tests:
-- Verified 2026-07-17: stubbed launcher assertions for `-uo`, `-uo web`, `-u`, `-u web`; `python3 -m compileall composer`; `python3 -m composer --help`; `python3 -m composer watch --help`.
+- Verified 2026-07-17: AST syntax parse for `composer/*.py`; stubbed exclusion assertions for bulk `pull`/`up`/version-gate images + `watch` child env; `python3 -m composer --help`; `python3 -m composer watch --help`.
 
 ### One-line info about last time edited Docs:
-- Edited `README.md`, `CHANGELOG.md` (`v1.1.9`), `VERSION`, and `tracker.md` on 2026-07-17 for pull-only `-uo` and watcher `-u`.
+- Edited `README.md`, `CHANGELOG.md` (`v1.1.10`), `VERSION`, and `tracker.md` on 2026-07-17 for watcher self-exclusion.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:
@@ -67,7 +68,7 @@
 - `start.py` is deleted in the worktree as part of rename/migration state; do not restore unless requested.
 - `composer/` is the modular implementation and may be untracked in some worktrees.
 - Avoid bare `print()` during interactive panel mode unless redraw anchoring accounts for it.
-- Re-run syntax checks after source edits: `python -m compileall composer`; remove generated `composer/__pycache__/`.
+- Re-run syntax checks after source edits; generated `composer/__pycache__/` must be moved under `.xpose/` rather than deleted.
 
 ### References and Links:
 - Docker Compose CLI reference: https://docs.docker.com/engine/reference/commandline/
