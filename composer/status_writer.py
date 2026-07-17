@@ -20,6 +20,7 @@ class StatusWriterMixin:
     STATUS_STATES = (
         "starting",
         "pulling",
+        "pulled",
         "recreating",
         "restarting",
         "migrating",

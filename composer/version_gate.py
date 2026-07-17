@@ -13,7 +13,7 @@ _GO_NO_VALUE = "<no value>"
 
 
 class VersionGateMixin:
-    """Preflight guard for update flows (``-u``/``-uo``).
+    """Preflight guard for deploy update flows (``-u``).
 
     When wired up (``COMPOSER_ACTIVE_VERSION_FILE`` set), it refuses to recreate
     onto a target image whose version label is OLDER than the deployment's

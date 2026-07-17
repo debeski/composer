@@ -1,7 +1,7 @@
 """Resident, trigger-driven updater loop for `composer watch`.
 
 Composer stays a one-shot tool: this loop is a thin supervisor that watches a
-trigger file and, on each new request, shells the existing `composer -uo`
+trigger file and, on each new request, shells the existing `composer -u`
 pipeline (pull + version gate + recreate + health + post_start). Running the
 update in a child process keeps all one-shot behavior (including per-run state
 and exit codes) intact — no refactor of the launcher's run path.
@@ -149,7 +149,7 @@ def run_watch(args) -> int:
     ack = Path(f"{trigger}.ack")
     interval = max(2.0, float(args.interval))
 
-    child = [sys.executable, "-m", "composer", "-uo"]
+    child = [sys.executable, "-m", "composer", "-u"]
     if args.dev:
         child.append("-d")
     if args.file:
@@ -159,7 +159,7 @@ def run_watch(args) -> int:
     if args.status_file:
         env["COMPOSER_STATUS_FILE"] = args.status_file
 
-    # Console log for the live progress page: the -uo child appends clean,
+    # Console log for the live progress page: the -u child appends clean,
     # ANSI-free progress lines to this file (via COMPOSER_LOG_FILE). Defaults to
     # a sibling of the status file so a proxy can serve both from one dir.
     log_file = getattr(args, "log_file", None)
@@ -197,7 +197,7 @@ def run_watch(args) -> int:
         token = _read_request_token(trigger)
         if token and token != last_token:
             print(
-                f"⟳ update request {token} — running `composer -uo`",
+                f"⟳ update request {token} — running `composer -u`",
                 flush=True,
             )
             # Fresh console log per update run (the child appends to it).

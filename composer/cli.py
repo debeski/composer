@@ -57,7 +57,7 @@ def parse_args():
         nargs="?",
         const=True,
         metavar="SERVICE",
-        help="Pull latest image(s) before the normal full startup, without scoping the recreate (optionally a single service)",
+        help="Pull latest image(s) only, then exit; pass a service name to pull only that service",
     )
     parser.add_argument(
         "-r",
@@ -155,7 +155,7 @@ def parse_watch_args(argv):
         prog="composer watch",
         description=(
             "Resident updater. Watches a trigger file and, on each new request "
-            "(a changed token / mtime), runs a full update via 'composer -uo' "
+            "(a changed token / mtime), runs a full update via 'composer -u' "
             "(pull + version gate + recreate + health + post_start). Records the "
             "processed token in <trigger-file>.ack so a request survives restarts "
             "and is not re-run."

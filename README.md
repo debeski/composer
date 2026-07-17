@@ -22,7 +22,7 @@ supplies every variable the compose file requires.
 
 `composer run [-m] [-s] [-F] [-f FILE] [-d] <service> <command...>` runs a command inside a service instead of typing `docker exec`/`docker run` by hand. Defaults to `docker compose exec <service> …`; `-m`/`--manage` prepends `python manage.py` (e.g. `./start.sh run -m web migrate --noinput`), `-s`/`--shell` runs the command via `sh -c` so pipes/`&&` work, and `-F`/`--fresh` uses a one-off `docker compose run --rm`. TTY is auto-detected. See `composer run --help`.
 
-`composer watch --trigger-file PATH [--interval N]` runs composer as a resident, in-compose updater. It watches the trigger file and, on each new request (a changed `token`, or the file's `mtime`), runs a full update (`composer -uo`: pull → version gate → recreate → health → post_start). The processed token is recorded in `<trigger-file>.ack`, so a request is applied once and survives a restart. Add `--status-file PATH` to have each run publish [deploy status](#deploy-status). See `composer watch --help`.
+`composer watch --trigger-file PATH [--interval N]` runs composer as a resident, in-compose updater. It watches the trigger file and, on each new request (a changed `token`, or the file's `mtime`), runs a full update (`composer -u`: pull → version gate → recreate → health → post_start). The processed token is recorded in `<trigger-file>.ack`, so a request is applied once and survives a restart. Add `--status-file PATH` to have each run publish [deploy status](#deploy-status). See `composer watch --help`.
 
 `watch` can also **detect a newer image** and publish availability for another process to act on: `--check-image IMAGE` (repeatable) + `--availability-file PATH` (and `--check-interval SECONDS`, default 3600) poll the registry's tag digest vs the locally-pulled one and write `{ "available": …, "images": [ … ] }`. It only reports *readable* differences (an unreachable registry is "unknown", never a false positive), needs no registry access from the consumer, and re-checks right after an applied update. `COMPOSER_REGISTRY_TOKEN` covers private repositories.
 
@@ -32,7 +32,7 @@ With `--status-file` (or `--log-file PATH`), each update run also writes a clean
 | :--- | :--- |
 | `-d`, `--dev` | Development mode. Loads `compose.dev.yml` on top of the base compose file (two files) and forces `DEBUG=True` / `DEBUG_STATUS=True` into every service. |
 | `-u`, `--update [service]` | Pull the latest image(s) then recreate immediately. Pass a service name to update and recreate only that service (Compose still starts its dependencies; dependents aren't auto-restarted unless their own image changed). |
-| `-uo`, `--update-only [service]` | Pull the latest image(s) before the normal full startup, without scoping the recreate. Optionally a single service. |
+| `-uo`, `--update-only [service]` | Pull the latest image(s) only, then exit. Pass a service name to pull only that service. Does not run `up`, health checks, or post-start tasks. |
 | `-r`, `--restart [service]` | Restart running containers via `docker compose restart` instead of a `--down` + start. Containers are preserved, so baked-in env vars survive. Pass a service name to restart only that service. |
 | `-b`, `--build` | Rebuild images during startup. |
 | `--force` | Bypass the preflight version gate (allow updating onto an older image version). |
@@ -55,12 +55,13 @@ dashboard) can watch a deploy:
 ```
 
 States: `starting` → `pulling` → `recreating` → `migrating` → `ready`, or
-`failed` (with an `error`). The restart flow reports `restarting`/`ready`/`failed`.
+`failed` (with an `error`). Pull-only reports `starting` → `pulling` → `pulled`.
+The restart flow reports `restarting`/`ready`/`failed`.
 Nothing is written unless configured.
 
 ## version gate
 
-When updating (`-u`/`-uo`), composer can refuse to recreate onto an image that
+When deploying an update (`-u`), composer can refuse to recreate onto an image that
 is **older** than the version already deployed — the one thing a pull-and-restart
 can't safely undo when forward-only migrations have already run. It is opt-in and
 generic: set `COMPOSER_ACTIVE_VERSION_FILE` (a JSON file, e.g. a runtime

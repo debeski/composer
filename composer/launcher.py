@@ -39,6 +39,7 @@ class DockerComposeLauncher(
         self.dev_mode = False
         self.target_app = None
         self.update_images = False
+        self.pull_only_mode = False
         self.pull_service = None
         self.up_service = None
         self.restart_mode = False
@@ -157,9 +158,10 @@ class DockerComposeLauncher(
                     self.pull_service = args.update
                     self.up_service = args.update
             elif args.update_only:
-                # -uo: pull (optionally one service) before the normal full
-                # startup, without scoping the recreate.
+                # -uo: pull only. A service name scopes the pull; no compose up,
+                # health checks, or post-start hooks run after the pull.
                 self.update_images = True
+                self.pull_only_mode = True
                 if isinstance(args.update_only, str):
                     self.pull_service = args.update_only
             if args.restart:
@@ -274,6 +276,12 @@ class DockerComposeLauncher(
                     self.render(f"Failed to pull images\n\n{detail}")
                     sys.exit(1)
                 self.sections["pull"] = OK
+
+                if self.pull_only_mode:
+                    self.write_status("pulled")
+                    self.render()
+                    print("\n✅ Images pulled")
+                    return
 
                 # Preflight version gate: refuse to recreate onto an older image
                 # version than the deployment's active one (opt-in; see
