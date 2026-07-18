@@ -16,7 +16,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 DOCKER_HUB_REGISTRY = "registry-1.docker.io"
 
@@ -43,7 +43,7 @@ _CONFIG_ACCEPT = ", ".join([
 
 # Default OCI label GitHub Actions' docker/metadata-action stamps with the
 # release version. Override with COMPOSER_VERSION_LABEL for a custom label.
-_DEFAULT_VERSION_LABEL = "org.opencontainers.image.version"
+DEFAULT_VERSION_LABEL = "org.opencontainers.image.version"
 
 
 def parse_image_ref(ref: str) -> Tuple[str, str, str]:
@@ -117,16 +117,16 @@ def _fetch_bytes(url: str, accept: str, token: Optional[str], timeout: float) ->
         return None
 
 
-def remote_image_version(
-    ref: str, *, token: Optional[str] = None, timeout: float = 15, label: Optional[str] = None
-) -> Optional[str]:
-    """Best-effort: the remote image's own version from its OCI image label
-    (``org.opencontainers.image.version`` by default). Reads the tag manifest,
-    descends into a concrete manifest for multi-arch indexes, fetches the image
-    config blob, and returns the label value — or None if it can't be determined
-    (private/unsupported registry, missing label, network error). Never raises,
-    so callers degrade gracefully to the digest when this is unavailable."""
-    label = label or _DEFAULT_VERSION_LABEL
+def remote_image_labels(
+    ref: str, *, token: Optional[str] = None, timeout: float = 15
+) -> Optional[Dict[str, object]]:
+    """Best-effort remote image labels without pulling the image.
+
+    Reads the tag manifest, descends into a concrete manifest for multi-arch
+    indexes, and fetches the image config blob. Returns ``None`` when metadata
+    cannot be read and an empty dict when the config contains no labels. Never
+    raises, so digest-based availability remains independent of metadata.
+    """
     try:
         registry, repo, tag = parse_image_ref(ref)
         base = f"https://{registry}/v2/{repo}"
@@ -162,10 +162,23 @@ def remote_image_version(
             section = blob.get(key)
             if isinstance(section, dict) and isinstance(section.get("Labels"), dict):
                 labels.update(section["Labels"])
-        version = str(labels.get(label) or "").strip()
-        return version or None
+        return labels
     except Exception:
         return None
+
+
+def remote_image_version(
+    ref: str, *, token: Optional[str] = None, timeout: float = 15, label: Optional[str] = None
+) -> Optional[str]:
+    """Best-effort version from an OCI image label, or ``None``.
+
+    Kept as a small public wrapper for existing callers. Availability checks
+    use ``remote_image_labels`` directly so version and release-manifest
+    metadata share one registry config lookup.
+    """
+    labels = remote_image_labels(ref, token=token, timeout=timeout)
+    version = str((labels or {}).get(label or DEFAULT_VERSION_LABEL) or "").strip()
+    return version or None
 
 
 def remote_tag_digest(ref: str, *, token: Optional[str] = None, timeout: float = 15) -> Optional[str]:

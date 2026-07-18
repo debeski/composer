@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.12
+- **Optional Project Image Release Manifest**: Added one-pass remote image-label discovery through `registry.remote_image_labels()` and extended `watcher.check_availability()` to publish independently optional `version` and normalized `manifest` fields for digest-detected updates. `COMPOSER_RELEASE_MANIFEST_LABEL` defaults to `org.dlux.project.release-manifest`; missing, malformed, oversized, empty, or unsupported manifest JSON is omitted without changing digest availability, version fallback, or deployment behavior.
+
 ## v1.1.11
 - **Project-Mount-Independent Runtime Overrides**: Changed `DockerComposeMixin.sync_runtime_compose_override()` to create its atomic `.composer-runtime-*.compose.yml` through Python's verified writable system temporary directory instead of the current project directory. Resident updaters now work with host-owned mode-0755 or read-only project mounts while retaining `cap_drop: [ALL]`; temp-file creation failures become Composer diagnostics instead of uncaught `PermissionError` tracebacks.
 - **Guaranteed Terminal Watcher Failure**: Changed `composer watch` so every non-zero child exit atomically publishes a token-matched `failed` deploy status before writing the request ack, preserving any detailed child error and appending a generic failure to `deploy-log.txt`. Child spawn errors now terminalize with exit 127 instead of crashing the watcher, giving downstream maintenance controllers both status and ack signals even when the one-shot launcher fails before its first phase.

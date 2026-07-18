@@ -26,8 +26,58 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .registry import remote_image_version, remote_tag_digest
+from .registry import DEFAULT_VERSION_LABEL, remote_image_labels, remote_tag_digest
 from .service_selection import join_service_list, parse_service_list
+
+
+DEFAULT_RELEASE_MANIFEST_LABEL = "org.dlux.project.release-manifest"
+_MAX_MANIFEST_LABEL_BYTES = 16384
+
+
+def _release_manifest_from_label(value) -> Optional[dict]:
+    """Normalize optional project release metadata from an image label.
+
+    A missing, malformed, unsupported, or empty manifest is simply absent from
+    availability output. The digest signal and optional version label remain
+    independent.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if len(value.encode("utf-8")) > _MAX_MANIFEST_LABEL_BYTES:
+        return None
+    try:
+        source = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    schema_version = source.get("schema_version", 1) if isinstance(source, dict) else None
+    if (
+        not isinstance(source, dict)
+        or isinstance(schema_version, bool)
+        or schema_version not in (1, "1")
+    ):
+        return None
+
+    manifest = {"schema_version": 1}
+    version = source.get("version")
+    if isinstance(version, str) and version.strip():
+        manifest["version"] = version.strip()[:64]
+    summary = source.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        manifest["summary"] = summary.strip()[:1000]
+    highlights = source.get("highlights")
+    if isinstance(highlights, list):
+        clean_highlights = []
+        for item in highlights[:8]:
+            if isinstance(item, str) and item.strip():
+                clean_highlights.append(item.strip()[:160])
+        if clean_highlights:
+            manifest["highlights"] = clean_highlights
+    release_url = source.get("release_url")
+    if isinstance(release_url, str):
+        release_url = release_url.strip()
+        if release_url.startswith("https://"):
+            manifest["release_url"] = release_url[:2048]
+    return manifest if len(manifest) > 1 else None
 
 
 def _now_iso() -> str:
@@ -62,7 +112,11 @@ def _local_repo_digest(image: str) -> Optional[str]:
 def check_availability(images: List[str]) -> Tuple[bool, list]:
     """Compare each image's remote tag digest to its local pulled digest."""
     token = os.environ.get("COMPOSER_REGISTRY_TOKEN") or None
-    label = os.environ.get("COMPOSER_VERSION_LABEL") or None
+    version_label = os.environ.get("COMPOSER_VERSION_LABEL") or DEFAULT_VERSION_LABEL
+    manifest_label = (
+        os.environ.get("COMPOSER_RELEASE_MANIFEST_LABEL")
+        or DEFAULT_RELEASE_MANIFEST_LABEL
+    )
     results = []
     any_new = False
     for image in images:
@@ -78,17 +132,20 @@ def check_availability(images: List[str]) -> Tuple[bool, list]:
             "local_digest": local,
             "update_available": new,
         }
-        # Best-effort: publish the remote image's own version (OCI version label)
-        # so dlux can show "vX available" instead of a digest. Only looked up when
-        # an update exists (avoids an extra registry round-trip on every poll); any
-        # failure is simply omitted and downstream falls back to the digest.
+        # Best-effort image metadata. Version and project release manifest are
+        # independently optional and share one config lookup. Metadata failure
+        # never changes the digest-driven availability result.
         if new:
             try:
-                version = remote_image_version(image, token=token, label=label)
+                labels = remote_image_labels(image, token=token) or {}
             except Exception:
-                version = None
+                labels = {}
+            version = str(labels.get(version_label) or "").strip()
             if version:
                 entry["version"] = version
+            manifest = _release_manifest_from_label(labels.get(manifest_label))
+            if manifest:
+                entry["manifest"] = manifest
         results.append(entry)
     return any_new, results
 

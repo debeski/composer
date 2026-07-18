@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from composer.watcher import run_watch
+from composer.registry import remote_image_version
+from composer.watcher import check_availability, run_watch
 
 
 def watch_args(root):
@@ -92,3 +93,94 @@ class WatcherTerminalStatusTests(unittest.TestCase):
             self.assertEqual(status["status"], "failed")
             self.assertEqual(status["exit_code"], 127)
             self.assertIn("could not start", status["error"])
+
+
+class WatcherAvailabilityTests(unittest.TestCase):
+    @patch("composer.registry.remote_image_labels")
+    def test_existing_remote_image_version_api_uses_shared_label_lookup(self, labels):
+        labels.return_value = {
+            "org.opencontainers.image.version": "2.4.0",
+            "org.example.version": "2026.7",
+        }
+
+        self.assertEqual(remote_image_version("example/app:latest"), "2.4.0")
+        self.assertEqual(
+            remote_image_version("example/app:latest", label="org.example.version"),
+            "2026.7",
+        )
+
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
+    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.remote_image_labels")
+    def test_project_manifest_and_version_are_published_independently(
+        self, labels, _remote, _local
+    ):
+        labels.return_value = {
+            "org.example.version": "2.4.0",
+            "org.example.manifest": json.dumps({
+                "schema_version": 1,
+                "version": "2026.7",
+                "summary": "Project release",
+                "highlights": ["New report", "Faster imports"],
+                "release_url": "https://example.com/releases/2026.7",
+            }),
+        }
+        with patch.dict(
+            "os.environ",
+            {
+                "COMPOSER_VERSION_LABEL": "org.example.version",
+                "COMPOSER_RELEASE_MANIFEST_LABEL": "org.example.manifest",
+            },
+            clear=True,
+        ):
+            available, images = check_availability(["example/app:latest"])
+
+        self.assertTrue(available)
+        self.assertEqual(images[0]["version"], "2.4.0")
+        self.assertEqual(images[0]["manifest"]["version"], "2026.7")
+        self.assertEqual(images[0]["manifest"]["highlights"], ["New report", "Faster imports"])
+
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
+    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.remote_image_labels")
+    def test_invalid_manifest_does_not_hide_version_or_digest_update(
+        self, labels, _remote, _local
+    ):
+        labels.return_value = {
+            "org.opencontainers.image.version": "2.4.0",
+            "org.dlux.project.release-manifest": json.dumps({
+                "schema_version": True,
+                "version": "not-a-supported-schema",
+            }),
+        }
+
+        available, images = check_availability(["example/app:latest"])
+
+        self.assertTrue(available)
+        self.assertEqual(images[0]["version"], "2.4.0")
+        self.assertNotIn("manifest", images[0])
+
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
+    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.remote_image_labels", return_value=None)
+    def test_missing_all_metadata_still_publishes_digest_update(
+        self, _labels, _remote, _local
+    ):
+        available, images = check_availability(["example/app:latest"])
+
+        self.assertTrue(available)
+        self.assertEqual(images[0]["remote_digest"], "sha256:new")
+        self.assertNotIn("version", images[0])
+        self.assertNotIn("manifest", images[0])
+
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:same")
+    @patch("composer.watcher.remote_tag_digest", return_value="sha256:same")
+    @patch("composer.watcher.remote_image_labels")
+    def test_unchanged_digest_does_not_fetch_optional_metadata(
+        self, labels, _remote, _local
+    ):
+        available, images = check_availability(["example/app:latest"])
+
+        self.assertFalse(available)
+        self.assertFalse(images[0]["update_available"])
+        labels.assert_not_called()
