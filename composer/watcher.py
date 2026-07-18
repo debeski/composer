@@ -17,6 +17,8 @@ Contract:
   that terminal state itself so downstream maintenance cannot remain stuck.
 """
 
+import base64
+import binascii
 import json
 import os
 import subprocess
@@ -32,6 +34,7 @@ from .service_selection import join_service_list, parse_service_list
 
 DEFAULT_RELEASE_MANIFEST_LABEL = "org.dlux.project.release-manifest"
 _MAX_MANIFEST_LABEL_BYTES = 16384
+_MAX_ENCODED_MANIFEST_LABEL_BYTES = 24576
 
 
 def _release_manifest_from_label(value) -> Optional[dict]:
@@ -43,10 +46,29 @@ def _release_manifest_from_label(value) -> Optional[dict]:
     """
     if not isinstance(value, str) or not value.strip():
         return None
-    if len(value.encode("utf-8")) > _MAX_MANIFEST_LABEL_BYTES:
+    encoded_value = value.strip()
+    if len(encoded_value.encode("utf-8")) > _MAX_ENCODED_MANIFEST_LABEL_BYTES:
+        return None
+    if encoded_value.startswith("base64:"):
+        payload = encoded_value.removeprefix("base64:").strip()
+        if not payload:
+            return None
+        try:
+            padding = "=" * (-len(payload) % 4)
+            raw = base64.b64decode(
+                payload + padding,
+                altchars=b"-_",
+                validate=True,
+            )
+            if len(raw) > _MAX_MANIFEST_LABEL_BYTES:
+                return None
+            encoded_value = raw.decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            return None
+    elif len(encoded_value.encode("utf-8")) > _MAX_MANIFEST_LABEL_BYTES:
         return None
     try:
-        source = json.loads(value)
+        source = json.loads(encoded_value)
     except (TypeError, ValueError):
         return None
     schema_version = source.get("schema_version", 1) if isinstance(source, dict) else None

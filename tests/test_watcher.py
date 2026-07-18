@@ -1,3 +1,4 @@
+import base64
 import json
 import tempfile
 import unittest
@@ -115,15 +116,18 @@ class WatcherAvailabilityTests(unittest.TestCase):
     def test_project_manifest_and_version_are_published_independently(
         self, labels, _remote, _local
     ):
+        manifest = json.dumps({
+            "schema_version": 1,
+            "version": "2026.7",
+            "summary": "Project release",
+            "highlights": ["New report", "Faster imports"],
+            "release_url": "https://example.com/releases/2026.7",
+        }, separators=(",", ":"))
         labels.return_value = {
             "org.example.version": "2.4.0",
-            "org.example.manifest": json.dumps({
-                "schema_version": 1,
-                "version": "2026.7",
-                "summary": "Project release",
-                "highlights": ["New report", "Faster imports"],
-                "release_url": "https://example.com/releases/2026.7",
-            }),
+            "org.example.manifest": "base64:" + base64.urlsafe_b64encode(
+                manifest.encode("utf-8")
+            ).decode("ascii"),
         }
         with patch.dict(
             "os.environ",
@@ -143,6 +147,23 @@ class WatcherAvailabilityTests(unittest.TestCase):
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
     @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
     @patch("composer.watcher.remote_image_labels")
+    def test_raw_json_manifest_remains_supported(self, labels, _remote, _local):
+        labels.return_value = {
+            "org.dlux.project.release-manifest": json.dumps({
+                "schema_version": 1,
+                "version": "2.4.0",
+                "highlights": ["Legacy raw JSON label"],
+            }),
+        }
+
+        available, images = check_availability(["example/app:latest"])
+
+        self.assertTrue(available)
+        self.assertEqual(images[0]["manifest"]["version"], "2.4.0")
+
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
+    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.remote_image_labels")
     def test_invalid_manifest_does_not_hide_version_or_digest_update(
         self, labels, _remote, _local
     ):
@@ -158,6 +179,21 @@ class WatcherAvailabilityTests(unittest.TestCase):
 
         self.assertTrue(available)
         self.assertEqual(images[0]["version"], "2.4.0")
+        self.assertNotIn("manifest", images[0])
+
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
+    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.remote_image_labels")
+    def test_invalid_base64_manifest_does_not_hide_digest_update(
+        self, labels, _remote, _local
+    ):
+        labels.return_value = {
+            "org.dlux.project.release-manifest": "base64:not*valid",
+        }
+
+        available, images = check_availability(["example/app:latest"])
+
+        self.assertTrue(available)
         self.assertNotIn("manifest", images[0])
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")

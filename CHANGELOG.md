@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.13
+- **Quote-Safe Project Manifest Labels**: Extended `watcher._release_manifest_from_label()` to decode bounded `base64:<URL-safe-base64-JSON>` image labels before applying the existing schema-1 normalization. Raw JSON labels remain supported, and malformed encoded or raw metadata is still omitted without affecting digest availability or optional version fallback.
+
 ## v1.1.12
 - **Optional Project Image Release Manifest**: Added one-pass remote image-label discovery through `registry.remote_image_labels()` and extended `watcher.check_availability()` to publish independently optional `version` and normalized `manifest` fields for digest-detected updates. `COMPOSER_RELEASE_MANIFEST_LABEL` defaults to `org.dlux.project.release-manifest`; missing, malformed, oversized, empty, or unsupported manifest JSON is omitted without changing digest availability, version fallback, or deployment behavior.
 
