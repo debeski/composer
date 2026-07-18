@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.14
+- **Secrets Never Fall Through To Compose Defaults**: `SecretsMixin.resolve_secrets()` now refuses any env candidate that exists but is unreadable (permissions/userns) or yields no values, and `parse_env_file()` no longer swallows read errors. Because `required_compose_vars()` excludes every `${VAR:-default}` interpolation, a defaults-heavy compose previously let an unreadable `.secrets/.env` vacuous-succeed and deploy on `admin`/`admin_pass`; the run now fails loudly at the secrets stage before any pull or recreate.
+
 ## v1.1.13
 - **Quote-Safe Project Manifest Labels**: Extended `watcher._release_manifest_from_label()` to decode bounded `base64:<URL-safe-base64-JSON>` image labels before applying the existing schema-1 normalization. Raw JSON labels remain supported, and malformed encoded or raw metadata is still omitted without affecting digest availability or optional version fallback.
 
