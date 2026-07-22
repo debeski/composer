@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.15
+- **Restart Subcommand**: Moved restart into `composer restart [-f FILE] [-d] [--status-file PATH] [service]` with dedicated help and early dispatch like `composer run`; leading `-r`/`--restart` aliases retain the same restart-and-health pipeline.
+- **Private Secrets Handoff To Resident Updater**: `start.sh`/`start.ps1` now pass the selected plaintext file through Docker `--env-file` with a key manifest, and Composer's mode-`0600` runtime override forwards those inherited values only to `composer-updater`. Resident image updates validate and reuse that environment instead of reopening the host bind-mounted file, so mode-`0600` secrets work without ACLs or added capabilities. Direct legacy containers retain strict fail-before-pull behavior plus mapped-UID ACL diagnostics.
+
 ## v1.1.14
 - **Secrets Never Fall Through To Compose Defaults**: `SecretsMixin.resolve_secrets()` now refuses any env candidate that exists but is unreadable (permissions/userns) or yields no values, and `parse_env_file()` no longer swallows read errors. Because `required_compose_vars()` excludes every `${VAR:-default}` interpolation, a defaults-heavy compose previously let an unreadable `.secrets/.env` vacuous-succeed and deploy on `admin`/`admin_pass`; the run now fails loudly at the secrets stage before any pull or recreate.
 

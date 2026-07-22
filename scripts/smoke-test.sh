@@ -21,12 +21,15 @@ echo "    version: image='$actual' file='$expected'"
 
 # 2. --help exposes the key CLI flags.
 help="$(run --help)"
-for flag in --down --purge --volumes --update --update-only --restart --build --force --status-file; do
+for flag in --down --purge --volumes --update --update-only --build --force --status-file; do
   echo "$help" | grep -q -- "$flag" || { echo "::error::--help is missing '$flag'"; exit 1; }
 done
 echo "$help" | grep -q -- "run " || { echo "::error::--help is missing the 'run' subcommand"; exit 1; }
+echo "$help" | grep -q -- "restart " || { echo "::error::--help is missing the 'restart' subcommand"; exit 1; }
 echo "$help" | grep -q -- "watch " || { echo "::error::--help is missing the 'watch' subcommand"; exit 1; }
 run run --help >/dev/null || { echo "::error::'run --help' failed"; exit 1; }
+run restart --help >/dev/null || { echo "::error::'restart --help' failed"; exit 1; }
+run -r --help >/dev/null || { echo "::error::'-r --help' restart alias failed"; exit 1; }
 run watch --help >/dev/null || { echo "::error::'watch --help' failed"; exit 1; }
 echo "    help: all expected flags present"
 
@@ -61,5 +64,26 @@ launcher.remove_runtime_compose_override()
 assert not override.exists()
 '
 echo "    runtime override: merged from /tmp with read-only project and zero capabilities"
+
+# 5. A resident updater can consume wrapper-inherited secrets without opening
+# the project file again; missing declared keys remain a hard failure.
+docker run --rm \
+  -e COMPOSER_INHERITED_SECRET_KEYS=POSTGRES_PASSWORD,OPTIONAL_EMPTY \
+  -e POSTGRES_PASSWORD=smoke-secret \
+  -e OPTIONAL_EMPTY= \
+  --entrypoint python "$IMAGE" -c '
+from composer.launcher import DockerComposeLauncher
+
+launcher = DockerComposeLauncher()
+launcher.active_compose_files = ["compose.yml"]
+launcher.required_compose_vars = lambda: set()
+launcher.plaintext_env_candidates = lambda: (_ for _ in ()).throw(
+    AssertionError("resident updater reopened the project secrets file")
+)
+ok, error = launcher.resolve_secrets()
+assert ok, error
+assert launcher.secrets_source == "inherited launcher environment"
+'
+echo "    secrets: inherited resident environment accepted without project-file access"
 
 echo "==> All runtime smoke tests passed"

@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .cli import parse_args, parse_run_args, parse_watch_args
+from .cli import parse_args, parse_restart_args, parse_run_args, parse_watch_args
 from .config import ConfigMixin
 from .constants import ERROR, IDLE, OK, RUNNING
 from .docker_compose_manager import DockerComposeMixin
@@ -126,6 +126,24 @@ class DockerComposeLauncher(
         )
         sys.exit(code)
 
+    def configure_restart(self, argv):
+        """Configure `composer restart [opts] [service]` for the restart pipeline."""
+        restart_args = parse_restart_args(argv)
+        self.restart_mode = True
+        self.restart_service = restart_args.service
+        self.compose_file = restart_args.file
+        self.dev_mode = restart_args.dev
+        self.resolve_active_compose_files()
+        self.status_file = (
+            restart_args.status_file
+            or os.environ.get("COMPOSER_STATUS_FILE")
+            or None
+        )
+        self.log_file = os.environ.get("COMPOSER_LOG_FILE") or None
+        self.exclude_services = parse_service_list(
+            os.environ.get("COMPOSER_EXCLUDE_SERVICES")
+        )
+
     def run(self):
         try:
             argv = sys.argv[1:]
@@ -136,52 +154,50 @@ class DockerComposeLauncher(
                 from .watcher import run_watch
 
                 sys.exit(run_watch(parse_watch_args(argv[1:])))
+            if argv and argv[0] in {"restart", "-r", "--restart"}:
+                self.configure_restart(argv[1:])
+            else:
+                args = parse_args()
 
-            args = parse_args()
+                if args.version:
+                    print(f"composer {self.composer_version}")
+                    return
+                self.no_migrate = args.no_migrate
+                self.force_makemigrations = args.make_migrations
+                self.dev_mode = args.dev
+                self.compose_file = args.file
+                self.resolve_active_compose_files()
 
-            if args.version:
-                print(f"composer {self.composer_version}")
-                return
-            self.no_migrate = args.no_migrate
-            self.force_makemigrations = args.make_migrations
-            self.dev_mode = args.dev
-            self.compose_file = args.file
-            self.resolve_active_compose_files()
+                self.target_app = args.app
+                self.build_images = args.build
+                if args.update:
+                    # -u: pull then recreate. A service name scopes both the pull
+                    # and the recreate so only that service is updated and restarted
+                    # (Compose still starts its dependencies; dependents are left
+                    # untouched unless their own image changed).
+                    self.update_images = True
+                    if isinstance(args.update, str):
+                        self.pull_service = args.update
+                        self.up_service = args.update
+                elif args.update_only:
+                    # -uo: pull only. A service name scopes the pull; no compose up,
+                    # health checks, or post-start hooks run after the pull.
+                    self.update_images = True
+                    self.pull_only_mode = True
+                    if isinstance(args.update_only, str):
+                        self.pull_service = args.update_only
+                self.down_mode = args.down
+                self.down_volumes = args.volumes
+                self.purge = args.purge
 
-            self.target_app = args.app
-            self.build_images = args.build
-            if args.update:
-                # -u: pull then recreate. A service name scopes both the pull
-                # and the recreate so only that service is updated and restarted
-                # (Compose still starts its dependencies; dependents are left
-                # untouched unless their own image changed).
-                self.update_images = True
-                if isinstance(args.update, str):
-                    self.pull_service = args.update
-                    self.up_service = args.update
-            elif args.update_only:
-                # -uo: pull only. A service name scopes the pull; no compose up,
-                # health checks, or post-start hooks run after the pull.
-                self.update_images = True
-                self.pull_only_mode = True
-                if isinstance(args.update_only, str):
-                    self.pull_service = args.update_only
-            if args.restart:
-                self.restart_mode = True
-                if isinstance(args.restart, str):
-                    self.restart_service = args.restart
-            self.down_mode = args.down
-            self.down_volumes = args.volumes
-            self.purge = args.purge
-
-            # Status reporting + version gate config (env, overridable by flags).
-            self.status_file = args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
-            self.log_file = os.environ.get("COMPOSER_LOG_FILE") or None
-            self.force = args.force
-            self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
-            self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None
-            self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
-            self.exclude_services = parse_service_list(os.environ.get("COMPOSER_EXCLUDE_SERVICES"))
+                # Status reporting + version gate config (env, overridable by flags).
+                self.status_file = args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
+                self.log_file = os.environ.get("COMPOSER_LOG_FILE") or None
+                self.force = args.force
+                self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
+                self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None
+                self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
+                self.exclude_services = parse_service_list(os.environ.get("COMPOSER_EXCLUDE_SERVICES"))
 
             self.extract_config()
             if self.dev_mode:

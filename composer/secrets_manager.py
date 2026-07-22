@@ -1,7 +1,9 @@
 import os
+import shlex
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .constants import ENV_NAME_RE, INHERITED_SECRET_KEYS_ENV
 from .subprocess_runner import SubprocessRunnerMixin
 
 # Searched in order; first existing/complete match wins.
@@ -42,6 +44,59 @@ class SecretsMixin(SubprocessRunnerMixin):
     def plaintext_env_candidates(self) -> List[Path]:
         return [Path(c) for c in PLAINTEXT_ENV_CANDIDATES if Path(c).exists()]
 
+    def inherited_secret_keys(self) -> Optional[List[str]]:
+        raw = os.environ.get(INHERITED_SECRET_KEYS_ENV)
+        if raw is None:
+            return None
+        return list(
+            dict.fromkeys(
+                key.strip()
+                for key in raw.split(",")
+                if ENV_NAME_RE.fullmatch(key.strip())
+            )
+        )
+
+    def mapped_host_uid(self) -> Optional[int]:
+        """Return the host UID backing this process, including userns-remap."""
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is None:
+            return None
+        try:
+            mappings = Path("/proc/self/uid_map").read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+
+        effective_uid = geteuid()
+        for line in mappings.splitlines():
+            try:
+                container_start, host_start, length = map(int, line.split())
+            except (TypeError, ValueError):
+                continue
+            if container_start <= effective_uid < container_start + length:
+                return host_start + (effective_uid - container_start)
+        return None
+
+    def unreadable_secret_hint(self, path: Path) -> str:
+        mapped_uid = self.mapped_host_uid()
+        if mapped_uid is None:
+            return (
+                "   Check the file and parent-directory permissions/ownership. "
+                "Refusing to deploy on compose defaults."
+            )
+
+        parent = shlex.quote(str(path.parent))
+        target = shlex.quote(str(path))
+        return (
+            "   Refusing to deploy on compose defaults. This updater maps to "
+            f"host UID {mapped_uid}. From the project root, grant only that UID "
+            "access (install the host's `acl` package if `setfacl` is missing):\n"
+            f"     sudo setfacl -m u:{mapped_uid}:--x {parent}\n"
+            f"     sudo setfacl -m u:{mapped_uid}:r-- {target}\n"
+            f"   Verify without printing secrets: docker compose exec -T "
+            f"composer-updater test -r {target}\n"
+            "   Do not make the secrets file world-readable."
+        )
+
     def resolve_secrets(self) -> Tuple[bool, str]:
         """Resolve secrets from a plaintext env file: use the first candidate
         (``.env`` → ``secrets/.env`` → ``.secrets/.env``) that both satisfies
@@ -60,6 +115,19 @@ class SecretsMixin(SubprocessRunnerMixin):
             injected.add("NGINX_PORT")
             injected.add("DEBUG")
             injected.add("DEBUG_STATUS")
+
+        inherited_keys = self.inherited_secret_keys()
+        if inherited_keys is not None:
+            missing = sorted(
+                key
+                for key in set(inherited_keys) | (required - injected)
+                if key not in os.environ
+            )
+            if not inherited_keys or missing:
+                shown = ", ".join(missing[:8]) if missing else "(no keys declared)"
+                return False, "Inherited Composer secrets are incomplete: " + shown
+            self.secrets_source = "inherited launcher environment"
+            return True, ""
 
         incomplete: Optional[Tuple[Path, List[str]]] = None
         unreadable: Optional[Tuple[Path, str]] = None
@@ -89,9 +157,7 @@ class SecretsMixin(SubprocessRunnerMixin):
             path, reason = unreadable
             return False, (
                 f"{path} exists but could not be read ({reason}).\n"
-                "   Check its permissions/ownership — a root-only secrets file "
-                "can be unreadable inside the updater container under Docker "
-                "userns-remap. Refusing to deploy on compose defaults."
+                f"{self.unreadable_secret_hint(path)}"
             )
         if incomplete is not None:
             path, missing = incomplete

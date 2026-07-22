@@ -18,9 +18,33 @@ Composer resolves secrets automatically. It looks for a plaintext env file —
 `.env`, `secrets/.env`, then `.secrets/.env` — and uses the first one that
 supplies every variable the compose file requires.
 
+### resident updater secret access
+
+A resident `composer-updater` must retain the same values for later image-update
+runs. The `start.sh`/`start.ps1` wrappers pass the selected file to the one-shot
+Composer container with Docker's `--env-file`; when Composer creates or recreates
+`composer-updater`, its private mode-`0600` runtime override forwards those values
+and a key manifest only to that service. The watcher and its update children then
+use the inherited environment instead of reopening the host bind-mounted file.
+Host mode-`0600` secrets therefore need no ACL or capability exception.
+
+After upgrading an existing deployment to Composer 1.1.15, recreate the resident
+service once through the wrapper so it receives the handoff:
+
+```bash
+./start.sh --update
+./start.sh -u composer-updater
+```
+
+Directly-created legacy updater containers without this handoff retain the strict
+file-read fallback: unreadable candidates abort before pull/recreate and report
+mapped-UID ACL diagnostics rather than deploying on Compose defaults.
+
 ## the surface
 
 `composer run [-m] [-s] [-F] [-f FILE] [-d] <service> <command...>` runs a command inside a service instead of typing `docker exec`/`docker run` by hand. Defaults to `docker compose exec <service> …`; `-m`/`--manage` prepends `python manage.py` (e.g. `./start.sh run -m web migrate --noinput`), `-s`/`--shell` runs the command via `sh -c` so pipes/`&&` work, and `-F`/`--fresh` uses a one-off `docker compose run --rm`. TTY is auto-detected. See `composer run --help`.
+
+`composer restart [-f FILE] [-d] [--status-file PATH] [service]` restarts running containers through `docker compose restart`, then waits for their health checks. Containers are preserved and post-start tasks are skipped. Pass a service to restart only that service. `composer -r ...` and `composer --restart ...` remain short leading aliases. See `composer restart --help`.
 
 `composer watch --trigger-file PATH [--interval N]` runs composer as a resident, in-compose updater. It watches the trigger file and, on each new request (a changed `token`, or the file's `mtime`), runs a full update (`composer -u`: pull → version gate → recreate → health → post_start). The processed token and child exit code are recorded in `<trigger-file>.ack`, so a request is applied once and survives a restart. Add `--status-file PATH` to have each run publish [deploy status](#deploy-status); if the child exits before publishing its own terminal failure, the watcher guarantees a token-matched `failed` status so maintenance consumers are never left waiting on a dead process. See `composer watch --help`.
 
@@ -37,7 +61,6 @@ With `--status-file` (or `--log-file PATH`), each update run also writes a clean
 | `-d`, `--dev` | Development mode. Loads `compose.dev.yml` on top of the base compose file (two files) and forces `DEBUG=True` / `DEBUG_STATUS=True` into every service. |
 | `-u`, `--update [service]` | Pull the latest image(s) then recreate immediately. Pass a service name to update and recreate only that service (Compose still starts its dependencies; dependents aren't auto-restarted unless their own image changed). |
 | `-uo`, `--update-only [service]` | Pull the latest image(s) only, then exit. Pass a service name to pull only that service. Does not run `up`, health checks, or post-start tasks. |
-| `-r`, `--restart [service]` | Restart running containers via `docker compose restart` instead of a `--down` + start. Containers are preserved, so baked-in env vars survive. Pass a service name to restart only that service. |
 | `-b`, `--build` | Rebuild images during startup. |
 | `--force` | Bypass the preflight version gate (allow updating onto an older image version). |
 | `--status-file PATH` | Write a JSON deploy-status file to `PATH` (overrides `COMPOSER_STATUS_FILE`). |

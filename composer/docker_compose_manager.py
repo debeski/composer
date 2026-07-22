@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .constants import (
+    DEFAULT_RESIDENT_SERVICE,
+    ENV_NAME_RE,
+    INHERITED_SECRET_KEYS_ENV,
     SERVICE_FAILED,
     SERVICE_HEALTHY,
     SERVICE_NOT_SEEN,
@@ -17,6 +20,18 @@ from .subprocess_runner import SubprocessRunnerMixin
 
 
 class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
+    def resident_secret_keys(self) -> List[str]:
+        loaded = list(getattr(self, "loaded_secrets", []) or [])
+        raw_inherited = os.environ.get(INHERITED_SECRET_KEYS_ENV, "")
+        inherited = [key.strip() for key in raw_inherited.split(",")]
+        return sorted(
+            {
+                key
+                for key in loaded + inherited
+                if ENV_NAME_RE.fullmatch(key) and key in os.environ
+            }
+        )
+
     def build_compose_base_args(self) -> List[str]:
         base_args = []
         for file in self.active_compose_files:
@@ -214,10 +229,23 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
                 return False
 
         lines = ["services:"]
+        resident_service = os.environ.get(
+            "COMPOSER_WATCH_SELF_SERVICE", DEFAULT_RESIDENT_SERVICE
+        ).strip()
+        secret_keys = self.resident_secret_keys()
         for service in self.services:
             service_env = [
                 f"      COMPOSER_VERSION: {json.dumps(self.composer_version)}",
             ]
+            if service == resident_service and secret_keys:
+                service_env.append(
+                    f"      {INHERITED_SECRET_KEYS_ENV}: "
+                    f"{json.dumps(','.join(secret_keys))}"
+                )
+                service_env.extend(
+                    f"      {json.dumps(key)}: {json.dumps(os.environ[key])}"
+                    for key in secret_keys
+                )
             if self.dev_mode:
                 # Override file is applied last, so this wins over any DEBUG the
                 # project's compose files declare for the service.

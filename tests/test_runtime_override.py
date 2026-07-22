@@ -14,6 +14,7 @@ class RuntimeOverrideHarness(DockerComposeMixin):
         self.dev_mode = False
         self.compose_runtime_override = None
         self.last_runtime_diagnostic = ""
+        self.loaded_secrets = []
 
 
 class RuntimeOverrideTests(unittest.TestCase):
@@ -54,6 +55,30 @@ class RuntimeOverrideTests(unittest.TestCase):
         self.assertIsNone(launcher.compose_runtime_override)
         self.assertIn("Failed to create Composer runtime override", launcher.last_runtime_diagnostic)
         self.assertIn("temporary storage unavailable", launcher.last_runtime_diagnostic)
+
+    def test_override_passes_loaded_secrets_only_to_resident_updater(self):
+        launcher = RuntimeOverrideHarness()
+        launcher.services = ["web", "composer-updater"]
+        launcher.loaded_secrets = ["POSTGRES_PASSWORD", "EMPTY_OPTION"]
+
+        with patch.dict(
+            os.environ,
+            {"POSTGRES_PASSWORD": "s3cret:quoted", "EMPTY_OPTION": ""},
+            clear=False,
+        ):
+            self.assertTrue(launcher.sync_runtime_compose_override())
+            contents = launcher.compose_runtime_override.read_text(encoding="utf-8")
+
+        web, updater = contents.split("  composer-updater:", 1)
+        self.assertNotIn("POSTGRES_PASSWORD", web)
+        self.assertIn(
+            'COMPOSER_INHERITED_SECRET_KEYS: "EMPTY_OPTION,POSTGRES_PASSWORD"',
+            updater,
+        )
+        self.assertIn('"POSTGRES_PASSWORD": "s3cret:quoted"', updater)
+        self.assertIn('"EMPTY_OPTION": ""', updater)
+        self.assertEqual(launcher.compose_runtime_override.stat().st_mode & 0o777, 0o600)
+        launcher.remove_runtime_compose_override()
 
 
 if __name__ == "__main__":

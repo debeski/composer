@@ -12,6 +12,9 @@ def parse_args():
             "      -m/--manage prepends 'python manage.py'; -s/--shell runs via 'sh -c';\n"
             "      -F/--fresh starts a one-off container (docker compose run --rm).\n"
             "      Run 'composer run --help' for details.\n"
+            "  restart [-f FILE] [-d] [--status-file PATH] [service]\n"
+            "      Restart running containers (short alias: composer -r).\n"
+            "      Run 'composer restart --help' for details.\n"
             "  watch --trigger-file PATH [--interval N]\n"
             "      Resident updater: watch a trigger file and run a full update\n"
             "      (pull + version gate + recreate + health + post_start) on each\n"
@@ -58,14 +61,6 @@ def parse_args():
         const=True,
         metavar="SERVICE",
         help="Pull latest image(s) only, then exit; pass a service name to pull only that service",
-    )
-    parser.add_argument(
-        "-r",
-        "--restart",
-        nargs="?",
-        const=True,
-        metavar="SERVICE",
-        help="Restart running containers (docker compose restart) instead of down + start; pass a service name to restart only that service",
     )
     parser.add_argument(
         "-b",
@@ -145,6 +140,35 @@ def parse_run_args(argv):
         "command",
         nargs=argparse.REMAINDER,
         help="Command (and its arguments) to run inside the service",
+    )
+    return parser.parse_args(argv)
+
+
+def parse_restart_args(argv):
+    """Parse arguments for the `restart` subcommand (composer restart ...)."""
+    parser = argparse.ArgumentParser(
+        prog="composer restart",
+        description=(
+            "Restart running Compose containers, then wait for their health checks. "
+            "Containers are preserved and post-start tasks are not run."
+        ),
+    )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    parser.add_argument(
+        "--status-file",
+        metavar="PATH",
+        help="Write a JSON restart-status file to PATH (overrides COMPOSER_STATUS_FILE)",
+    )
+    parser.add_argument(
+        "service",
+        nargs="?",
+        help="Restart only this Compose service (default: all services)",
     )
     return parser.parse_args(argv)
 
