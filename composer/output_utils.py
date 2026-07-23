@@ -1,6 +1,8 @@
 import json
 from typing import Dict, List, Optional
 
+from .agent_protocol import redact_text
+
 from .constants import ANSI_ESCAPE_RE, ERROR_KEYWORDS, PROGRESS_KEYWORDS
 
 
@@ -93,7 +95,7 @@ class OutputUtilsMixin:
         try:
             with open(path, "a", encoding="utf-8") as handle:
                 for line in str(text).splitlines() or [""]:
-                    handle.write(line.rstrip() + "\n")
+                    handle.write(redact_text(line.rstrip()) + "\n")
         except OSError:
             pass
 

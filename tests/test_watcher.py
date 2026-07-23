@@ -26,6 +26,28 @@ def watch_args(root):
 
 
 class WatcherTerminalStatusTests(unittest.TestCase):
+    def test_operation_id_is_forwarded_to_status_and_ack(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            args = watch_args(root)
+            operation_id = "aa074a4b-d996-4c4c-a2ee-fbc245844ca0"
+            Path(args.trigger_file).write_text(
+                json.dumps({"token": "request-operation", "operation_id": operation_id}),
+                encoding="utf-8",
+            )
+
+            def fail_with_operation(*_args, **kwargs):
+                self.assertEqual(kwargs["env"]["COMPOSER_OPERATION_ID"], operation_id)
+                return SimpleNamespace(returncode=1)
+
+            with patch("composer.watcher.subprocess.run", side_effect=fail_with_operation):
+                self.assertEqual(run_watch(args), 1)
+
+            status = json.loads(Path(args.status_file).read_text(encoding="utf-8"))
+            ack = json.loads(Path(f"{args.trigger_file}.ack").read_text(encoding="utf-8"))
+            self.assertEqual(status["operation_id"], operation_id)
+            self.assertEqual(ack["operation_id"], operation_id)
+
     def test_failed_child_guarantees_status_ack_and_console_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

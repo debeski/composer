@@ -372,6 +372,15 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         restart_args = ["restart"]
         if isinstance(self.restart_service, str):
             restart_args.append(self.restart_service)
+        elif getattr(self, "restart_services", None):
+            restart_args.extend(self.restart_services)
+        elif getattr(self, "exclude_services", None):
+            if not self.services:
+                return False, "", (
+                    "No compose services remain after COMPOSER_EXCLUDE_SERVICES; "
+                    "refusing to run an unscoped compose restart."
+                )
+            restart_args.extend(self.services)
         return self.run_docker_compose_streaming(
             restart_args,
             progress_callback=lambda line: self.emit_progress("Restart", line),

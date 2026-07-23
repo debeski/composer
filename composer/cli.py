@@ -18,7 +18,13 @@ def parse_args():
             "  watch --trigger-file PATH [--interval N]\n"
             "      Resident updater: watch a trigger file and run a full update\n"
             "      (pull + version gate + recreate + health + post_start) on each\n"
-            "      new request. Run 'composer watch --help' for details."
+            "      new request. Run 'composer watch --help' for details.\n"
+            "  agent [--control-url URL] [--state-dir PATH]\n"
+            "      Durable resident deployment agent with local DLUX handoff and\n"
+            "      outbound control-plane connectivity. Run 'composer agent --help'.\n"
+            "  enable-agent [--apply]\n"
+            "      Migrate a generated DLUX project from composer-updater to\n"
+            "      composer-agent. Dry-run by default."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -238,4 +244,78 @@ def parse_watch_args(argv):
         action="store_true",
         help="Process at most one pending request, then exit (for testing)",
     )
+    return parser.parse_args(argv)
+
+
+def parse_agent_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="composer agent",
+        description=(
+            "Resident deployment agent. Preserves the local DLUX trigger/status "
+            "contract and optionally connects outbound to a DLUX control plane."
+        ),
+    )
+    parser.add_argument(
+        "--control-url",
+        default=None,
+        help="Control-plane base URL (default: COMPOSER_CONTROL_URL)",
+    )
+    parser.add_argument(
+        "--enrollment-token",
+        default=None,
+        help="One-use enrollment token (default: COMPOSER_ENROLLMENT_TOKEN)",
+    )
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        help="Private durable agent state directory (default: COMPOSER_AGENT_STATE_DIR or /var/lib/composer-agent)",
+    )
+    parser.add_argument(
+        "--bridge-dir",
+        default=None,
+        help="DLUX typed bridge directory (default: sibling 'agent' directory beside the trigger file)",
+    )
+    parser.add_argument(
+        "--trigger-file",
+        default="/opt/dlux-runtime/state/image-update-request.json",
+        help="Local DLUX image-update trigger file",
+    )
+    parser.add_argument("--status-file", help="Local deploy-status JSON file")
+    parser.add_argument("--log-file", help="Local sanitized deploy log file")
+    parser.add_argument("--interval", type=float, default=2.0, help="Local work-loop interval")
+    parser.add_argument("-f", "--file", help="Alternate compose file")
+    parser.add_argument("-d", "--dev", action="store_true", help="Use compose.dev.yml")
+    parser.add_argument("--check-image", action="append", metavar="IMAGE")
+    parser.add_argument("--check-interval", type=float, default=3600.0)
+    parser.add_argument("--availability-file")
+    parser.add_argument(
+        "--allow-http-localhost",
+        action="store_true",
+        help="Allow an http://localhost control URL for development only",
+    )
+    parser.add_argument("--once", action="store_true", help="Run one local agent iteration")
+    return parser.parse_args(argv)
+
+
+def parse_enable_agent_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="composer enable-agent",
+        description=(
+            "Replace a recognized generated DLUX composer-updater block with the "
+            "hardened composer-agent topology. The default is a read-only dry run."
+        ),
+    )
+    parser.add_argument("--apply", action="store_true", help="Apply after Compose validation")
+    parser.add_argument(
+        "--project-dir",
+        default=".",
+        help="Generated DLUX project directory (default: current directory)",
+    )
+    parser.add_argument("-f", "--file", help="Compose file relative to the project directory")
+    parser.add_argument(
+        "--allow-unverified-dlux",
+        action="store_true",
+        help="Allow apply when a DjangoLux 1.5+ dependency cannot be verified",
+    )
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)

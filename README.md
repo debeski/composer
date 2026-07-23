@@ -18,27 +18,18 @@ Composer resolves secrets automatically. It looks for a plaintext env file —
 `.env`, `secrets/.env`, then `.secrets/.env` — and uses the first one that
 supplies every variable the compose file requires.
 
-### resident updater secret access
+### resident agent secret access
 
-A resident `composer-updater` must retain the same values for later image-update
+A resident `composer-agent` must retain the same values for later image-update
 runs. The `start.sh`/`start.ps1` wrappers pass the selected file to the one-shot
 Composer container with Docker's `--env-file`; when Composer creates or recreates
-`composer-updater`, its private mode-`0600` runtime override forwards those values
-and a key manifest only to that service. The watcher and its update children then
+`composer-agent`, its private mode-`0600` runtime override forwards those values
+and a key manifest only to that service. The agent and its update children then
 use the inherited environment instead of reopening the host bind-mounted file.
 Host mode-`0600` secrets therefore need no ACL or capability exception.
 
-After upgrading an existing deployment to Composer 1.1.15, recreate the resident
-service once through the wrapper so it receives the handoff:
-
-```bash
-./start.sh --update
-./start.sh -u composer-updater
-```
-
-Directly-created legacy updater containers without this handoff retain the strict
-file-read fallback: unreadable candidates abort before pull/recreate and report
-mapped-UID ACL diagnostics rather than deploying on Compose defaults.
+Legacy `composer-updater` services remain supported through `composer watch` for
+one migration cycle. New deployments use `composer agent`.
 
 ## the surface
 
@@ -47,6 +38,25 @@ mapped-UID ACL diagnostics rather than deploying on Compose defaults.
 `composer restart [-f FILE] [-d] [--status-file PATH] [service]` restarts running containers through `docker compose restart`, then waits for their health checks. Containers are preserved and post-start tasks are skipped. Pass a service to restart only that service. `composer -r ...` and `composer --restart ...` remain short leading aliases. See `composer restart --help`.
 
 `composer watch --trigger-file PATH [--interval N]` runs composer as a resident, in-compose updater. It watches the trigger file and, on each new request (a changed `token`, or the file's `mtime`), runs a full update (`composer -u`: pull → version gate → recreate → health → post_start). The processed token and child exit code are recorded in `<trigger-file>.ack`, so a request is applied once and survives a restart. Add `--status-file PATH` to have each run publish [deploy status](#deploy-status); if the child exits before publishing its own terminal failure, the watcher guarantees a token-matched `failed` status so maintenance consumers are never left waiting on a dead process. See `composer watch --help`.
+
+`composer agent` is the durable successor to `watch`. It preserves the same local trigger/status/ack and registry-availability files, adds a typed DLUX spool, SQLite command/outbox replay, operation correlation, safe restart allowlisting, and optional outbound HTTPS long polling. Configure `COMPOSER_CONTROL_URL`, a 15-minute one-use `COMPOSER_ENROLLMENT_TOKEN`, and `COMPOSER_AGENT_STATE_DIR` (default `/var/lib/composer-agent`). Local DLUX-triggered updates continue while the control plane is unavailable or the machine credential is revoked. See [Agent Protocol v1](docs/agent-protocol-v1.md).
+
+Migrate an existing generated DLUX project with Composer itself:
+
+```bash
+./start.sh --update
+./start.sh enable-agent
+./start.sh enable-agent --apply
+```
+
+The default dry run prints the exact Compose diff. Apply accepts only a recognized
+DLUX-generated updater block, requires a declared DjangoLux 1.5.0+ bridge unless
+explicitly overridden, validates the candidate with `docker compose config`
+before writing, preserves the original under
+`.xpose/dlux-agent-bootstrap/<timestamp>/`, and replaces it atomically. A
+locally installed binary may instead run `composer enable-agent --project-dir
+/path/to/project`. The deprecated `python -m dlux enable-agent` route forwards to
+this command for one migration cycle; Composer is the sole transformer.
 
 When `watch` runs inside the same Compose project it is updating, it excludes the resident updater service from child runs by default (`composer-updater`). The child receives `COMPOSER_EXCLUDE_SERVICES=composer-updater`, so pull/config/up/health/post-start operate on the application services and do not recreate the container that is supervising the update. Override the service name with `COMPOSER_WATCH_SELF_SERVICE`, disable the default with `COMPOSER_WATCH_SELF_SERVICE=""`, or set additional exclusions with `COMPOSER_EXCLUDE_SERVICES`.
 
@@ -65,7 +75,7 @@ With `--status-file` (or `--log-file PATH`), each update run also writes a clean
 | `--force` | Bypass the preflight version gate (allow updating onto an older image version). |
 | `--status-file PATH` | Write a JSON deploy-status file to `PATH` (overrides `COMPOSER_STATUS_FILE`). |
 | `--down` | Stop everything. |
-| `-v`, `--volumes` | Remove volumes too. |
+| `-v`, `--volumes` | With `--down`: Remove volumes too. |
 | `-p`, `--purge` | With `--down`: also remove built untagged images, volumes, networks, orphans, and dangling build cache. |
 
 ## deploy status

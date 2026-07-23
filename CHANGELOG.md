@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.0
+- **Outbound Composer Agent**: Added `composer agent` with HTTPS enrollment/long polling, SQLite command and replay durability, typed update/backup DLUX spool relay, operation-aware status, safe restart allowlists, two-phase rotation, fresh-token re-enrollment after revocation, and local `watch` compatibility.
+- **Composer-Owned Agent Migration**: Added dry-run-first `composer enable-agent` to diff, Compose-validate, preserve, and atomically migrate recognized DLUX updater scaffolds; DjangoLux now keeps only a temporary forwarding alias.
+- **Protocol Security**: Added strict schema-v1 fields/timestamps and payload bounds, UUID deduplication, monotonic events, inherited-secret/log redaction, capability reporting, read-only project support, and stateful-service exclusions through the existing Docker socket proxy.
+
 ## v1.1.15
 - **Restart Subcommand**: Moved restart into `composer restart [-f FILE] [-d] [--status-file PATH] [service]` with dedicated help and early dispatch like `composer run`; leading `-r`/`--restart` aliases retain the same restart-and-health pipeline.
 - **Private Secrets Handoff To Resident Updater**: `start.sh`/`start.ps1` now pass the selected plaintext file through Docker `--env-file` with a key manifest, and Composer's mode-`0600` runtime override forwards those inherited values only to `composer-updater`. Resident image updates validate and reuse that environment instead of reopening the host bind-mounted file, so mode-`0600` secrets work without ACLs or added capabilities. Direct legacy containers retain strict fail-before-pull behavior plus mapped-UID ACL diagnostics.

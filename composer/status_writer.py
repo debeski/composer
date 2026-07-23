@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .agent_protocol import redact_text
+
 
 class StatusWriterMixin:
     """Writes a machine-readable deploy status file so another process (a
@@ -43,6 +45,12 @@ class StatusWriterMixin:
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "composer_version": self.composer_version,
         }
+        operation_id = os.environ.get("COMPOSER_OPERATION_ID", "").strip()
+        request_token = os.environ.get("COMPOSER_REQUEST_TOKEN", "").strip()
+        if operation_id:
+            payload["operation_id"] = operation_id
+        if request_token:
+            payload["request_token"] = request_token
         if self.active_compose_files:
             payload["compose_files"] = list(self.active_compose_files)
         target_images = getattr(self, "gate_images", None)
@@ -55,7 +63,7 @@ class StatusWriterMixin:
         if active_version:
             payload["active_version"] = active_version
         if error:
-            payload["error"] = str(error).strip()[:2000]
+            payload["error"] = redact_text(error)[:2000]
         if extra:
             payload.update(extra)
 

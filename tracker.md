@@ -3,10 +3,10 @@
 ## Part 1: Project Related
 ### Current Verified Snapshot:
 - Composer is a Docker Compose orchestration tool for plaintext env secrets, health checks, post-start hooks, status files, and resident image updates.
-- Current repo version is unreleased `1.1.15`; wrappers/runtime overrides hand private secrets to resident updaters; `v1.1.14` is the latest tag.
+- Current source is unreleased v1.2.0; latest tag is v1.1.15.
 - Implementation lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and wrapper scripts `start.sh`/`start.ps1`.
 - `start.sh` targets `debeski/composer:latest`; only exact sole `--update` self-updates the Composer tool image, while `-u`/`-uo`/`-r` pass through.
-- `watch` publishes digest-driven availability with optional version/project manifest labels; manifests accept quote-safe `base64:` or legacy raw JSON.
+- `agent` adds outbound HTTPS control and typed DLUX relay; `composer enable-agent` is the sole guarded/diffable legacy scaffold transformer.
 
 ### Current Project Adopted Standards:
 - Use argparse for CLI handling; intercept `run`, `restart`, and `watch` before flat parse.
@@ -32,15 +32,17 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish v1.1.15; update project wrappers, then recreate Decrees/Trademarks `composer-updater` through `./start.sh -u composer-updater`.
-  - [ ] Redeploy decrees updater to pick up widened COMPOSER_EXCLUDE_SERVICES (db/redis/caddy/pgadmin/db-backup) — recreate the composer-updater service.
-  - [ ] Live verify image update path: dlux queue -> backup -> maintenance -> composer pull/gate/recreate/migrator -> new dlux boot finalizes.
+  - [ ] Publish Composer v1.2.0 and DjangoLux v1.5.0, then migrate resident updaters with `./start.sh enable-agent --apply` after reviewing its dry run.
+  - [ ] Pilot v1.2.0 end to end: enrollment -> DLUX backup -> maintenance -> Composer deploy -> DLUX finalization -> replayed central result.
+  - [ ] Live verify cancellation, outage replay, revocation, safe restart, and data/full backup creation through docker-socket-proxy.
   - [ ] Verify plaintext resolution against a real compose project.
   - [ ] Verify `python -m composer` startup with `build:`, `COMPOSER_VERSION`, exit-1 diagnostics, and failing `post_start`.
 - **Priority 2:**
   - [ ] Rebuild/push pending Composer images as needed and confirm runtime smoke tests.
   - [ ] Decrees redeploy note: `down` + `up -d` from project root; named volumes preserved.
 - **Completed Recently:**
+  - [x] v1.2.0: Composer-owned `enable-agent` provides an exact dry-run diff, pre-write Compose validation, `.xpose` preservation, atomic replacement, and a one-cycle DLUX forwarding alias.
+  - [x] v1.2.0: outbound `composer agent`, strict schema-v1 typed commands, SQLite credentials/commands/outbox, accepted-event execution gate, revocation re-enrollment, rotation replay, backup relay, operation IDs, redaction, safe restart, and `watch` compatibility.
   - [x] v1.1.15: moved restart to `composer restart [service]`; wrappers/runtime override now hand private secrets to the resident updater, with strict file fallback diagnostics.
   - [x] v1.1.14: resolve_secrets refuses unreadable/empty env candidates (parse_env_file raises; no vacuous success), stopping defaults-fallthrough deploys before pull/recreate; new tests/test_secrets.py. Widened decrees COMPOSER_EXCLUDE_SERVICES to exclude stateful svcs.
   - [x] v1.1.13: bounded URL-safe-base64 project manifest label decoding with raw JSON compatibility and unchanged malformed-metadata fallbacks.
@@ -53,12 +55,13 @@
   - [x] v1.1.3-v1.1.4 `run` subcommand, `-u` scoped update/recreate, `-uo` legacy full startup update, `-r` restart branch.
 
 ### One-line info about last verified Tests:
+- Verified 2026-07-23: 48/48 unittest pass plus real Docker Compose config validation for the generated agent topology.
 - Verified 2026-07-22: 24/24 `unittest` pass; built v1.1.15 image smoke passes inherited secrets without project-file access; AST/diff/Bash/help pass, PowerShell unavailable.
 - Verified 2026-07-18: 16/16 `unittest` pass (added test_secrets.py: unreadable/empty/valid env resolution + fallthrough); live-container repro confirmed old vacuous-success vs new loud-fail against real decrees compose.
 - Verified 2026-07-17: AST syntax parse for `composer/*.py`; stubbed exclusion assertions for bulk `pull`/`up`/version-gate images + `watch` child env; `python3 -m composer --help`; `python3 -m composer watch --help`.
 
 ### One-line info about last time edited Docs:
-- Edited `README.md`/`CHANGELOG.md` v1.1.15 on 2026-07-22 for restart and automatic resident secrets handoff.
+- Edited `README.md`, `docs/agent-protocol-v1.md`, and `CHANGELOG.md` on 2026-07-23 for the v1.2.0 agent and Composer-owned migration.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

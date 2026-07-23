@@ -3,7 +3,14 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .cli import parse_args, parse_restart_args, parse_run_args, parse_watch_args
+from .cli import (
+    parse_agent_args,
+    parse_args,
+    parse_enable_agent_args,
+    parse_restart_args,
+    parse_run_args,
+    parse_watch_args,
+)
 from .config import ConfigMixin
 from .constants import ERROR, IDLE, OK, RUNNING
 from .docker_compose_manager import DockerComposeMixin
@@ -45,6 +52,7 @@ class DockerComposeLauncher(
         self.up_service = None
         self.restart_mode = False
         self.restart_service = None
+        self.restart_services: List[str] = []
         self.down_mode = False
         self.down_volumes = False
         self.purge = False
@@ -143,6 +151,14 @@ class DockerComposeLauncher(
         self.exclude_services = parse_service_list(
             os.environ.get("COMPOSER_EXCLUDE_SERVICES")
         )
+        if not self.restart_service:
+            self.restart_services = parse_service_list(
+                os.environ.get("COMPOSER_RESTART_SERVICES")
+            )
+            excluded = set(self.exclude_services)
+            self.restart_services = [
+                service for service in self.restart_services if service not in excluded
+            ]
 
     def run(self):
         try:
@@ -154,6 +170,14 @@ class DockerComposeLauncher(
                 from .watcher import run_watch
 
                 sys.exit(run_watch(parse_watch_args(argv[1:])))
+            if argv and argv[0] == "agent":
+                from .agent import run_agent
+
+                sys.exit(run_agent(parse_agent_args(argv[1:])))
+            if argv and argv[0] == "enable-agent":
+                from .agent_installer import run_enable_agent
+
+                sys.exit(run_enable_agent(parse_enable_agent_args(argv[1:])))
             if argv and argv[0] in {"restart", "-r", "--restart"}:
                 self.configure_restart(argv[1:])
             else:

@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .agent_protocol import redact_text
 from .registry import DEFAULT_VERSION_LABEL, remote_image_labels, remote_tag_digest
 from .service_selection import join_service_list, parse_service_list
 
@@ -202,6 +203,14 @@ def _read_request_token(trigger: Path) -> Optional[str]:
         return None
 
 
+def read_request(trigger: Path) -> dict:
+    try:
+        value = json.loads(trigger.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def _read_ack_token(ack: Path) -> Optional[str]:
     try:
         token = str(json.loads(ack.read_text(encoding="utf-8")).get("token") or "").strip()
@@ -210,12 +219,14 @@ def _read_ack_token(ack: Path) -> Optional[str]:
         return None
 
 
-def _write_ack(ack: Path, token: str, exit_code: int):
+def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = ""):
     payload = {
         "token": token,
         "exit_code": exit_code,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    if operation_id:
+        payload["operation_id"] = operation_id
     try:
         ack.parent.mkdir(parents=True, exist_ok=True)
         tmp = ack.with_name(f".{ack.name}.tmp")
@@ -230,6 +241,7 @@ def _publish_terminal_failure(
     token: str,
     exit_code: int,
     error: str = "",
+    operation_id: str = "",
 ) -> bool:
     """Guarantee a terminal deploy status after a failed child process.
 
@@ -254,10 +266,12 @@ def _publish_terminal_failure(
         **current,
         "status": "failed",
         "updated_at": _now_iso(),
-        "error": detail[:4000],
+        "error": redact_text(detail)[:4000],
         "request_token": token,
         "exit_code": int(exit_code),
     }
+    if operation_id:
+        payload["operation_id"] = operation_id
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(f".{target.name}.tmp")
@@ -275,113 +289,125 @@ def _append_terminal_failure(log_file: Optional[str], error: str):
         target = Path(log_file)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8") as stream:
-            stream.write(f"\nUpdate failed: {error}\n")
+            stream.write(f"\nUpdate failed: {redact_text(error)}\n")
     except OSError:
         pass
 
 
-def run_watch(args) -> int:
-    trigger = Path(args.trigger_file)
-    ack = Path(f"{trigger}.ack")
-    interval = max(2.0, float(args.interval))
+class WatchRuntime:
+    def __init__(self, args):
+        self.args = args
+        self.trigger = Path(args.trigger_file)
+        self.ack = Path(f"{self.trigger}.ack")
+        self.interval = max(2.0, float(args.interval))
+        self.child = [sys.executable, "-m", "composer", "-u"]
+        if args.dev:
+            self.child.append("-d")
+        if args.file:
+            self.child.extend(["-f", args.file])
+        self.env = os.environ.copy()
+        if args.status_file:
+            self.env["COMPOSER_STATUS_FILE"] = args.status_file
+        excluded = parse_service_list(self.env.get("COMPOSER_EXCLUDE_SERVICES"))
+        self_service_raw = self.env.get("COMPOSER_WATCH_SELF_SERVICE")
+        self_services = (
+            ["composer-updater", "composer-agent"]
+            if self_service_raw is None
+            else parse_service_list(self_service_raw)
+        )
+        for service in self_services:
+            if service not in excluded:
+                excluded.append(service)
+        if excluded:
+            self.env["COMPOSER_EXCLUDE_SERVICES"] = join_service_list(excluded)
+        self.log_file = getattr(args, "log_file", None)
+        if not self.log_file and args.status_file:
+            self.log_file = str(Path(args.status_file).with_name("deploy-log.txt"))
+        if self.log_file:
+            self.env["COMPOSER_LOG_FILE"] = self.log_file
+        self.check_images = list(getattr(args, "check_image", None) or [])
+        self.availability_file = getattr(args, "availability_file", None)
+        self.check_interval = max(
+            60.0, float(getattr(args, "check_interval", 3600.0) or 3600.0)
+        )
+        self.availability_enabled = bool(self.check_images and self.availability_file)
+        self.next_check = 0.0
+        self.last_token = _read_ack_token(self.ack)
 
-    child = [sys.executable, "-m", "composer", "-u"]
-    if args.dev:
-        child.append("-d")
-    if args.file:
-        child.extend(["-f", args.file])
-
-    env = os.environ.copy()
-    if args.status_file:
-        env["COMPOSER_STATUS_FILE"] = args.status_file
-
-    excluded = parse_service_list(env.get("COMPOSER_EXCLUDE_SERVICES"))
-    self_service_raw = env.get("COMPOSER_WATCH_SELF_SERVICE")
-    self_services = (
-        ["composer-updater"]
-        if self_service_raw is None
-        else parse_service_list(self_service_raw)
-    )
-    for service in self_services:
-        if service not in excluded:
-            excluded.append(service)
-    if excluded:
-        env["COMPOSER_EXCLUDE_SERVICES"] = join_service_list(excluded)
-
-    # Console log for the live progress page: the -u child appends clean,
-    # ANSI-free progress lines to this file (via COMPOSER_LOG_FILE). Defaults to
-    # a sibling of the status file so a proxy can serve both from one dir.
-    log_file = getattr(args, "log_file", None)
-    if not log_file and args.status_file:
-        log_file = str(Path(args.status_file).with_name("deploy-log.txt"))
-    if log_file:
-        env["COMPOSER_LOG_FILE"] = log_file
-
-    # Optional registry-availability check: publish whether a newer image than
-    # the running one exists, so another process (dlux) can offer an update.
-    check_images = list(getattr(args, "check_image", None) or [])
-    availability_file = getattr(args, "availability_file", None)
-    check_interval = max(60.0, float(getattr(args, "check_interval", 3600.0) or 3600.0))
-    availability_enabled = bool(check_images and availability_file)
-    next_check = 0.0  # run the first availability check immediately
-
-    def maybe_check_availability(force=False):
-        nonlocal next_check
-        if not availability_enabled:
+    def maybe_check_availability(self, force=False):
+        if not self.availability_enabled:
             return
-        if force or time.monotonic() >= next_check:
-            write_availability(availability_file, check_images)
-            next_check = time.monotonic() + check_interval
+        if force or time.monotonic() >= self.next_check:
+            write_availability(self.availability_file, self.check_images)
+            self.next_check = time.monotonic() + self.check_interval
 
-    last_token = _read_ack_token(ack)
+    def pending_request(self):
+        token = _read_request_token(self.trigger)
+        if not token or token == self.last_token:
+            return None
+        value = read_request(self.trigger)
+        value["token"] = token
+        return value
+
+    def process(self, request: dict) -> int:
+        token = str(request["token"])
+        operation_id = str(request.get("operation_id") or "").strip()
+        print(f"⟳ update request {token} — running `composer -u`", flush=True)
+        if self.log_file:
+            try:
+                Path(self.log_file).parent.mkdir(parents=True, exist_ok=True)
+                Path(self.log_file).write_text("", encoding="utf-8")
+            except OSError:
+                pass
+        child_env = self.env.copy()
+        child_env["COMPOSER_REQUEST_TOKEN"] = token
+        if operation_id:
+            child_env["COMPOSER_OPERATION_ID"] = operation_id
+        launch_error = ""
+        try:
+            exit_code = subprocess.run(self.child, env=child_env).returncode
+        except (OSError, subprocess.SubprocessError) as exc:
+            exit_code = 127
+            launch_error = f"Composer update process could not start: {exc}"
+        if exit_code != 0:
+            fallback_error = launch_error or f"Composer update process exited with status {exit_code}."
+            if self.args.status_file:
+                _publish_terminal_failure(
+                    self.args.status_file,
+                    token,
+                    exit_code,
+                    error=launch_error,
+                    operation_id=operation_id,
+                )
+            _append_terminal_failure(self.log_file, fallback_error)
+        _write_ack(self.ack, token, exit_code, operation_id=operation_id)
+        self.last_token = token
+        result = "ready" if exit_code == 0 else f"failed (exit {exit_code})"
+        print(f"✔ update {token} → {result}", flush=True)
+        self.maybe_check_availability(force=True)
+        return exit_code
+
+
+def run_watch(args) -> int:
+    runtime = WatchRuntime(args)
     print(
-        f"👀 composer watch — trigger={trigger} interval={interval:g}s"
-        + (f" · availability check every {check_interval:g}s for {', '.join(check_images)}"
-           if availability_enabled else ""),
+        f"👀 composer watch — trigger={runtime.trigger} interval={runtime.interval:g}s"
+        + (
+            f" · availability check every {runtime.check_interval:g}s for "
+            f"{', '.join(runtime.check_images)}"
+            if runtime.availability_enabled
+            else ""
+        ),
         flush=True,
     )
 
     while True:
-        maybe_check_availability()
-        token = _read_request_token(trigger)
-        if token and token != last_token:
-            print(
-                f"⟳ update request {token} — running `composer -u`",
-                flush=True,
-            )
-            # Fresh console log per update run (the child appends to it).
-            if log_file:
-                try:
-                    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-                    Path(log_file).write_text("", encoding="utf-8")
-                except OSError:
-                    pass
-            launch_error = ""
-            try:
-                exit_code = subprocess.run(child, env=env).returncode
-            except (OSError, subprocess.SubprocessError) as exc:
-                exit_code = 127
-                launch_error = f"Composer update process could not start: {exc}"
-            if exit_code != 0:
-                fallback_error = launch_error or f"Composer update process exited with status {exit_code}."
-                if args.status_file:
-                    _publish_terminal_failure(
-                        args.status_file,
-                        token,
-                        exit_code,
-                        error=launch_error,
-                    )
-                _append_terminal_failure(log_file, fallback_error)
-            _write_ack(ack, token, exit_code)
-            last_token = token
-            result = "ready" if exit_code == 0 else f"failed (exit {exit_code})"
-            print(f"✔ update {token} → {result}", flush=True)
-            # The running image just changed — refresh availability so the
-            # "update available" signal clears promptly.
-            maybe_check_availability(force=True)
+        runtime.maybe_check_availability()
+        request = runtime.pending_request()
+        if request:
+            exit_code = runtime.process(request)
             if args.once:
                 return exit_code
         elif args.once:
-            # Nothing pending and we were asked to do a single pass.
             return 0
-        time.sleep(interval)
+        time.sleep(runtime.interval)
