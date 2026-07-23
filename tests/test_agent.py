@@ -281,5 +281,78 @@ class ComposerAgentTests(unittest.TestCase):
             self.assertEqual(agent.store.command_state(value["operation_id"]), "succeeded")
 
 
+class AgentPairingTests(unittest.TestCase):
+    """UI-driven pairing: DjangoLux delivers control URL + one-use code over the
+    bridge; the agent redeems it via the standard enroll endpoint."""
+
+    def _write_request(self, agent, operation_id, code, url="https://panel.test"):
+        agent._atomic_json(agent.enroll_request_path, {
+            "schema_version": 1,
+            "operation_id": operation_id,
+            "control_url": url,
+            "pairing_code": code,
+            "requested_at": "2026-07-23T10:00:00+00:00",
+        })
+
+    def test_bridge_pairing_enrolls_persists_url_and_is_idempotent(self):
+        class Client:
+            calls = 0
+
+            def enroll(self, token, capabilities):
+                Client.calls += 1
+                self.token = token
+                return {"agent_id": "paired-agent", "secret": "paired-secret"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = ComposerAgent(agent_args(Path(temp_dir)))
+            op = str(uuid.uuid4())
+            with patch.object(agent, "_build_client", return_value=Client()):
+                self._write_request(agent, op, "GOOD-CODE")
+                agent.process_enroll_request()
+                # idempotent: a repeat of the same operation must not re-enroll
+                agent.process_enroll_request()
+
+            self.assertEqual(Client.calls, 1)
+            self.assertEqual(
+                agent.store.load_credentials(),
+                {"agent_id": "paired-agent", "secret": "paired-secret"},
+            )
+            self.assertEqual(agent.store.get_meta("control_url"), "https://panel.test")
+            self.assertEqual(agent.control_url, "https://panel.test")
+            self.assertIsNotNone(agent.client)
+
+            status = json.loads(agent.agent_status_path.read_text())
+            self.assertTrue(status["enrolled"])
+            self.assertEqual(status["control_url"], "https://panel.test")
+            self.assertEqual(status["last_enroll"]["state"], "ok")
+            self.assertEqual(status["last_enroll"]["operation_id"], op)
+
+    def test_persisted_control_url_rebuilds_client_after_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first = ComposerAgent(agent_args(Path(temp_dir)))
+            first.store.set_meta("control_url", "https://panel.test")
+            # A fresh agent over the same durable store (no env control URL).
+            second = ComposerAgent(agent_args(Path(temp_dir)))
+            self.assertEqual(second.control_url, "https://panel.test")
+            self.assertIsNotNone(second.client)
+
+    def test_pairing_failure_reports_error_and_leaves_agent_unenrolled(self):
+        class Client:
+            def enroll(self, token, capabilities):
+                raise ControlPlaneError("invalid or expired pairing code", status=400)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = ComposerAgent(agent_args(Path(temp_dir)))
+            op = str(uuid.uuid4())
+            with patch.object(agent, "_build_client", return_value=Client()):
+                self._write_request(agent, op, "BAD-CODE")
+                agent.process_enroll_request()
+
+            self.assertIsNone(agent.store.load_credentials())
+            status = json.loads(agent.agent_status_path.read_text())
+            self.assertFalse(status["enrolled"])
+            self.assertEqual(status["last_enroll"]["state"], "error")
+
+
 if __name__ == "__main__":
     unittest.main()

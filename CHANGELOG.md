@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.1
+- **UI-Driven Agent Pairing**: `composer agent` now accepts a DjangoLux-written `enroll-request.json` bridge file (`{control_url, pairing_code}`), redeems the code through the existing `/api/agent/v1/enroll/` endpoint, persists the control URL in the durable store so restarts rebuild the client without `COMPOSER_CONTROL_URL`, and writes `agent-status.json` (enrolled/connection state) for the DLUX Control Panel tile. Enrollment is idempotent per `operation_id`; env-var bootstrap remains a fallback.
+
 ## v1.2.0
 - **Outbound Composer Agent**: Added `composer agent` with HTTPS enrollment/long polling, SQLite command and replay durability, typed update/backup DLUX spool relay, operation-aware status, safe restart allowlists, two-phase rotation, fresh-token re-enrollment after revocation, and local `watch` compatibility.
 - **Composer-Owned Agent Migration**: Added dry-run-first `composer enable-agent` to diff, Compose-validate, preserve, and atomically migrate recognized DLUX updater scaffolds; DjangoLux now keeps only a temporary forwarding alias.

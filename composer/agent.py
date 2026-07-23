@@ -53,6 +53,11 @@ class ComposerAgent:
             or "/var/lib/composer-agent"
         )
         self.store = AgentStore(state_dir)
+        # A control URL delivered once through UI-driven pairing is persisted in
+        # the durable store, so a later restart reconstructs the client without
+        # ever needing COMPOSER_CONTROL_URL in the environment.
+        if not self.control_url:
+            self.control_url = str(self.store.get_meta("control_url") or "").strip()
         trigger = Path(args.trigger_file)
         if not args.status_file:
             args.status_file = str(trigger.with_name("deploy-status.json"))
@@ -65,18 +70,25 @@ class ComposerAgent:
         self.bridge_results = self.bridge_dir / "results"
         self.bridge_requests.mkdir(parents=True, exist_ok=True)
         self.bridge_results.mkdir(parents=True, exist_ok=True)
+        # UI-driven pairing bridge files (DjangoLux <-> agent, sibling of snapshot.json):
+        #   enroll-request.json : DLUX -> agent  (control_url + one-use pairing code)
+        #   agent-status.json   : agent -> DLUX  (enrollment/connection status for the tile)
+        self.enroll_request_path = self.bridge_dir / "enroll-request.json"
+        self.agent_status_path = self.bridge_dir / "agent-status.json"
         self.watch = WatchRuntime(args)
         self.args.log_file = self.watch.log_file
-        self.client = (
-            ControlPlaneClient(
-                self.control_url,
-                allow_http_localhost=bool(args.allow_http_localhost),
-            )
-            if self.control_url
-            else None
-        )
+        self.client = self._build_client(self.control_url)
         self.stop_event = threading.Event()
         self.poll_thread: Optional[threading.Thread] = None
+
+    def _build_client(self, control_url: str) -> Optional[ControlPlaneClient]:
+        control_url = str(control_url or "").strip()
+        if not control_url:
+            return None
+        return ControlPlaneClient(
+            control_url,
+            allow_http_localhost=bool(self.args.allow_http_localhost),
+        )
 
     def capabilities(self) -> Dict[str, Any]:
         return {
@@ -135,12 +147,120 @@ class ComposerAgent:
     def start_poller(self):
         if not self.client or self.args.once:
             return
+        if self.poll_thread and self.poll_thread.is_alive():
+            return
         self.poll_thread = threading.Thread(
             target=self._poll_control_plane,
             name="composer-control-poller",
             daemon=True,
         )
         self.poll_thread.start()
+
+    def _adopt_control_url(self, control_url: str):
+        """Persist a paired control URL and (re)build the outbound client + poller."""
+        control_url = str(control_url or "").strip()
+        if not control_url:
+            return
+        self.control_url = control_url
+        self.store.set_meta("control_url", control_url)
+        self.client = self._build_client(control_url)
+        self.start_poller()
+
+    def process_enroll_request(self):
+        """UI-driven pairing: DjangoLux drops an enroll-request.json carrying the
+        control URL and a one-use pairing code; redeem it via the standard enroll
+        endpoint (the pairing code *is* the enrollment token), persist durable
+        credentials, and record the outcome for the DLUX tile."""
+        try:
+            raw = self.enroll_request_path.read_bytes()
+        except OSError:
+            return
+        try:
+            request = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return
+        if not isinstance(request, dict) or request.get("schema_version") != 1:
+            return
+        try:
+            operation_id = str(uuid.UUID(str(request.get("operation_id") or "")))
+        except ValueError:
+            return
+
+        # Idempotent: never redeem the same pairing request twice.
+        meta_key = f"enroll_request:{operation_id}"
+        if self.store.get_meta(meta_key):
+            return
+
+        control_url = str(request.get("control_url") or "").strip() or self.control_url
+        pairing_code = str(request.get("pairing_code") or "").strip()
+
+        credentials = self.store.load_credentials()
+        if credentials and not self.store.get_meta("revoked"):
+            # Already enrolled — treat the request as a no-op success and adopt
+            # any newly supplied control URL.
+            self.store.set_meta(meta_key, utc_now())
+            self._adopt_control_url(control_url)
+            self._record_enroll_outcome(operation_id, "ok")
+            return
+
+        if not control_url or not pairing_code:
+            self.store.set_meta(meta_key, utc_now())
+            self._record_enroll_outcome(operation_id, "error", "Missing control URL or pairing code.")
+            return
+
+        try:
+            client = self._build_client(control_url)
+            credentials = client.enroll(pairing_code, self.capabilities())
+        except (ControlPlaneError, ProtocolError, OSError, ValueError) as exc:
+            self.store.set_meta(meta_key, utc_now())
+            self._record_enroll_outcome(operation_id, "error", redact_text(exc))
+            return
+
+        self.store.save_credentials(credentials["agent_id"], credentials["secret"])
+        self.store.set_meta("enrolled_at", utc_now())
+        self.store.set_meta("revoked", "")
+        self.store.set_meta(meta_key, utc_now())
+        self._adopt_control_url(control_url)
+        self._record_enroll_outcome(operation_id, "ok")
+
+    def _record_enroll_outcome(self, operation_id: str, state: str, error: str = ""):
+        self.store.set_meta("last_enroll_operation_id", operation_id)
+        self.store.set_meta("last_enroll_state", state)
+        self.store.set_meta("last_enroll_error", error or "")
+        self.store.set_meta("last_enroll_at", utc_now())
+        self.publish_agent_status(force=True)
+
+    def publish_agent_status(self, force: bool = False):
+        """Write agent-status.json (agent -> DLUX) so the Control Panel tile can
+        show live enrollment/connection status regardless of how the agent was
+        paired (env bootstrap or UI pairing)."""
+        credentials = self.store.load_credentials()
+        enrolled = bool(credentials) and not bool(self.store.get_meta("revoked"))
+        status = {
+            "schema_version": 1,
+            "observed_at": utc_now(),
+            "enrolled": enrolled,
+            "control_url": self.control_url,
+            "agent_id": credentials.get("agent_id") if credentials else "",
+            "agent_version": self.composer_version,
+            "enrolled_at": str(self.store.get_meta("enrolled_at") or ""),
+            "last_contact_at": str(self.store.get_meta("last_contact_at") or ""),
+            "revoked": bool(self.store.get_meta("revoked")),
+            "last_enroll": {
+                "operation_id": str(self.store.get_meta("last_enroll_operation_id") or ""),
+                "state": str(self.store.get_meta("last_enroll_state") or ""),
+                "error": str(self.store.get_meta("last_enroll_error") or ""),
+                "at": str(self.store.get_meta("last_enroll_at") or ""),
+            },
+            "last_error": str(self.store.get_meta("last_connection_error") or ""),
+        }
+        digest = hashlib.sha256(
+            json.dumps({k: v for k, v in status.items() if k != "observed_at"}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        if not force and self.store.get_meta("agent_status_digest") == digest:
+            return
+        self.store.set_meta("agent_status_digest", digest)
+        self._atomic_json(self.agent_status_path, status)
 
     def _atomic_json(self, path: Path, payload: Dict[str, Any]):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -453,6 +573,7 @@ class ComposerAgent:
 
     def run_once(self):
         self.watch.maybe_check_availability()
+        self.process_enroll_request()
         self.process_pending_rotation()
         self.process_local_update()
         self.process_bridge_results()
@@ -460,6 +581,7 @@ class ComposerAgent:
         self.publish_capabilities()
         self.execute_received_command()
         self.flush_outbox()
+        self.publish_agent_status()
 
     def run(self) -> int:
         if self.args.once and self.client:
