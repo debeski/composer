@@ -1,59 +1,57 @@
-# Ignored Python and OS bytecode files
+# Ignore Python and OS bytecode files
 *.pyc
 *.pyo
 __pycache__/
 *.DS_Store
 desktop.ini
 autorun.ini
-.codex
-tracker.md
 
-# Ignored Docker-related files
+
+# Ignore Docker-related files
 Dockerfile
 dockerfile
 compose.yml
-docker-compose.yml
 compose.dev.yml
-docker-compose.dev.yml
+docker-compose.yml
 
-# Ignored git-related files
+# Ignore Git-related files
 .git/
+.github/
 .gitignore
 .gitattributes
 
-# Ignored app directories
+# Ignore useless directories
 logs/
 media/
 staticfiles/
 imports/
-backups/
 .backups/
-secrets/
-.secrets/
 venv/
 .venv/
 dist/
-.dist/
 *.egg-info/
 build/
-.build/
-codex/
-.codex/
-agents/
-.agents/
-.xpose/
-scratch/
+.proxy/
+/docs/
+.pytest*/
+.ruff_cache/
+/.sonar/
+/scratch/
+/tests/
 
-# Ignored celery-related files
-celerybeat-schedule
-celerybeat-schedule-shm
-celerybeat-schedule-wal
+# Ignore Celery-related files
+celerybeat-*
 
-# Ignored Sensetive Secrets
+# Ignore sensetive files and secrets
 .env
 .key
-*.enc
-
-# Ignored side-files
+secrets.enc
 start.sh
 start.ps1
+tracker.md
+.secrets/
+.xpose/
+.agents
+.claude
+.codex
+db.sqlite3

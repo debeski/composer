@@ -40,13 +40,72 @@ def _service_names(contents: str) -> set[str]:
     return set(re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", match.group(1)))
 
 
-def _agent_stack(project_slug: str, services: set[str]) -> str:
-    image = project_slug.lower()
+def _declared_networks(contents: str) -> set[str]:
+    match = re.search(r"(?ms)^networks:\s*\n(.*?)(?=^\S|\Z)", contents)
+    if not match:
+        return set()
+    return set(re.findall(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", match.group(1)))
+
+
+def _block_bodies(block: str) -> Dict[str, str]:
+    entries = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):[ \t]*$", block))
+    bodies: Dict[str, str] = {}
+    for index, entry in enumerate(entries):
+        end = entries[index + 1].start() if index + 1 < len(entries) else len(block)
+        bodies[entry.group(1)] = block[entry.start() : end]
+    return bodies
+
+
+def _service_networks(body: str) -> list[str]:
+    match = re.search(r"(?ms)^    networks:[ \t]*\n((?:^      -[ \t]+\S+[ \t]*\n?)+)", body)
+    if not match:
+        return []
+    return re.findall(r"(?m)^      -[ \t]+(\S+)[ \t]*$", match.group(1))
+
+
+def _environment_value(body: str, key: str) -> str:
+    match = re.search(rf'(?m)^      {re.escape(key)}:[ \t]*"?(.*?)"?[ \t]*$', body)
+    return match.group(1) if match else ""
+
+
+def _legacy_topology(block: str, project_slug: str) -> Dict[str, Any]:
+    """Carry the replaced updater's networks, version label, and image forward.
+
+    Projects generated before the DjangoLux 1.5 scaffold name their networks
+    `egress`/`docker_proxy` and stamp a deployment-specific version label, so
+    deriving either from the project slug emits references the project never
+    declares.
+    """
+    bodies = _block_bodies(block)
+    updater = bodies.get("composer-updater", "")
+    proxy = bodies.get("docker-socket-proxy", "")
+    return {
+        "proxy_networks": _service_networks(proxy),
+        "agent_networks": _service_networks(updater),
+        "version_label": _environment_value(updater, "COMPOSER_VERSION_LABEL")
+        or f"org.{project_slug}.dlux_baked_version",
+        "web_image": _environment_value(updater, "WEB_IMAGE")
+        or f"${{WEB_IMAGE:-{project_slug.lower()}:latest}}",
+    }
+
+
+def _networks_block(names: list[str]) -> str:
+    if not names:
+        return ""
+    entries = "\n".join(f"      - {name}" for name in names)
+    return f"\n    networks:\n{entries}"
+
+
+def _agent_stack(project_slug: str, services: set[str], topology: Dict[str, Any]) -> str:
     restart_services = [name for name in SAFE_RESTART_CANDIDATES if name in services]
     excluded_services = ["composer-agent", "docker-socket-proxy"]
     excluded_services.extend(name for name in PROTECTED_SERVICE_NAMES if name in services)
     restart_value = ",".join(restart_services)
     exclusion_value = ",".join(excluded_services)
+    image = topology["web_image"]
+    version_label = topology["version_label"]
+    proxy_networks = _networks_block(topology["proxy_networks"])
+    agent_networks = _networks_block(topology["agent_networks"])
     return f'''{COMPOSER_AGENT_START}
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:latest
@@ -67,9 +126,7 @@ def _agent_stack(project_slug: str, services: set[str]) -> str:
       PING: 1
       VERSION: 1
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - {project_slug}_docker_proxy
+      - /var/run/docker.sock:/var/run/docker.sock:ro{proxy_networks}
 
   composer-agent:
     image: debeski/composer:latest
@@ -90,18 +147,18 @@ def _agent_stack(project_slug: str, services: set[str]) -> str:
       - --interval
       - "2"
       - --check-image
-      - ${{WEB_IMAGE:-{image}:latest}}
+      - {image}
       - --availability-file
       - /opt/dlux-runtime/state/image-available.json
       - --check-interval
       - "3600"
     environment:
       DOCKER_HOST: "tcp://docker-socket-proxy:2375"
-      WEB_IMAGE: "${{WEB_IMAGE:-{image}:latest}}"
+      WEB_IMAGE: "{image}"
       COMPOSER_CONTROL_URL: "${{COMPOSER_CONTROL_URL:-}}"
       COMPOSER_ENROLLMENT_TOKEN: "${{COMPOSER_ENROLLMENT_TOKEN:-}}"
       COMPOSER_AGENT_STATE_DIR: "/var/lib/composer-agent"
-      COMPOSER_VERSION_LABEL: "org.{project_slug}.dlux_baked_version"
+      COMPOSER_VERSION_LABEL: "{version_label}"
       COMPOSER_RELEASE_MANIFEST_LABEL: "org.dlux.project.release-manifest"
       COMPOSER_ACTIVE_VERSION_FILE: "/opt/dlux-runtime/state/active.json"
       COMPOSER_ACTIVE_VERSION_KEY: "version"
@@ -115,11 +172,8 @@ def _agent_stack(project_slug: str, services: set[str]) -> str:
       - composer_agent_state:/var/lib/composer-agent:rw
     depends_on:
       docker-socket-proxy:
-        condition: service_started
-    networks:
-      - dlux_update_egress
-      - {project_slug}_docker_proxy
-  {COMPOSER_AGENT_END}'''
+        condition: service_started{agent_networks}
+{COMPOSER_AGENT_END}'''
 
 
 def _transform_compose(contents: str, project_slug: str) -> str:
@@ -144,7 +198,15 @@ def _transform_compose(contents: str, project_slug: str) -> str:
         raise AgentInstallError("An unmarked composer-agent service already exists.")
     start = contents.index(COMPOSER_UPDATER_START)
     end = contents.index(COMPOSER_UPDATER_END, start) + len(COMPOSER_UPDATER_END)
-    updated = contents[:start] + _agent_stack(project_slug, services) + contents[end:]
+    topology = _legacy_topology(contents[start:end], project_slug)
+    declared = _declared_networks(contents)
+    referenced = set(topology["proxy_networks"]) | set(topology["agent_networks"])
+    missing = sorted(referenced - declared)
+    if declared and missing:
+        raise AgentInstallError(
+            "The legacy updater references undeclared networks: " + ", ".join(missing)
+        )
+    updated = contents[:start] + _agent_stack(project_slug, services, topology) + contents[end:]
     volume_anchor = re.compile(r"(?m)^  dlux_runtime:\s*$")
     if len(volume_anchor.findall(updated)) != 1:
         raise AgentInstallError("Expected one generated dlux_runtime volume anchor.")

@@ -14,21 +14,49 @@ COMPOSE = """name: demo_project
 services:
   db:
     image: postgres:17
+    networks:
+      - internal
   redis:
     image: redis:7
+    networks:
+      - internal
   web:
-    image: ${WEB_IMAGE:-demo_project:latest}
+    image: ${WEB_IMAGE:-registry.example/demo:latest}
+    networks:
+      - internal
   celery:
-    image: ${WEB_IMAGE:-demo_project:latest}
+    image: ${WEB_IMAGE:-registry.example/demo:latest}
+    networks:
+      - egress
+      - internal
   dlux-updater:
-    image: ${WEB_IMAGE:-demo_project:latest}
+    image: ${WEB_IMAGE:-registry.example/demo:latest}
+    networks:
+      - egress
   caddy:
     image: caddy:latest
+    networks:
+      - frontend
   # Composer-as-updater start
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy
+
   composer-updater:
     image: debeski/composer:latest
+    command:
+      - watch
+      - --check-image
+      - ${WEB_IMAGE:-registry.example/demo:latest}
+    environment:
+      WEB_IMAGE: "${WEB_IMAGE:-registry.example/demo:latest}"
+      COMPOSER_VERSION_LABEL: "org.example.dlux_baked_version"
+    networks:
+      - egress
+      - docker_proxy
   # Composer-as-updater end
 
 volumes:
@@ -37,9 +65,15 @@ volumes:
   caddy_data:
 
 networks:
-  dlux_update_egress:
-  demo_project_docker_proxy:
+  frontend:
+    driver: bridge
+  egress:
+    driver: bridge
+  internal:
+    internal: true
   # Isolated path from composer-updater to the docker-socket-proxy only.
+  docker_proxy:
+    internal: true
 """
 
 
@@ -105,6 +139,39 @@ class AgentInstallerTests(unittest.TestCase):
             self.assertEqual(repeated["files"], [])
             self.assertEqual(repeated["backup_root"], "")
             self.assertEqual(repeated["command"], "")
+
+    def test_legacy_networks_image_and_label_are_carried_forward(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            create_project(root)
+            completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+            with patch("composer.agent_installer.shutil.which", return_value="/usr/bin/docker"):
+                enable_agent(str(root), apply=True, command_runner=Mock(return_value=completed))
+
+            updated = (root / "compose.yml").read_text(encoding="utf-8")
+            proxy, agent = updated.split("  composer-agent:\n")
+            self.assertIn("    networks:\n      - docker_proxy\n", proxy)
+            self.assertIn("    networks:\n      - egress\n      - docker_proxy\n", agent)
+            self.assertIn('COMPOSER_VERSION_LABEL: "org.example.dlux_baked_version"', updated)
+            self.assertIn('WEB_IMAGE: "${WEB_IMAGE:-registry.example/demo:latest}"', updated)
+            self.assertIn("      - ${WEB_IMAGE:-registry.example/demo:latest}\n", updated)
+            self.assertNotIn("dlux_update_egress", updated)
+            self.assertNotIn("demo_project_docker_proxy", updated)
+            self.assertNotIn("org.demo_project.dlux_baked_version", updated)
+
+    def test_undeclared_legacy_networks_are_reported_before_any_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            create_project(root)
+            contents = (root / "compose.yml").read_text(encoding="utf-8")
+            contents = contents.replace("  docker_proxy:\n    internal: true\n", "")
+            (root / "compose.yml").write_text(contents, encoding="utf-8")
+
+            with self.assertRaisesRegex(AgentInstallError, "undeclared networks: docker_proxy"):
+                enable_agent(str(root))
+
+            self.assertEqual((root / "compose.yml").read_text(encoding="utf-8"), contents)
 
     def test_mixed_agent_and_legacy_topology_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:

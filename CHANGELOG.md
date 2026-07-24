@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.2
+- **enable-agent Migrates Pre-1.5 Scaffolds**: `_agent_stack()` no longer derives networks, `COMPOSER_VERSION_LABEL`, or `WEB_IMAGE` from the Compose `name:`; new `_legacy_topology()` carries the replaced `composer-updater`/`docker-socket-proxy` values forward verbatim. Projects generated before the DjangoLux 1.5 scaffold (`egress`/`docker_proxy`, deployment-specific baked-version label) emitted references to undeclared `dlux_update_egress`/`<slug>_docker_proxy` networks plus a wrong label, so `docker compose config` rejected the migration.
+- **Undeclared Network Preflight**: `_transform_compose()` checks carried network names against top-level `networks:` keys and fails naming the missing ones instead of deferring to an opaque Compose error; the agent end marker is emitted at service indentation.
+
 ## v1.2.1
 - **UI-Driven Agent Pairing**: `composer agent` now accepts a DjangoLux-written `enroll-request.json` bridge file (`{control_url, pairing_code}`), redeems the code through the existing `/api/agent/v1/enroll/` endpoint, persists the control URL in the durable store so restarts rebuild the client without `COMPOSER_CONTROL_URL`, and writes `agent-status.json` (enrolled/connection state) for the DLUX Control Panel tile. Enrollment is idempotent per `operation_id`; env-var bootstrap remains a fallback.
 

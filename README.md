@@ -53,8 +53,14 @@ The default dry run prints the exact Compose diff. Apply accepts only a recogniz
 DLUX-generated updater block, requires a declared DjangoLux 1.5.0+ bridge unless
 explicitly overridden, validates the candidate with `docker compose config`
 before writing, preserves the original under
-`.xpose/dlux-agent-bootstrap/<timestamp>/`, and replaces it atomically. A
-locally installed binary may instead run `composer enable-agent --project-dir
+`.xpose/dlux-agent-bootstrap/<timestamp>/`, and replaces it atomically. The
+replacement keeps the deployment's own topology: the networks attached to the
+outgoing `docker-socket-proxy`/`composer-updater` services, that block's
+`COMPOSER_VERSION_LABEL`, and its `WEB_IMAGE` reference are carried forward
+verbatim, so projects generated before the DjangoLux 1.5 scaffold (`egress` /
+`docker_proxy`) migrate without renaming networks or losing the baked-version
+gate. A network the project never declares is reported by name before any write.
+A locally installed binary may instead run `composer enable-agent --project-dir
 /path/to/project`. The deprecated `python -m dlux enable-agent` route forwards to
 this command for one migration cycle; Composer is the sole transformer.
 

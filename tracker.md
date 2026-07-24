@@ -3,7 +3,7 @@
 ## Part 1: Project Related
 ### Current Verified Snapshot:
 - Composer is a Docker Compose orchestration tool for plaintext env secrets, health checks, post-start hooks, status files, and resident image updates.
-- Current source is unreleased v1.2.0; latest tag is v1.1.15.
+- Current source is unreleased v1.2.2; latest tag is v1.2.1.
 - Implementation lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and wrapper scripts `start.sh`/`start.ps1`.
 - `start.sh` targets `debeski/composer:latest`; only exact sole `--update` self-updates the Composer tool image, while `-u`/`-uo`/`-r` pass through.
 - `agent` adds outbound HTTPS control and typed DLUX relay; `composer enable-agent` is the sole guarded/diffable legacy scaffold transformer.
@@ -24,15 +24,19 @@
 - Before editing root `CHANGELOG.md`, check tags and never modify a released version entry.
 
 ### Cross-Cutting Audits if any:
-- Prior audits resolved: Windows shell-safe fallback, compose fallback, Dockerfile `WORKDIR`/`PYTHONPATH`, no committed `__pycache__`.
+- 2026-07-24 security audit: protocol, local bridge, Docker boundary, registry, subprocess, supply chain, and release workflows reviewed with focused exploit probes.
+- Prior audits resolved: compose fallback, Dockerfile `WORKDIR`/`PYTHONPATH`, no committed `__pycache__`.
 
 ### Current Project's Unsolved Known Bugs:
-- Existing resident updater containers must be recreated once through a v1.1.15 wrapper before they receive the inherited private-secrets handoff.
-- Manual Docker runtime validations still require a real compose project and Docker daemon behavior.
+- Enrolled agents accept an unauthenticated shared-spool control URL rebind, exposing the existing bearer credential to an attacker-controlled HTTPS endpoint.
+- The POST-enabled Docker socket proxy permits host-root-equivalent daemon operations if the networked agent is compromised.
+- Control and registry clients preserve authorization across redirects; Bearer-style log redaction leaves the secret value visible.
+- Predictable shared-volume temp files permit symlink clobbering; spool, registry response, subprocess output, and durable queues lack effective bounds.
+- Version gating fails open on missing labels; mutable image/action references and Windows `shell=True` argument reconstruction widen execution risk.
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish Composer v1.2.0 and DjangoLux v1.5.0, then migrate resident updaters with `./start.sh enable-agent --apply` after reviewing its dry run.
+  - [ ] Publish Composer v1.2.2 (`enable-agent` legacy-topology fix), then migrate resident updaters with `./start.sh --update` before `./start.sh enable-agent --apply`.
   - [ ] Pilot v1.2.0 end to end: enrollment -> DLUX backup -> maintenance -> Composer deploy -> DLUX finalization -> replayed central result.
   - [ ] Live verify cancellation, outage replay, revocation, safe restart, and data/full backup creation through docker-socket-proxy.
   - [ ] Verify plaintext resolution against a real compose project.
@@ -41,6 +45,7 @@
   - [ ] Rebuild/push pending Composer images as needed and confirm runtime smoke tests.
   - [ ] Decrees redeploy note: `down` + `up -d` from project root; named volumes preserved.
 - **Completed Recently:**
+  - [x] v1.2.2: `enable-agent` carries the replaced updater's networks, `COMPOSER_VERSION_LABEL`, and `WEB_IMAGE` forward instead of deriving them from the Compose `name:`, so pre-1.5 scaffolds no longer emit undeclared `dlux_update_egress`/`<slug>_docker_proxy` refs; undeclared networks now fail by name pre-write.
   - [x] v1.2.0: Composer-owned `enable-agent` provides an exact dry-run diff, pre-write Compose validation, `.xpose` preservation, atomic replacement, and a one-cycle DLUX forwarding alias.
   - [x] v1.2.0: outbound `composer agent`, strict schema-v1 typed commands, SQLite credentials/commands/outbox, accepted-event execution gate, revocation re-enrollment, rotation replay, backup relay, operation IDs, redaction, safe restart, and `watch` compatibility.
   - [x] v1.1.15: moved restart to `composer restart [service]`; wrappers/runtime override now hand private secrets to the resident updater, with strict file fallback diagnostics.
@@ -55,13 +60,11 @@
   - [x] v1.1.3-v1.1.4 `run` subcommand, `-u` scoped update/recreate, `-uo` legacy full startup update, `-r` restart branch.
 
 ### One-line info about last verified Tests:
-- Verified 2026-07-23: 48/48 unittest pass plus real Docker Compose config validation for the generated agent topology.
-- Verified 2026-07-22: 24/24 `unittest` pass; built v1.1.15 image smoke passes inherited secrets without project-file access; AST/diff/Bash/help pass, PowerShell unavailable.
-- Verified 2026-07-18: 16/16 `unittest` pass (added test_secrets.py: unreadable/empty/valid env resolution + fallthrough); live-container repro confirmed old vacuous-success vs new loud-fail against real decrees compose.
-- Verified 2026-07-17: AST syntax parse for `composer/*.py`; stubbed exclusion assertions for bulk `pull`/`up`/version-gate images + `watch` child env; `python3 -m composer --help`; `python3 -m composer watch --help`.
+- Verified 2026-07-24: 53/53 unittest and `git diff --check` pass; patched `enable-agent` output validated by a real `docker compose config` against the pre-1.5 switch_pos project.
+- Security dependency/container CVE scanning remains pending because Bandit, Semgrep, pip-audit, Trivy, ShellCheck, and Hadolint are unavailable locally.
 
 ### One-line info about last time edited Docs:
-- Edited `README.md`, `docs/agent-protocol-v1.md`, and `CHANGELOG.md` on 2026-07-23 for the v1.2.0 agent and Composer-owned migration.
+- Edited `README.md`, `docs/agent-protocol-v1.md`, and `CHANGELOG.md` on 2026-07-24 for `enable-agent` legacy-topology carry-over.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:
