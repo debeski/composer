@@ -3,7 +3,7 @@
 ## Part 1: Project Related
 ### Current Verified Snapshot:
 - Composer is a Docker Compose orchestration tool for plaintext env secrets, health checks, post-start hooks, status files, and resident image updates.
-- Current source is unreleased v1.2.2; latest tag is v1.2.1.
+- Current source is unreleased v1.2.4; latest tag is v1.2.3.
 - Implementation lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and wrapper scripts `start.sh`/`start.ps1`.
 - `start.sh` targets `debeski/composer:latest`; only exact sole `--update` self-updates the Composer tool image, while `-u`/`-uo`/`-r` pass through.
 - `agent` adds outbound HTTPS control and typed DLUX relay; `composer enable-agent` is the sole guarded/diffable legacy scaffold transformer.
@@ -36,7 +36,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish Composer v1.2.2 (`enable-agent` legacy-topology fix), then migrate resident updaters with `./start.sh --update` before `./start.sh enable-agent --apply`.
+  - [ ] Publish Composer v1.2.4 (`enable-agent` deploy-host fix), then re-run `./start.sh --update` and `./start.sh enable-agent --apply` on the VM.
   - [ ] Pilot v1.2.0 end to end: enrollment -> DLUX backup -> maintenance -> Composer deploy -> DLUX finalization -> replayed central result.
   - [ ] Live verify cancellation, outage replay, revocation, safe restart, and data/full backup creation through docker-socket-proxy.
   - [ ] Verify plaintext resolution against a real compose project.
@@ -45,6 +45,7 @@
   - [ ] Rebuild/push pending Composer images as needed and confirm runtime smoke tests.
   - [ ] Decrees redeploy note: `down` + `up -d` from project root; named volumes preserved.
 - **Completed Recently:**
+  - [x] v1.2.4: `enable-agent` dropped the `manage.py` source-tree gate (deploy dirs only hold `compose.yml`/`.proxy`/`.secrets`); the DjangoLux 1.5.0+ bridge check is advisory when no dependency manifest exists and blocking otherwise.
   - [x] v1.2.2: `enable-agent` carries the replaced updater's networks, `COMPOSER_VERSION_LABEL`, and `WEB_IMAGE` forward instead of deriving them from the Compose `name:`, so pre-1.5 scaffolds no longer emit undeclared `dlux_update_egress`/`<slug>_docker_proxy` refs; undeclared networks now fail by name pre-write.
   - [x] v1.2.0: Composer-owned `enable-agent` provides an exact dry-run diff, pre-write Compose validation, `.xpose` preservation, atomic replacement, and a one-cycle DLUX forwarding alias.
   - [x] v1.2.0: outbound `composer agent`, strict schema-v1 typed commands, SQLite credentials/commands/outbox, accepted-event execution gate, revocation re-enrollment, rotation replay, backup relay, operation IDs, redaction, safe restart, and `watch` compatibility.
@@ -60,11 +61,11 @@
   - [x] v1.1.3-v1.1.4 `run` subcommand, `-u` scoped update/recreate, `-uo` legacy full startup update, `-r` restart branch.
 
 ### One-line info about last verified Tests:
-- Verified 2026-07-24: 53/53 unittest and `git diff --check` pass; patched `enable-agent` output validated by a real `docker compose config` against the pre-1.5 switch_pos project.
+- Verified 2026-07-24: 56/56 unittest pass, including a new compose-only deployment-directory `enable-agent` dry-run/apply case.
 - Security dependency/container CVE scanning remains pending because Bandit, Semgrep, pip-audit, Trivy, ShellCheck, and Hadolint are unavailable locally.
 
 ### One-line info about last time edited Docs:
-- Edited `README.md`, `docs/agent-protocol-v1.md`, and `CHANGELOG.md` on 2026-07-24 for `enable-agent` legacy-topology carry-over.
+- Edited `README.md`, `docs/agent-protocol-v1.md`, and `CHANGELOG.md` on 2026-07-24 for `enable-agent` deploy-host support.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

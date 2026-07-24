@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.4
+- **enable-agent Runs On Deploy Hosts**: `enable_agent()` no longer requires `manage.py` with a `Generated with django-lux` banner. Deploy directories hold only `compose.yml`, `.proxy/`, and `.secrets/`, so the source-tree gate blocked every real migration; project identity already comes from the Compose `name:`, `services:`, and the `# Composer-as-updater` markers `_transform_compose()` verifies.
+- **Non-Blocking Bridge Check Without A Manifest**: `_dlux_readiness_warning()` returns `(message, blocking)`. A missing `requirements.txt`/`pyproject.toml` reports an advisory warning and `--apply` proceeds; a declared DjangoLux below 1.5.0 or an unparseable pin still blocks unless `--allow-unverified-dlux` is passed.
+
 ## v1.2.3
 - **Baked DjangoLux Version In Availability Manifest**: `_release_manifest_from_label()` in `composer/watcher.py` passes through an optional `baked_dlux_version` (string, capped at 32 chars) so the published availability document carries the candidate image's baked framework version alongside the project version and highlights. Additive under `schema_version: 1`; absent fields stay absent, and the version label the preflight gate reads is untouched.
 

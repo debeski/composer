@@ -218,13 +218,19 @@ def _transform_compose(contents: str, project_slug: str) -> str:
     )
 
 
-def _dlux_readiness_warning(project_root: Path) -> str:
+def _dlux_readiness_warning(project_root: Path) -> tuple[str, bool]:
     declarations = []
     for path in (project_root / "requirements.txt", project_root / "pyproject.toml"):
         try:
             declarations.append(path.read_text(encoding="utf-8"))
         except OSError:
             continue
+    if not declarations:
+        return (
+            "No dependency manifest is present, so the DjangoLux 1.5.0+ bridge could not be "
+            "verified from this directory.",
+            False,
+        )
     combined = "\n".join(declarations)
     matches = re.findall(
         r"django-lux(?:\[[^\]]+\])?\s*(?:==|>=|~=)\s*[\"']?(\d+)\.(\d+)(?:\.(\d+))?",
@@ -234,11 +240,11 @@ def _dlux_readiness_warning(project_root: Path) -> str:
     if matches:
         versions = [tuple(int(part or 0) for part in match) for match in matches]
         if max(versions) >= MINIMUM_DLUX_VERSION:
-            return ""
-        return "DjangoLux 1.5.0 or newer is required for the typed local agent bridge."
+            return "", False
+        return "DjangoLux 1.5.0 or newer is required for the typed local agent bridge.", True
     if re.search(r"django-lux", combined, flags=re.IGNORECASE):
-        return "Could not verify that the declared DjangoLux dependency is 1.5.0 or newer."
-    return "Could not find a DjangoLux dependency declaration to verify the local agent bridge."
+        return "Could not verify that the declared DjangoLux dependency is 1.5.0 or newer.", True
+    return "Could not find a DjangoLux dependency declaration to verify the local agent bridge.", True
 
 
 def _backup_root(project_root: Path) -> Path:
@@ -273,14 +279,6 @@ def enable_agent(
     command_runner=subprocess.run,
 ) -> Dict[str, Any]:
     project_root = Path(project_dir).resolve()
-    manage_path = project_root / "manage.py"
-    try:
-        manage_contents = manage_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise AgentInstallError("The project directory does not contain manage.py.") from exc
-    if "Generated with django-lux" not in manage_contents:
-        raise AgentInstallError("enable-agent supports only recognized DjangoLux-generated projects.")
-
     selected_file = compose_file or (
         "compose.yml" if (project_root / "compose.yml").is_file() else "docker-compose.yml"
     )
@@ -293,7 +291,7 @@ def enable_agent(
         raise AgentInstallError("Could not determine the generated Compose project name.")
     updated = _transform_compose(contents, name_match.group(1))
     changed = [str(compose_path.relative_to(project_root))] if updated != contents else []
-    warning = _dlux_readiness_warning(project_root) if changed else ""
+    warning, blocking = _dlux_readiness_warning(project_root) if changed else ("", False)
     result: Dict[str, Any] = {
         "applied": False,
         "files": changed,
@@ -316,7 +314,7 @@ def enable_agent(
         )
     if not apply:
         return result
-    if warning and not allow_unverified_dlux:
+    if warning and blocking and not allow_unverified_dlux:
         raise AgentInstallError(f"{warning} Upgrade DjangoLux first or pass --allow-unverified-dlux.")
     if not shutil.which("docker"):
         raise AgentInstallError("Docker is required to validate the generated Compose configuration.")

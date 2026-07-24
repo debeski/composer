@@ -50,8 +50,7 @@ Migrate an existing generated DLUX project with Composer itself:
 ```
 
 The default dry run prints the exact Compose diff. Apply accepts only a recognized
-DLUX-generated updater block, requires a declared DjangoLux 1.5.0+ bridge unless
-explicitly overridden, validates the candidate with `docker compose config`
+DLUX-generated updater block, validates the candidate with `docker compose config`
 before writing, preserves the original under
 `.xpose/dlux-agent-bootstrap/<timestamp>/`, and replaces it atomically. The
 replacement keeps the deployment's own topology: the networks attached to the
@@ -60,6 +59,11 @@ outgoing `docker-socket-proxy`/`composer-updater` services, that block's
 verbatim, so projects generated before the DjangoLux 1.5 scaffold (`egress` /
 `docker_proxy`) migrate without renaming networks or losing the baked-version
 gate. A network the project never declares is reported by name before any write.
+Only the Compose file is read and rewritten, so this runs in a deployment
+directory that holds nothing but `compose.yml`, `.proxy/`, and `.secrets/`. When a
+`requirements.txt`/`pyproject.toml` is present it must declare DjangoLux 1.5.0+
+or apply refuses without `--allow-unverified-dlux`; with no manifest to read the
+check is reported as an advisory warning instead.
 A locally installed binary may instead run `composer enable-agent --project-dir
 /path/to/project`. The deprecated `python -m dlux enable-agent` route forwards to
 this command for one migration cycle; Composer is the sole transformer.

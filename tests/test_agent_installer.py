@@ -78,14 +78,14 @@ networks:
 
 
 def create_project(root: Path, dlux_version="1.5.0"):
-    (root / "manage.py").write_text(
-        "# Generated with django-lux 1.4.15.\n",
-        encoding="utf-8",
-    )
     (root / "requirements.txt").write_text(
         f"django-lux[updater]=={dlux_version}\n",
         encoding="utf-8",
     )
+    (root / "compose.yml").write_text(COMPOSE, encoding="utf-8")
+
+
+def create_deployment(root: Path):
     (root / "compose.yml").write_text(COMPOSE, encoding="utf-8")
 
 
@@ -215,6 +215,23 @@ class AgentInstallerTests(unittest.TestCase):
             self.assertIn("1.5.0", dry_run["warnings"][0])
             with self.assertRaisesRegex(AgentInstallError, "Upgrade DjangoLux first"):
                 enable_agent(str(root), apply=True)
+
+    def test_deployment_directory_without_project_sources_can_migrate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            create_deployment(root)
+            completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+            runner = Mock(return_value=completed)
+
+            dry_run = enable_agent(str(root))
+            self.assertEqual(dry_run["files"], ["compose.yml"])
+            self.assertIn("No dependency manifest", dry_run["warnings"][0])
+
+            with patch("composer.agent_installer.shutil.which", return_value="/usr/bin/docker"):
+                result = enable_agent(str(root), apply=True, command_runner=runner)
+
+            self.assertTrue(result["applied"])
+            self.assertIn("composer-agent:", (root / "compose.yml").read_text(encoding="utf-8"))
 
     def test_json_cli_contract_is_machine_forwardable(self):
         args = parse_enable_agent_args(["--json"])
