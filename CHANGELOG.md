@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.3
+- **Baked DjangoLux Version In Availability Manifest**: `_release_manifest_from_label()` in `composer/watcher.py` passes through an optional `baked_dlux_version` (string, capped at 32 chars) so the published availability document carries the candidate image's baked framework version alongside the project version and highlights. Additive under `schema_version: 1`; absent fields stay absent, and the version label the preflight gate reads is untouched.
+
 ## v1.2.2
 - **enable-agent Migrates Pre-1.5 Scaffolds**: `_agent_stack()` no longer derives networks, `COMPOSER_VERSION_LABEL`, or `WEB_IMAGE` from the Compose `name:`; new `_legacy_topology()` carries the replaced `composer-updater`/`docker-socket-proxy` values forward verbatim. Projects generated before the DjangoLux 1.5 scaffold (`egress`/`docker_proxy`, deployment-specific baked-version label) emitted references to undeclared `dlux_update_egress`/`<slug>_docker_proxy` networks plus a wrong label, so `docker compose config` rejected the migration.
 - **Undeclared Network Preflight**: `_transform_compose()` checks carried network names against top-level `networks:` keys and fails naming the missing ones instead of deferring to an opaque Compose error; the agent end marker is emitted at service indentation.

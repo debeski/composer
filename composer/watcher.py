@@ -84,6 +84,9 @@ def _release_manifest_from_label(value) -> Optional[dict]:
     version = source.get("version")
     if isinstance(version, str) and version.strip():
         manifest["version"] = version.strip()[:64]
+    baked_dlux_version = source.get("baked_dlux_version")
+    if isinstance(baked_dlux_version, str) and baked_dlux_version.strip():
+        manifest["baked_dlux_version"] = baked_dlux_version.strip()[:32]
     summary = source.get("summary")
     if isinstance(summary, str) and summary.strip():
         manifest["summary"] = summary.strip()[:1000]

@@ -169,6 +169,37 @@ class WatcherAvailabilityTests(unittest.TestCase):
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
     @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
     @patch("composer.watcher.remote_image_labels")
+    def test_manifest_publishes_baked_dlux_version(self, labels, _remote, _local):
+        labels.return_value = {
+            "org.dlux.project.release-manifest": json.dumps({
+                "schema_version": 1,
+                "version": "0.1.2",
+                "baked_dlux_version": "1.5.3",
+            }, separators=(",", ":")),
+        }
+        with patch.dict("os.environ", {}, clear=True):
+            _available, images = check_availability(["example/app:latest"])
+
+        self.assertEqual(images[0]["manifest"]["baked_dlux_version"], "1.5.3")
+
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
+    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.remote_image_labels")
+    def test_manifest_without_baked_dlux_version_omits_it(self, labels, _remote, _local):
+        labels.return_value = {
+            "org.dlux.project.release-manifest": json.dumps({
+                "schema_version": 1,
+                "version": "0.1.2",
+            }, separators=(",", ":")),
+        }
+        with patch.dict("os.environ", {}, clear=True):
+            _available, images = check_availability(["example/app:latest"])
+
+        self.assertNotIn("baked_dlux_version", images[0]["manifest"])
+
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
+    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.remote_image_labels")
     def test_raw_json_manifest_remains_supported(self, labels, _remote, _local):
         labels.return_value = {
             "org.dlux.project.release-manifest": json.dumps({
