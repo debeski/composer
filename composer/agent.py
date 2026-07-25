@@ -242,6 +242,11 @@ class ComposerAgent:
             "enrolled": enrolled,
             "control_url": self.control_url,
             "agent_id": credentials.get("agent_id") if credentials else "",
+            # composer_version is the resident composer-agent binary's own
+            # version (its image), distinct from the COMPOSER_VERSION env a
+            # panel sees, which is the *deploying* composer that last recreated
+            # the stack. agent_version stays as a back-compat alias.
+            "composer_version": self.composer_version,
             "agent_version": self.composer_version,
             "enrolled_at": str(self.store.get_meta("enrolled_at") or ""),
             "last_contact_at": str(self.store.get_meta("last_contact_at") or ""),

@@ -3,8 +3,10 @@
 ## Part 1: Project Related
 ### Current Verified Snapshot:
 - Composer is a Docker Compose orchestration tool for plaintext env secrets, health checks, post-start hooks, status files, and resident image updates.
-- Current source is unreleased v1.2.4; latest tag is v1.2.3.
+- Current source is unreleased v1.2.5; latest tag is v1.2.4.
 - Implementation lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and wrapper scripts `start.sh`/`start.ps1`.
+- Subcommands intercepted before flat parse: `run`, `restart`/`-r`, `update`, `stop`/`down`, `log`/`logs`, `check`, `watch`, `agent`, `enable-agent`.
+- Two versions are distinct: `COMPOSER_VERSION` env = deploying composer (last recreate); resident composer-agent binary version = `composer_version`/`agent_version` in `agent-status.json`. They can drift; not guaranteeable equal.
 - `start.sh` targets `debeski/composer:latest`; only exact sole `--update` self-updates the Composer tool image, while `-u`/`-uo`/`-r` pass through.
 - `agent` adds outbound HTTPS control and typed DLUX relay; `composer enable-agent` is the sole guarded/diffable legacy scaffold transformer.
 
@@ -18,8 +20,9 @@
 ### Adopted Standards' rules and policies:
 - Secrets are plaintext-only (`.env` -> `secrets/.env` -> `.secrets/.env`); SOPS/AGE/keygen routes were removed in v1.1.5.
 - `-d`/`--dev` adds `compose.dev.yml` and forces `DEBUG=True` / `DEBUG_STATUS=True`.
-- `-p`/`--purge` is a `--down` child: compose down with local images, volumes, orphans, plus dangling builder cache prune.
-- `-u` deploys after pull; `-uo`/`--update-only` is pull-only and exits after status `pulled`.
+- `-p`/`--purge` is a `stop` child: compose down with local images, volumes, orphans, plus dangling builder cache prune.
+- Destructive flags (`-v`, `-p`) require a typed `y`/`yes` via `confirm()`; `-y`/`--yes` or `COMPOSER_ASSUME_YES=1` bypasses, non-TTY fails closed.
+- `-u` deploys after pull; `-uo`/`--update-only` is pull-only and exits after status `pulled`; `update [-o]` is the subcommand form and accepts several service names.
 - Preserve user changes; do not commit generated caches such as `composer/__pycache__/`.
 - Before editing root `CHANGELOG.md`, check tags and never modify a released version entry.
 
@@ -36,15 +39,21 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish Composer v1.2.4 (`enable-agent` deploy-host fix), then re-run `./start.sh --update` and `./start.sh enable-agent --apply` on the VM.
+  - [ ] Publish Composer v1.2.5 (confirmation guard + `update`/`stop`/`log` subcommands), then re-run `./start.sh --update` on the VM.
+  - [ ] Live verify `stop -v` prompting through `start.sh` (TTY) and the non-TTY refusal, plus `log -F` streaming.
   - [ ] Pilot v1.2.0 end to end: enrollment -> DLUX backup -> maintenance -> Composer deploy -> DLUX finalization -> replayed central result.
   - [ ] Live verify cancellation, outage replay, revocation, safe restart, and data/full backup creation through docker-socket-proxy.
   - [ ] Verify plaintext resolution against a real compose project.
   - [ ] Verify `python -m composer` startup with `build:`, `COMPOSER_VERSION`, exit-1 diagnostics, and failing `post_start`.
 - **Priority 2:**
+  - [ ] Classify `SAFE_RESTART_CANDIDATES`/`PROTECTED_RESTART_SERVICES` from the `org.dlux.restart` label (`safe`/`protected`) DLUX now emits on every scaffold service, instead of hardcoded name lists. (The `smtp-relay`+`dlux_updater`→`dlux_agent` merge was ABANDONED — they stay separate with distinct lifecycles; the label is the replacement. `safe` set == existing `COMPOSER_AGENT_RESTART_SERVICES`.)
+  - [ ] `check --deep` command name is finalized as `python manage.py dlux_doctor` (`dlux_check` is a deprecated alias); DLUX also ships `python manage.py dlux_stack_contract` (version-stamped) for the drift-diff. `db-backup` + `pgadmin` are dropped from the DLUX default stack and listed under the contract's `removed_services`, so `check` should flag them as safe-to-remove on existing deployments.
+  - [ ] `check` security-invariant drift: verify the Docker-socket mount (only the socket-proxy may mount `/var/run/docker.sock:ro`) and the `dlux_runtime` rw/ro split against a deployment. The contract already exposes the data (`invariants.docker_socket.allowed_services`, `invariants.runtime_volume`); needs a shared `diff_security()` helper on the DLUX side (`dlux/stack_contract.py`) so both check identically. Topology / removed-service / frontend↔egress-bridging drift is already covered by `diff_attachments()` + `removed_services_present()`.
   - [ ] Rebuild/push pending Composer images as needed and confirm runtime smoke tests.
-  - [ ] Decrees redeploy note: `down` + `up -d` from project root; named volumes preserved.
+  - [ ] Decrees redeploy note: `stop` + `up -d` from project root; named volumes preserved.
 - **Completed Recently:**
+  - [x] v1.2.5: `confirm()` guard on `-v`/`-p` with `-y`/`COMPOSER_ASSUME_YES` bypass; `update`, `stop` (alias `down`), and `log`/`logs` intercepted subcommands with multi-service scoping and default `--tail 50`.
+  - [x] v1.2.5: `composer check` doctor (`CheckupMixin`) for docker/compose/secrets/env/topology/version-drift with `--fix` (enable-agent) and `--deep` in-container relay; `agent-status.json` gains distinct `composer_version` beside `agent_version`.
   - [x] v1.2.4: `enable-agent` dropped the `manage.py` source-tree gate (deploy dirs only hold `compose.yml`/`.proxy`/`.secrets`); the DjangoLux 1.5.0+ bridge check is advisory when no dependency manifest exists and blocking otherwise.
   - [x] v1.2.2: `enable-agent` carries the replaced updater's networks, `COMPOSER_VERSION_LABEL`, and `WEB_IMAGE` forward instead of deriving them from the Compose `name:`, so pre-1.5 scaffolds no longer emit undeclared `dlux_update_egress`/`<slug>_docker_proxy` refs; undeclared networks now fail by name pre-write.
   - [x] v1.2.0: Composer-owned `enable-agent` provides an exact dry-run diff, pre-write Compose validation, `.xpose` preservation, atomic replacement, and a one-cycle DLUX forwarding alias.
@@ -61,11 +70,11 @@
   - [x] v1.1.3-v1.1.4 `run` subcommand, `-u` scoped update/recreate, `-uo` legacy full startup update, `-r` restart branch.
 
 ### One-line info about last verified Tests:
-- Verified 2026-07-24: 56/56 unittest pass, including a new compose-only deployment-directory `enable-agent` dry-run/apply case.
+- Verified 2026-07-25: 98/98 unittest pass; `composer check` smoke-tested live against Docker 29.6.2 / Compose 5.3.1 in a scratch stack.
 - Security dependency/container CVE scanning remains pending because Bandit, Semgrep, pip-audit, Trivy, ShellCheck, and Hadolint are unavailable locally.
 
 ### One-line info about last time edited Docs:
-- Edited `README.md`, `docs/agent-protocol-v1.md`, and `CHANGELOG.md` on 2026-07-24 for `enable-agent` deploy-host support.
+- Edited `README.md` and `CHANGELOG.md` on 2026-07-25 for the confirmation guard, `update`/`stop`/`log`/`check` subcommands, and the two-version distinction.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

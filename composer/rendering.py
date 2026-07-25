@@ -10,6 +10,7 @@ from .constants import (
     SERVICE_NOT_SEEN,
     SERVICE_STARTING,
 )
+from .service_selection import scoped_service_list
 
 
 RULE = "━" * 49
@@ -63,8 +64,9 @@ class RenderingMixin:
         lines.append(f" {icon(self.sections['secrets'])} {secrets_label}")
         if self.update_images:
             pull_label = "Pull Images"
-            if isinstance(self.pull_service, str):
-                pull_label += f" ({self.pull_service})"
+            pull_scope = scoped_service_list(self.pull_service)
+            if pull_scope:
+                pull_label += f" ({', '.join(pull_scope)})"
             lines.append(f" {icon(self.sections['pull'])} {pull_label}")
         if not getattr(self, "pull_only_mode", False):
             if self.restart_mode:
@@ -73,8 +75,9 @@ class RenderingMixin:
                     compose_label += f" ({self.restart_service})"
             else:
                 compose_label = "Start Compose"
-                if isinstance(self.up_service, str):
-                    compose_label += f" ({self.up_service})"
+                up_scope = scoped_service_list(self.up_service)
+                if up_scope:
+                    compose_label += f" ({', '.join(up_scope)})"
             lines.append(f" {icon(self.sections['compose'])} {compose_label}")
             lines.append(f" {icon(self.sections['health'])} Health Check")
             if not self.restart_mode:

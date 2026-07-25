@@ -37,6 +37,14 @@ one migration cycle. New deployments use `composer agent`.
 
 `composer restart [-f FILE] [-d] [--status-file PATH] [service]` restarts running containers through `docker compose restart`, then waits for their health checks. Containers are preserved and post-start tasks are skipped. Pass a service to restart only that service. `composer -r ...` and `composer --restart ...` remain short leading aliases. See `composer restart --help`.
 
+`composer update [-o] [-b] [--force] [-nm] [-mm] [-a APP] [--status-file PATH] [-f FILE] [-d] [service...]` pulls the latest image(s), then recreates the affected containers, waits for health checks, and runs post-start tasks. Name services to scope both the pull and the recreate (Compose still starts their dependencies). `-o`/`--only` stops right after the pull — no version gate, recreate, health checks, or post-start tasks. The flat `composer -u [service]` / `-uo [service]` flags remain, and `./start.sh --update` on its own still means "update the Composer tool image", not the app. See `composer update --help`.
+
+`composer check [--fix] [-y] [--deep] [--json] [-f FILE] [-d]` is the doctor for the *outside* of a DLUX stack. It verifies Docker + Compose v2, that the compose config resolves, that a secrets source is present/readable/non-empty, that every externally-required compose variable has a value, the topology mode (composer-agent vs legacy composer-updater vs unmanaged), and version drift between the deploying composer and the resident `composer-agent`. `--fix` applies safe migrations (currently: legacy `composer-updater` → `composer-agent` via `enable-agent`, behind the confirmation guard). `--deep` relays the in-container app-level doctor — `python manage.py dlux_doctor` in the `web` service by default, overridable with `--deep-service`/`--deep-command` — and prints its output. `--json` emits structured results; exit is non-zero only on a blocking problem. This is the single evolving check that replaces per-change `enable-*` one-offs: composer owns the outside and hands the rest to the container(s). See `composer check --help`.
+
+`composer stop [-v] [-p] [-y] [-f FILE] [-d] [service...]` stops and removes this project's containers. Secrets, health checks, and post-start tasks are skipped. Pass service names to stop only those services instead of the whole stack. `-v`/`--volumes` and `-p`/`--purge` are destructive and project-wide, so they cannot be combined with service names and they require a typed confirmation (see below). `composer down ...` is an alias and `composer --down ...` remains a flat-flag equivalent. See `composer stop --help`.
+
+`composer log [-n N|all] [-F] [-t] [--since TIME] [-f FILE] [-d] [service...]` reads Compose logs for the whole stack (interleaved, one color per service) or for the services you name. Defaults to the last 50 lines per service; `-n all` (or `-n 0`) lifts the limit, `-F`/`--follow` streams, `-t`/`--timestamps` prefixes each line, and `--since`/`--until` bound the window. `composer logs` is an alias. See `composer log --help`.
+
 `composer watch --trigger-file PATH [--interval N]` runs composer as a resident, in-compose updater. It watches the trigger file and, on each new request (a changed `token`, or the file's `mtime`), runs a full update (`composer -u`: pull → version gate → recreate → health → post_start). The processed token and child exit code are recorded in `<trigger-file>.ack`, so a request is applied once and survives a restart. Add `--status-file PATH` to have each run publish [deploy status](#deploy-status); if the child exits before publishing its own terminal failure, the watcher guarantees a token-matched `failed` status so maintenance consumers are never left waiting on a dead process. See `composer watch --help`.
 
 `composer agent` is the durable successor to `watch`. It preserves the same local trigger/status/ack and registry-availability files, adds a typed DLUX spool, SQLite command/outbox replay, operation correlation, safe restart allowlisting, and optional outbound HTTPS long polling. Configure `COMPOSER_CONTROL_URL`, a 15-minute one-use `COMPOSER_ENROLLMENT_TOKEN`, and `COMPOSER_AGENT_STATE_DIR` (default `/var/lib/composer-agent`). Local DLUX-triggered updates continue while the control plane is unavailable or the machine credential is revoked. See [Agent Protocol v1](docs/agent-protocol-v1.md).
@@ -79,14 +87,33 @@ With `--status-file` (or `--log-file PATH`), each update run also writes a clean
 | flag | result |
 | :--- | :--- |
 | `-d`, `--dev` | Development mode. Loads `compose.dev.yml` on top of the base compose file (two files) and forces `DEBUG=True` / `DEBUG_STATUS=True` into every service. |
-| `-u`, `--update [service]` | Pull the latest image(s) then recreate immediately. Pass a service name to update and recreate only that service (Compose still starts its dependencies; dependents aren't auto-restarted unless their own image changed). |
-| `-uo`, `--update-only [service]` | Pull the latest image(s) only, then exit. Pass a service name to pull only that service. Does not run `up`, health checks, or post-start tasks. |
+| `-u`, `--update [service]` | Pull the latest image(s) then recreate immediately. Pass a service name to update and recreate only that service (Compose still starts its dependencies; dependents aren't auto-restarted unless their own image changed). Same as the `update` subcommand. |
+| `-uo`, `--update-only [service]` | Pull the latest image(s) only, then exit. Pass a service name to pull only that service. Does not run `up`, health checks, or post-start tasks. Same as `update -o`. |
 | `-b`, `--build` | Rebuild images during startup. |
 | `--force` | Bypass the preflight version gate (allow updating onto an older image version). |
 | `--status-file PATH` | Write a JSON deploy-status file to `PATH` (overrides `COMPOSER_STATUS_FILE`). |
-| `--down` | Stop everything. |
-| `-v`, `--volumes` | With `--down`: Remove volumes too. |
-| `-p`, `--purge` | With `--down`: also remove built untagged images, volumes, networks, orphans, and dangling build cache. |
+| `--down` | Stop everything (see the `stop` subcommand). |
+| `-v`, `--volumes` | With `--down`: Remove volumes too. Confirmation required. |
+| `-p`, `--purge` | With `--down`: also remove built untagged images, volumes, networks, orphans, and dangling build cache. Confirmation required. |
+| `-y`, `--yes` | Answer the confirmation prompt in advance. |
+
+## confirmation guard
+
+Actions that destroy data — `-v`/`--volumes` and `-p`/`--purge` — stop and print
+exactly what will be removed, then wait for you to type `y` or `yes`. Anything
+else aborts before Docker is called.
+
+Pass `-y`/`--yes` (or set `COMPOSER_ASSUME_YES=1`) to confirm up front. The guard
+fails **closed**: when stdin is not a terminal (CI, cron, a piped script) and
+neither the flag nor the variable is set, the run is refused instead of silently
+proceeding.
+
+```bash
+./start.sh stop            # no prompt, nothing is destroyed
+./start.sh stop web        # only the web service
+./start.sh stop -v         # prompts: type y or yes
+./start.sh stop -p -y      # no prompt, purges immediately
+```
 
 ## deploy status
 

@@ -6,12 +6,18 @@ from typing import Dict, List, Optional
 from .cli import (
     parse_agent_args,
     parse_args,
+    parse_check_args,
     parse_enable_agent_args,
+    parse_log_args,
     parse_restart_args,
     parse_run_args,
+    parse_stop_args,
+    parse_update_args,
     parse_watch_args,
 )
+from .checkup import CheckupMixin
 from .config import ConfigMixin
+from .confirmation import confirm
 from .constants import ERROR, IDLE, OK, RUNNING
 from .docker_compose_manager import DockerComposeMixin
 from .health_monitor import HealthMonitorMixin
@@ -27,6 +33,7 @@ from .version_gate import VersionGateMixin
 class DockerComposeLauncher(
     PostStartHooksMixin,
     HealthMonitorMixin,
+    CheckupMixin,
     ConfigMixin,
     SecretsMixin,
     VersionGateMixin,
@@ -55,7 +62,10 @@ class DockerComposeLauncher(
         self.restart_services: List[str] = []
         self.down_mode = False
         self.down_volumes = False
+        self.down_services: List[str] = []
+        self.stop_command = "stop"
         self.purge = False
+        self.assume_yes = False
         self.last_progress_text = ""
         self.last_progress_label = ""
         self.last_runtime_diagnostic = ""
@@ -134,6 +144,97 @@ class DockerComposeLauncher(
         )
         sys.exit(code)
 
+    def handle_log(self, argv):
+        """`composer log [opts] [service...]` — read Compose service logs."""
+        log_args = parse_log_args(argv)
+        tail = str(log_args.tail).strip().lower()
+        if tail in {"0", "-1", "all"}:
+            tail = "all"
+        elif not tail.isdigit():
+            print(
+                f"✖ log: --tail expects a line count or 'all', got {log_args.tail!r}.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        self.compose_file = log_args.file
+        self.dev_mode = log_args.dev
+        self.resolve_active_compose_files()
+
+        code = self.stream_service_logs(
+            log_args.service,
+            tail=tail,
+            follow=log_args.follow,
+            timestamps=log_args.timestamps,
+            since=log_args.since,
+            until=log_args.until,
+            no_color=log_args.no_color,
+        )
+        sys.exit(code)
+
+    def configure_update(self, argv):
+        """Configure `composer update [opts] [service...]` for the update pipeline."""
+        update_args = parse_update_args(argv)
+        self.update_images = True
+        self.pull_only_mode = update_args.only
+        if update_args.service:
+            self.pull_service = list(update_args.service)
+            if not update_args.only:
+                self.up_service = list(update_args.service)
+        self.compose_file = update_args.file
+        self.dev_mode = update_args.dev
+        self.build_images = update_args.build
+        self.force = update_args.force
+        self.no_migrate = update_args.no_migrate
+        self.force_makemigrations = update_args.make_migrations
+        self.target_app = update_args.app
+        self.resolve_active_compose_files()
+        self.status_file = (
+            update_args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
+        )
+        self.log_file = os.environ.get("COMPOSER_LOG_FILE") or None
+        self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
+        self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None
+        self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
+        self.exclude_services = parse_service_list(
+            os.environ.get("COMPOSER_EXCLUDE_SERVICES")
+        )
+
+    def configure_stop(self, argv, command="stop"):
+        """Configure `composer stop [opts] [service...]` for the down pipeline."""
+        stop_args = parse_stop_args(argv, prog=f"composer {command}")
+        if stop_args.service and (stop_args.volumes or stop_args.purge):
+            print(
+                f"✖ {command}: -v/--volumes and -p/--purge act on the whole project "
+                "and cannot be scoped to services.\n"
+                f"  Drop the service names, or run 'composer {command}' with them and "
+                "no destructive flag.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        self.stop_command = command
+        self.down_mode = True
+        self.down_volumes = stop_args.volumes
+        self.purge = stop_args.purge
+        self.down_services = list(stop_args.service)
+        self.assume_yes = stop_args.yes
+        self.compose_file = stop_args.file
+        self.dev_mode = stop_args.dev
+        self.resolve_active_compose_files()
+
+    def confirm_stop(self) -> bool:
+        """Gate volume/image destruction behind an explicit y/yes."""
+        if not (self.down_volumes or self.purge):
+            return True
+        flag = "--purge" if self.purge else "--volumes"
+        action = f"composer {self.stop_command} {flag} permanently destroys project data"
+        consequences = ["Named volumes are removed (databases, uploads, caches)."]
+        if self.purge:
+            consequences.append("Locally built untagged images and orphan containers are removed.")
+            consequences.append("Dangling builder cache is pruned (host-wide, unreferenced only).")
+        consequences.append(f"Compose files: {', '.join(self.active_compose_files)}")
+        return confirm(action, consequences, assume_yes=self.assume_yes)
+
     def configure_restart(self, argv):
         """Configure `composer restart [opts] [service]` for the restart pipeline."""
         restart_args = parse_restart_args(argv)
@@ -178,8 +279,17 @@ class DockerComposeLauncher(
                 from .agent_installer import run_enable_agent
 
                 sys.exit(run_enable_agent(parse_enable_agent_args(argv[1:])))
+            if argv and argv[0] in {"log", "logs"}:
+                self.handle_log(argv[1:])
+                return
+            if argv and argv[0] == "check":
+                sys.exit(self.run_checkup(parse_check_args(argv[1:])))
             if argv and argv[0] in {"restart", "-r", "--restart"}:
                 self.configure_restart(argv[1:])
+            elif argv and argv[0] in {"stop", "down"}:
+                self.configure_stop(argv[1:], command=argv[0])
+            elif argv and argv[0] == "update":
+                self.configure_update(argv[1:])
             else:
                 args = parse_args()
 
@@ -211,8 +321,10 @@ class DockerComposeLauncher(
                     if isinstance(args.update_only, str):
                         self.pull_service = args.update_only
                 self.down_mode = args.down
+                self.stop_command = "--down"
                 self.down_volumes = args.volumes
                 self.purge = args.purge
+                self.assume_yes = args.yes
 
                 # Status reporting + version gate config (env, overridable by flags).
                 self.status_file = args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
@@ -232,7 +344,10 @@ class DockerComposeLauncher(
             self.discover_services(silent=True)
 
             if self.down_mode:
-                print("🛑 Stopping and removing containers...")
+                if not self.confirm_stop():
+                    sys.exit(1)
+                scope = ", ".join(self.down_services) if self.down_services else "all services"
+                print(f"🛑 Stopping and removing containers ({scope})...")
                 if self.down_volumes or self.purge:
                     print("   (Volumes will be removed)")
                 if self.purge:

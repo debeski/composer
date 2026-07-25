@@ -3,6 +3,8 @@ import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .service_selection import scoped_service_list
+
 # Default image label carrying the release version. OCI-standard; override with
 # COMPOSER_VERSION_LABEL for a project-specific label (e.g. a baked framework
 # version).
@@ -70,8 +72,9 @@ class VersionGateMixin:
     def compose_config_images(self) -> List[str]:
         """Resolved image refs for the services in scope for this update."""
         args = ["config", "--images"]
-        if isinstance(getattr(self, "pull_service", None), str):
-            args.append(self.pull_service)
+        scoped = scoped_service_list(getattr(self, "pull_service", None))
+        if scoped:
+            args.extend(scoped)
         elif getattr(self, "exclude_services", None):
             if not getattr(self, "services", None):
                 if not self.discover_services(silent=True):

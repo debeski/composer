@@ -15,6 +15,22 @@ def parse_args():
             "  restart [-f FILE] [-d] [--status-file PATH] [service]\n"
             "      Restart running containers (short alias: composer -r).\n"
             "      Run 'composer restart --help' for details.\n"
+            "  update [-o] [-b] [--force] [-f FILE] [-d] [service...]\n"
+            "      Pull the latest image(s), then recreate, health-check, and run\n"
+            "      post-start tasks. -o/--only stops after the pull. Name services\n"
+            "      to scope it. Run 'composer update --help' for details.\n"
+            "  stop [-v] [-p] [-y] [-f FILE] [-d] [service...]\n"
+            "      Stop and remove containers, or only the named services.\n"
+            "      -v/--volumes and -p/--purge are destructive and ask for\n"
+            "      confirmation unless -y/--yes is given (alias: composer down).\n"
+            "      Run 'composer stop --help' for details.\n"
+            "  check [--fix] [-y] [--deep] [--json] [-f FILE] [-d]\n"
+            "      Doctor: verify Docker, compose config, secrets, required env,\n"
+            "      topology, and version drift; --fix applies safe migrations,\n"
+            "      --deep relays the in-container checks. Run 'composer check --help'.\n"
+            "  log [-n N|all] [--follow] [-f FILE] [-d] [service...]\n"
+            "      Read Compose logs for the whole stack or named services\n"
+            "      (default: last 50 lines). Run 'composer log --help'.\n"
             "  watch --trigger-file PATH [--interval N]\n"
             "      Resident updater: watch a trigger file and run a full update\n"
             "      (pull + version gate + recreate + health + post_start) on each\n"
@@ -102,12 +118,237 @@ def parse_args():
         help="Purge with --down: remove built untagged images, volumes, networks, orphans, and dangling build cache",
     )
     parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Answer 'yes' to confirmation prompts for destructive actions (-v, -p)",
+    )
+    parser.add_argument(
         "--version",
         action="store_true",
         help="Print Composer version and exit",
     )
 
     return parser.parse_args()
+
+
+def parse_update_args(argv):
+    """Parse arguments for the `update` subcommand (composer update ...)."""
+    parser = argparse.ArgumentParser(
+        prog="composer update",
+        description=(
+            "Pull the latest image(s), then recreate the affected containers, "
+            "wait for health checks, and run post-start tasks. Name services to "
+            "scope both the pull and the recreate."
+        ),
+    )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    parser.add_argument(
+        "-o",
+        "--only",
+        action="store_true",
+        help="Pull only, then exit: no version gate, recreate, health checks, or post-start tasks",
+    )
+    parser.add_argument(
+        "-b",
+        "--build",
+        action="store_true",
+        help="Force build of images before recreating containers (--build)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass the preflight version gate (allow updating onto an older image version)",
+    )
+    parser.add_argument(
+        "-nm",
+        "--no-migrate",
+        action="store_true",
+        help="Bypass post-start migration tasks",
+    )
+    parser.add_argument(
+        "-mm",
+        "--make-migrations",
+        action="store_true",
+        help="Force making migrations during post-start tasks",
+    )
+    parser.add_argument(
+        "-a",
+        "--app",
+        help="Target app for initialization (passed to migrator)",
+    )
+    parser.add_argument(
+        "--status-file",
+        metavar="PATH",
+        help="Write a JSON deploy-status file to PATH (overrides COMPOSER_STATUS_FILE)",
+    )
+    parser.add_argument(
+        "service",
+        nargs="*",
+        help="Update only these Compose services (default: every service)",
+    )
+    return parser.parse_args(argv)
+
+
+def parse_check_args(argv):
+    """Parse arguments for the `check` subcommand (composer check ...)."""
+    parser = argparse.ArgumentParser(
+        prog="composer check",
+        description=(
+            "Diagnose the outside of a DLUX stack: Docker, Compose config, "
+            "secrets, required environment variables, topology, and version "
+            "drift. Deep, app-level checks are relayed to the container."
+        ),
+    )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply safe fixes (e.g. migrate a legacy composer-updater topology)",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Confirm --fix actions up front instead of being prompted",
+    )
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Also relay the in-container doctor (app-level checks)",
+    )
+    parser.add_argument(
+        "--deep-service",
+        default="web",
+        metavar="SERVICE",
+        help="Service to run the in-container doctor in (default: web)",
+    )
+    parser.add_argument(
+        "--deep-command",
+        default="python manage.py dlux_doctor",
+        metavar="CMD",
+        help="In-container doctor command (default: 'python manage.py dlux_doctor')",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit results as JSON")
+    return parser.parse_args(argv)
+
+
+def parse_stop_args(argv, prog="composer stop"):
+    """Parse arguments for the `stop` subcommand (composer stop ...)."""
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description=(
+            "Stop and remove this project's containers, or only the named "
+            "services. Secrets, health checks, and post-start tasks are skipped. "
+            "Destructive options (-v, -p) require an explicit confirmation."
+        ),
+    )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    parser.add_argument(
+        "-v",
+        "--volumes",
+        action="store_true",
+        help="Also remove named volumes (destructive: stored data is lost)",
+    )
+    parser.add_argument(
+        "-p",
+        "--purge",
+        action="store_true",
+        help="Also remove volumes, built untagged images, orphans, and dangling build cache",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Confirm the destructive options up front instead of being prompted",
+    )
+    parser.add_argument(
+        "service",
+        nargs="*",
+        help="Stop only these Compose services (default: the whole project)",
+    )
+    return parser.parse_args(argv)
+
+
+def parse_down_args(argv):
+    """Deprecated alias kept for `composer down ...`."""
+    return parse_stop_args(argv, prog="composer down")
+
+
+def parse_log_args(argv):
+    """Parse arguments for the `log` subcommand (composer log ...)."""
+    parser = argparse.ArgumentParser(
+        prog="composer log",
+        description=(
+            "Read Compose logs for the whole stack or for named services. "
+            "Shows the last 50 lines per service by default."
+        ),
+    )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    parser.add_argument(
+        "-n",
+        "--tail",
+        default="50",
+        metavar="N",
+        help="Lines to show per service; 'all' or 0 shows the full log (default: 50)",
+    )
+    parser.add_argument(
+        "-F",
+        "--follow",
+        action="store_true",
+        help="Stream new log output until interrupted",
+    )
+    parser.add_argument(
+        "-t",
+        "--timestamps",
+        action="store_true",
+        help="Prefix each line with its timestamp",
+    )
+    parser.add_argument(
+        "--since",
+        metavar="TIME",
+        help="Only show logs after this point (e.g. 10m, 2h, 2026-07-24T10:00:00)",
+    )
+    parser.add_argument(
+        "--until",
+        metavar="TIME",
+        help="Only show logs before this point",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable the per-service color prefix",
+    )
+    parser.add_argument(
+        "service",
+        nargs="*",
+        help="Read only these Compose services (default: every service)",
+    )
+    return parser.parse_args(argv)
 
 
 def parse_run_args(argv):

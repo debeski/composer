@@ -16,6 +16,7 @@ from .constants import (
     SERVICE_STARTING,
 )
 from .output_utils import OutputUtilsMixin
+from .service_selection import scoped_service_list
 from .subprocess_runner import SubprocessRunnerMixin
 
 
@@ -350,10 +351,11 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         up_args = ["up", "-d"]
         if self.build_images:
             up_args.append("--build")
-        # -u <service> scopes the recreate to that service (Compose recreates it
-        # only if its image/config changed and starts its dependencies).
-        if isinstance(self.up_service, str):
-            up_args.append(self.up_service)
+        # A named scope limits the recreate to those services (Compose recreates
+        # each only if its image/config changed and starts its dependencies).
+        scoped = scoped_service_list(self.up_service)
+        if scoped:
+            up_args.extend(scoped)
         elif getattr(self, "exclude_services", None):
             if not self.services:
                 return False, "", (
@@ -395,8 +397,36 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             # Remove locally built (untagged) images and any orphaned containers
             # for this compose. Networks are already removed by `down` itself.
             down_args.extend(["--rmi", "local", "--remove-orphans"])
+        down_args.extend(getattr(self, "down_services", []) or [])
         ok, _, err = self.run_docker_compose(down_args)
         return ok, err
+
+    def stream_service_logs(
+        self,
+        services: List[str],
+        tail: str = "50",
+        follow: bool = False,
+        timestamps: bool = False,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        no_color: bool = False,
+    ) -> int:
+        """Attach `docker compose logs` to the terminal. Returns the exit code."""
+        args = ["logs", "--tail", tail]
+        if follow:
+            args.append("--follow")
+        if timestamps:
+            args.append("--timestamps")
+        if no_color or not sys.stdout.isatty():
+            args.append("--no-color")
+        if since:
+            args.extend(["--since", since])
+        if until:
+            args.extend(["--until", until])
+        args.extend(services)
+
+        argv = self.resolve_compose_cli() + self.build_compose_base_args() + args
+        return self.run_command_interactive(argv, env=self.build_compose_env())
 
     def prune_build_cache(self) -> Tuple[bool, str]:
         # BuildKit cache cannot be scoped to a single compose project, so prune
@@ -409,8 +439,9 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
 
     def pull_images(self) -> Tuple[bool, str, str]:
         pull_args = ["pull"]
-        if isinstance(self.pull_service, str):
-            pull_args.append(self.pull_service)
+        scoped = scoped_service_list(self.pull_service)
+        if scoped:
+            pull_args.extend(scoped)
         elif getattr(self, "exclude_services", None):
             if not self.services and not self.discover_services(silent=True):
                 return False, "", self.last_runtime_diagnostic
