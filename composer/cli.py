@@ -218,7 +218,8 @@ def parse_check_args(argv):
         action="store_true",
         help=(
             "Apply guarded safe fixes (remove obsolete pgadmin/db-backup services "
-            "and migrate a legacy composer-updater topology)"
+            "and their legacy proxy routes, and migrate a legacy "
+            "composer-updater topology)"
         ),
     )
     parser.add_argument(

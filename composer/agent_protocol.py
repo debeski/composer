@@ -24,6 +24,9 @@ _SENSITIVE_RE = re.compile(
     r"(?i)(authorization|password|passwd|secret|token|api[_-]?key)"
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)(authorization\s*[:=]\s*)[^\r\n,;]+"
+)
 
 
 class ProtocolError(ValueError):
@@ -103,8 +106,11 @@ def validate_command(value: Any) -> Dict[str, Any]:
         payload = {"service": service}
     elif action == "composer.recovery_deploy":
         _require_payload_fields(payload, {"force", "reason"})
+        force = payload.get("force", False)
+        if not isinstance(force, bool):
+            raise ProtocolError("force must be a JSON boolean.")
         payload = {
-            "force": bool(payload.get("force", False)),
+            "force": force,
             "reason": _bounded_text(payload.get("reason"), 1000),
         }
         if not payload["reason"]:
@@ -150,4 +156,8 @@ def redact_text(value: Any) -> str:
     text = _bounded_text(value, MAX_EVENT_TEXT)
     for secret in inherited_secret_values():
         text = text.replace(secret, "[REDACTED]")
+    text = _AUTHORIZATION_RE.sub(
+        lambda match: f"{match.group(1)}[REDACTED]",
+        text,
+    )
     return _SENSITIVE_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)

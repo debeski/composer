@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import ConfigMixin
 from .confirmation import confirm
+from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -147,6 +148,16 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         has_agent = "composer-agent" in services
         has_legacy = "composer-updater" in services
         has_proxy = "docker-socket-proxy" in services
+        if has_agent and has_legacy:
+            return _result(
+                FAIL,
+                "topology",
+                "Conflicting composer-agent and composer-updater services detected.",
+                fix=(
+                    "Review the mixed topology manually; Composer refuses to guess "
+                    "which generated block owns the deployment."
+                ),
+            )
         if has_agent:
             note = "Managed by composer-agent."
             if not has_proxy:
@@ -183,6 +194,31 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 "named volumes and stored data are preserved."
             ),
         )
+
+    def _check_proxy_routes(self) -> Dict[str, Any]:
+        inspection = inspect_legacy_proxy_routes(".")
+        if inspection["unsupported"]:
+            return _result(
+                FAIL,
+                "proxy-routes",
+                "Unrecognized pgAdmin proxy route(s): "
+                + ", ".join(inspection["unsupported"])
+                + ".",
+                fix="Review these custom routes manually before removing pgAdmin.",
+            )
+        if inspection["recognized"]:
+            return _result(
+                WARN,
+                "proxy-routes",
+                "Legacy pgAdmin proxy route(s) detected: "
+                + ", ".join(inspection["recognized"])
+                + ".",
+                fix=(
+                    "Run 'composer check --fix' to archive, validate, remove, "
+                    "and reload the active proxy."
+                ),
+            )
+        return _result(OK, "proxy-routes", "No legacy pgAdmin proxy routes detected.")
 
     def _resident_agent_version(self) -> Optional[str]:
         if "composer-agent" not in set(self.services):
@@ -239,6 +275,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             results.append(self._check_required_vars())
             results.append(self._check_topology())
             results.append(self._check_removed_services())
+            results.append(self._check_proxy_routes())
             results.append(self._check_versions())
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
@@ -258,7 +295,19 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         fixes: List[Dict[str, Any]] = []
         legacy = "composer-updater" in set(self.services) and "composer-agent" not in set(self.services)
         obsolete = sorted(OBSOLETE_SERVICES.intersection(self.services))
-        if not legacy and not obsolete:
+        proxy_inspection = inspect_legacy_proxy_routes(".")
+        if proxy_inspection["unsupported"]:
+            fixes.append(
+                _result(
+                    FAIL,
+                    "fix:proxy-routes",
+                    "Refusing to rewrite unrecognized pgAdmin proxy routes: "
+                    + ", ".join(proxy_inspection["unsupported"]),
+                )
+            )
+            return fixes
+        proxy_routes = proxy_inspection["recognized"]
+        if not legacy and not obsolete and not proxy_routes:
             return fixes
         consequences = []
         if obsolete:
@@ -269,6 +318,16 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
             consequences.append(
                 "Stop and remove only those obsolete service containers."
+            )
+        if proxy_routes:
+            consequences.append(
+                "Archive, validate, and remove pgAdmin routes from: "
+                + ", ".join(proxy_routes)
+                + "."
+            )
+            consequences.append(
+                "Reload the active proxy, or restart only Nginx when its live "
+                "configuration is generated from a template."
             )
         if legacy:
             consequences.extend(
@@ -291,7 +350,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             fixes.append(_result(WARN, "fix", "Changes declined."))
             return fixes
 
-        if obsolete:
+        if obsolete or proxy_routes:
             from .stack_cleanup import StackCleanupError, remove_obsolete_services
 
             environment = self.build_compose_env()
@@ -313,18 +372,37 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                         "Could not locate removable service blocks for: "
                         + ", ".join(not_found)
                     )
+                changes = []
+                if outcome["removed_services"]:
+                    changes.append(
+                        "removed "
+                        + ", ".join(outcome["removed_services"])
+                        + " service definitions and containers"
+                    )
+                if outcome["proxy_files"]:
+                    changes.append(
+                        "removed pgAdmin routes from "
+                        + ", ".join(outcome["proxy_files"])
+                    )
+                if outcome["proxy_services_reloaded"]:
+                    changes.append(
+                        "reloaded " + ", ".join(outcome["proxy_services_reloaded"])
+                    )
+                if outcome["proxy_services_restarted"]:
+                    changes.append(
+                        "restarted " + ", ".join(outcome["proxy_services_restarted"])
+                    )
                 fixes.append(
                     _result(
                         OK,
-                        "fix:removed-services",
-                        "Removed "
-                        + ", ".join(outcome["removed_services"])
-                        + " service definitions and containers; post-fix checks passed. Backup: "
-                        + (outcome.get("backup_root") or "n/a")
+                        "fix:obsolete-stack",
+                        "; ".join(changes)
+                        + "; post-fix checks passed. Backup: "
+                        + (outcome.get("backup_root") or "n/a"),
                     )
                 )
             except StackCleanupError as exc:
-                fixes.append(_result(FAIL, "fix:removed-services", f"Cleanup failed: {exc}"))
+                fixes.append(_result(FAIL, "fix:obsolete-stack", f"Cleanup failed: {exc}"))
                 return fixes
 
         if legacy:

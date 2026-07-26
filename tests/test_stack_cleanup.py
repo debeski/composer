@@ -61,6 +61,27 @@ CLEAN_MODEL = json.dumps(
     }
 )
 EXISTING_VOLUMES = "demo_pgadmin_data\ndemo_database_backups\n"
+PROXY_CADDY = """example.test {
+    route {
+        handle_path /pgadmin4/* {
+            reverse_proxy pgadmin:80 {
+                header_up X-Script-Name /pgadmin4
+            }
+        }
+        reverse_proxy web:8000
+    }
+}
+"""
+PROXY_NGINX = """server {
+    location /pgadmin4/ {
+        proxy_pass http://pgadmin:80/;
+        proxy_set_header X-Script-Name /pgadmin4;
+    }
+    location / {
+        proxy_pass http://web:8000;
+    }
+}
+"""
 
 
 def _completed(returncode=0, stdout="", stderr=""):
@@ -256,6 +277,139 @@ class StackCleanupApplyTests(unittest.TestCase):
                 (root / ".xpose" / "composer-check").glob("*/original/compose.yml")
             )
             self.assertEqual(len(originals), 1)
+
+    def test_proxy_only_caddy_route_is_validated_archived_and_reloaded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compose = root / "compose.yml"
+            proxy = root / ".proxy" / "Caddyfile"
+            proxy.parent.mkdir()
+            compose.write_text(
+                "services:\n  web:\n    image: example/web\n  caddy:\n    image: caddy:latest\n",
+                encoding="utf-8",
+            )
+            proxy.write_text(PROXY_CADDY, encoding="utf-8")
+            model = json.dumps(
+                {
+                    "services": {
+                        "web": {},
+                        "caddy": {
+                            "volumes": [
+                                {
+                                    "type": "bind",
+                                    "source": str(proxy.resolve()),
+                                    "target": "/etc/caddy/Caddyfile",
+                                }
+                            ]
+                        },
+                    }
+                }
+            )
+            runner = Mock(
+                side_effect=[
+                    _completed(),
+                    _completed(stdout=model),
+                    _completed(),
+                    _completed(stdout=model),
+                    _completed(),
+                    _completed(stdout="caddy\nweb\n"),
+                    _completed(stdout=model),
+                    _completed(),
+                    _completed(),
+                ]
+            )
+
+            with patch("composer.stack_cleanup.shutil.which", return_value="/usr/bin/docker"):
+                result = remove_obsolete_services(
+                    str(root),
+                    ["compose.yml"],
+                    command_runner=runner,
+                )
+
+            self.assertEqual(result["removed_services"], [])
+            self.assertEqual(result["proxy_files"], [".proxy/Caddyfile"])
+            self.assertEqual(result["proxy_candidates_validated"], ["caddy"])
+            self.assertEqual(result["proxy_services_reloaded"], ["caddy"])
+            self.assertEqual(result["proxy_services_restarted"], [])
+            self.assertNotIn("pgadmin", proxy.read_text(encoding="utf-8").lower())
+            backup = Path(result["backup_root"]) / "original" / ".proxy" / "Caddyfile"
+            self.assertEqual(backup.read_text(encoding="utf-8"), PROXY_CADDY)
+            validation = runner.call_args_list[4].args[0]
+            self.assertEqual(validation[-6:-4], ["caddy", "validate"])
+            reload_command = runner.call_args_list[8].args[0]
+            self.assertIn("reload", reload_command)
+            self.assertFalse(
+                any(
+                    "rm" in call.args[0] and "-s" in call.args[0]
+                    for call in runner.call_args_list
+                )
+            )
+
+    def test_proxy_only_nginx_template_is_validated_and_restarted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compose = root / "compose.yml"
+            proxy = root / ".proxy" / "default.conf.template"
+            proxy.parent.mkdir()
+            compose.write_text(
+                "services:\n  web:\n    image: example/web\n  nginx:\n    image: nginx:latest\n",
+                encoding="utf-8",
+            )
+            proxy.write_text(PROXY_NGINX, encoding="utf-8")
+            model = json.dumps(
+                {
+                    "services": {
+                        "web": {},
+                        "nginx": {
+                            "volumes": [
+                                {
+                                    "type": "bind",
+                                    "source": str(proxy.resolve()),
+                                    "target": "/etc/nginx/templates/default.conf.template",
+                                }
+                            ]
+                        },
+                    }
+                }
+            )
+            runner = Mock(
+                side_effect=[
+                    _completed(),
+                    _completed(stdout=model),
+                    _completed(),
+                    _completed(stdout=model),
+                    _completed(),
+                    _completed(stdout="nginx\nweb\n"),
+                    _completed(stdout=model),
+                    _completed(),
+                    _completed(),
+                    _completed(),
+                ]
+            )
+
+            with patch("composer.stack_cleanup.shutil.which", return_value="/usr/bin/docker"):
+                result = remove_obsolete_services(
+                    str(root),
+                    ["compose.yml"],
+                    command_runner=runner,
+                )
+
+            self.assertEqual(result["proxy_candidates_validated"], ["nginx"])
+            self.assertEqual(result["proxy_services_reloaded"], [])
+            self.assertEqual(result["proxy_services_restarted"], ["nginx"])
+            self.assertNotIn("pgadmin", proxy.read_text(encoding="utf-8").lower())
+            validation = runner.call_args_list[4].args[0]
+            self.assertEqual(validation[-3:], ["nginx", "nginx", "-t"])
+            restart_command = runner.call_args_list[8].args[0]
+            self.assertEqual(
+                restart_command[-2:],
+                ["restart", "nginx"],
+            )
+            live_validation = runner.call_args_list[9].args[0]
+            self.assertEqual(
+                live_validation[-5:],
+                ["exec", "-T", "nginx", "nginx", "-t"],
+            )
 
     def test_clean_stack_is_idempotent_without_docker(self):
         with tempfile.TemporaryDirectory() as directory:

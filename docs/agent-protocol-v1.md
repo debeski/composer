@@ -7,7 +7,10 @@
 - The control URL must use HTTPS. Plain HTTP is accepted only for explicit localhost development.
 - Enrollment uses `POST /api/agent/v1/enroll/` with a one-use token whose server lifetime is 15 minutes.
 - Enrollment returns a UUID agent ID and random bearer secret. The agent persists credentials, commands, event sequences, and replay outbox in mode-`0600` SQLite under `COMPOSER_AGENT_STATE_DIR`.
+- Successful enrollment pins the normalized control URL in the same durable state. Active credentials reject conflicting environment or pairing-spool URLs; moving to another panel requires revocation and re-enrollment or an explicit local state reset.
 - Every later request sends `X-Composer-Agent-ID` plus `Authorization: Bearer ...`. The server stores only password hashes.
+- Control-plane requests reject HTTP redirects, including same-origin redirects, and therefore never forward agent authentication headers to a redirect target.
+- Recovery deployment `force` is a strict JSON boolean; string-shaped values are rejected. Sanitized relay output removes complete Authorization values, including Bearer credentials.
 - Commands are retrieved from `GET /api/agent/v1/commands/next/?wait=25`. Offline is a presentation state after 90 seconds without contact, never proof of deployment failure.
 - Credential rotation is two-phase: stage a pending secret, persist it, confirm with it, then revoke the old hash. An interrupted confirmation is retried from durable agent state.
 

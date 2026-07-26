@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.7
+- **Pinned Agent Control Origin**: Persisted the normalized control URL after enrollment, rejected conflicting pairing requests and startup overrides while credentials remain active, and allowed replacement only after revocation/re-enrollment or local state reset.
+- **No Credentialed Redirects**: Control-plane and registry requests reject HTTP redirects; registry token challenges also require an HTTPS realm.
+- **Protocol Input And Redaction Hardening**: Recovery `force` now requires a JSON boolean, and full Bearer authorization values are removed from relayed logs.
+- **Legacy Proxy Cleanup**: `check --fix` archives and removes recognized pgAdmin routes, reloads Caddy/direct Nginx configs, and restarts plus verifies template-backed Nginx so its rendered configuration is refreshed.
+- **Mixed Topology Guard**: `check` now fails when `composer-agent` and `composer-updater` coexist instead of treating the agent-first branch as healthy.
+
 ## v1.2.6
 - **Obsolete DLUX Service Cleanup**: `composer check` now warns on `pgadmin`, `db-backup`, and `db_backup`; guarded `check --fix` validates the candidate, archives originals, runs targeted `docker compose rm -sf` only for those services, applies their service-block removal, and verifies the services are gone while pre-existing named volumes remain.
 

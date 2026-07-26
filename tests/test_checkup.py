@@ -100,6 +100,17 @@ class CheckupCheckTests(unittest.TestCase):
         self.launcher.services = ["web", "composer-agent", "docker-socket-proxy"]
         self.assertEqual(self.launcher._check_topology()["level"], OK)
 
+    def test_mixed_agent_and_legacy_topology_is_blocking(self):
+        self.launcher.services = [
+            "web",
+            "composer-agent",
+            "composer-updater",
+            "docker-socket-proxy",
+        ]
+        result = self.launcher._check_topology()
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("Conflicting", result["message"])
+
     def test_removed_services_are_a_fixable_warning(self):
         self.launcher.services = ["web", "pgadmin", "db-backup", "db_backup"]
         result = self.launcher._check_removed_services()
@@ -112,6 +123,18 @@ class CheckupCheckTests(unittest.TestCase):
     def test_stack_without_removed_services_is_ok(self):
         self.launcher.services = ["web", "db", "composer-agent"]
         self.assertEqual(self.launcher._check_removed_services()["level"], OK)
+
+    def test_legacy_proxy_routes_are_a_fixable_warning(self):
+        with patch(
+            "composer.checkup.inspect_legacy_proxy_routes",
+            return_value={
+                "recognized": [".proxy/Caddyfile"],
+                "unsupported": [],
+            },
+        ):
+            result = self.launcher._check_proxy_routes()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn(".proxy/Caddyfile", result["message"])
 
     def test_version_drift_between_deployer_and_resident_warns(self):
         self.launcher.services = ["composer-agent"]
@@ -177,10 +200,14 @@ class CheckupRunTests(unittest.TestCase):
         launcher.active_compose_files = ["compose.yml"]
         outcome = {
             "removed_services": ["db_backup", "pgadmin"],
+            "proxy_files": [],
             "backup_root": "/x/.xpose/check",
             "container_cleanup_applied": True,
             "postflight_verified": True,
             "preserved_volumes": [],
+            "proxy_candidates_validated": [],
+            "proxy_services_reloaded": [],
+            "proxy_services_restarted": [],
         }
         with (
             patch.object(launcher, "plaintext_env_candidates", return_value=[]),
@@ -200,10 +227,14 @@ class CheckupRunTests(unittest.TestCase):
         launcher.active_compose_files = ["compose.yml"]
         outcome = {
             "removed_services": [],
+            "proxy_files": [],
             "backup_root": "",
             "container_cleanup_applied": False,
             "postflight_verified": False,
             "preserved_volumes": [],
+            "proxy_candidates_validated": [],
+            "proxy_services_reloaded": [],
+            "proxy_services_restarted": [],
         }
         with (
             patch.object(launcher, "plaintext_env_candidates", return_value=[]),
@@ -215,6 +246,40 @@ class CheckupRunTests(unittest.TestCase):
 
         self.assertEqual(fixes[0]["level"], FAIL)
         self.assertIn("pgadmin", fixes[0]["message"])
+
+    def test_fix_repairs_proxy_only_already_migrated_stack(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "composer-agent", "docker-socket-proxy", "caddy"]
+        launcher.active_compose_files = ["compose.yml"]
+        outcome = {
+            "removed_services": [],
+            "proxy_files": [".proxy/Caddyfile"],
+            "backup_root": "/x/.xpose/check",
+            "container_cleanup_applied": False,
+            "postflight_verified": True,
+            "preserved_volumes": [],
+            "proxy_candidates_validated": ["caddy"],
+            "proxy_services_reloaded": ["caddy"],
+            "proxy_services_restarted": [],
+        }
+        with (
+            patch.object(launcher, "plaintext_env_candidates", return_value=[]),
+            patch.object(launcher, "build_compose_env", return_value={}),
+            patch(
+                "composer.checkup.inspect_legacy_proxy_routes",
+                return_value={
+                    "recognized": [".proxy/Caddyfile"],
+                    "unsupported": [],
+                },
+            ),
+            patch("composer.checkup.confirm", return_value=True),
+            patch("composer.stack_cleanup.remove_obsolete_services", return_value=outcome) as remove,
+        ):
+            fixes = launcher._maybe_fix(_args(fix=True), [])
+
+        remove.assert_called_once_with(".", ["compose.yml"], environment={})
+        self.assertEqual(fixes[0]["level"], OK)
+        self.assertIn("reloaded caddy", fixes[0]["message"])
 
     def test_fix_declined_does_not_call_enable_agent(self):
         launcher = DockerComposeLauncher()

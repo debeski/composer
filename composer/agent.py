@@ -42,9 +42,9 @@ class ComposerAgent:
     def __init__(self, args):
         self.args = args
         self.composer_version = read_composer_version()
-        self.control_url = str(
+        configured_control_url = self._normalize_control_url(
             args.control_url or os.environ.get("COMPOSER_CONTROL_URL") or ""
-        ).strip()
+        )
         self.enrollment_token = str(
             args.enrollment_token or os.environ.get("COMPOSER_ENROLLMENT_TOKEN") or ""
         ).strip()
@@ -54,11 +54,17 @@ class ComposerAgent:
             or "/var/lib/composer-agent"
         )
         self.store = AgentStore(state_dir)
-        # A control URL delivered once through UI-driven pairing is persisted in
-        # the durable store, so a later restart reconstructs the client without
-        # ever needing COMPOSER_CONTROL_URL in the environment.
-        if not self.control_url:
-            self.control_url = str(self.store.get_meta("control_url") or "").strip()
+        persisted_control_url = self._normalize_control_url(
+            self.store.get_meta("control_url")
+        )
+        credentials = self.store.load_credentials()
+        enrolled = bool(credentials) and not bool(self.store.get_meta("revoked"))
+        if enrolled and persisted_control_url:
+            self.control_url = persisted_control_url
+        else:
+            self.control_url = configured_control_url or persisted_control_url
+            if enrolled and self.control_url:
+                self.store.set_meta("control_url", self.control_url)
         trigger = Path(args.trigger_file)
         if not args.status_file:
             args.status_file = str(trigger.with_name("deploy-status.json"))
@@ -81,6 +87,10 @@ class ComposerAgent:
         self.client = self._build_client(self.control_url)
         self.stop_event = threading.Event()
         self.poll_thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _normalize_control_url(control_url: Any) -> str:
+        return str(control_url or "").strip().rstrip("/")
 
     def _build_client(self, control_url: str) -> Optional[ControlPlaneClient]:
         control_url = str(control_url or "").strip()
@@ -115,6 +125,7 @@ class ComposerAgent:
         self.store.save_credentials(credentials["agent_id"], credentials["secret"])
         self.store.set_meta("enrolled_at", utc_now())
         self.store.set_meta("revoked", "")
+        self._adopt_control_url(self.control_url, allow_rebind=True)
         return credentials
 
     def _poll_control_plane(self):
@@ -157,11 +168,23 @@ class ComposerAgent:
         )
         self.poll_thread.start()
 
-    def _adopt_control_url(self, control_url: str):
-        """Persist a paired control URL and (re)build the outbound client + poller."""
-        control_url = str(control_url or "").strip()
+    def _adopt_control_url(self, control_url: str, *, allow_rebind: bool = False):
+        control_url = self._normalize_control_url(control_url)
         if not control_url:
             return
+        pinned_control_url = self._normalize_control_url(
+            self.store.get_meta("control_url")
+        )
+        credentials = self.store.load_credentials()
+        enrolled = bool(credentials) and not bool(self.store.get_meta("revoked"))
+        if (
+            enrolled
+            and control_url != pinned_control_url
+            and not allow_rebind
+        ):
+            raise ProtocolError(
+                "Control URL is pinned; revoke and re-enroll or reset local agent state."
+            )
         self.control_url = control_url
         self.store.set_meta("control_url", control_url)
         self.client = self._build_client(control_url)
@@ -192,15 +215,22 @@ class ComposerAgent:
         if self.store.get_meta(meta_key):
             return
 
-        control_url = str(request.get("control_url") or "").strip() or self.control_url
+        control_url = self._normalize_control_url(
+            request.get("control_url")
+        ) or self.control_url
         pairing_code = str(request.get("pairing_code") or "").strip()
 
         credentials = self.store.load_credentials()
-        if credentials and not self.store.get_meta("revoked"):
-            # Already enrolled — treat the request as a no-op success and adopt
-            # any newly supplied control URL.
+        revoked = bool(self.store.get_meta("revoked"))
+        if credentials and not revoked:
             self.store.set_meta(meta_key, utc_now())
-            self._adopt_control_url(control_url)
+            try:
+                self._adopt_control_url(control_url)
+            except ProtocolError as exc:
+                self._record_enroll_outcome(
+                    operation_id, "error", redact_text(exc)
+                )
+                return
             self._record_enroll_outcome(operation_id, "ok")
             return
 
@@ -221,7 +251,7 @@ class ComposerAgent:
         self.store.set_meta("enrolled_at", utc_now())
         self.store.set_meta("revoked", "")
         self.store.set_meta(meta_key, utc_now())
-        self._adopt_control_url(control_url)
+        self._adopt_control_url(control_url, allow_rebind=True)
         self._record_enroll_outcome(operation_id, "ok")
 
     def _record_enroll_outcome(self, operation_id: str, state: str, error: str = ""):

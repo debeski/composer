@@ -2,8 +2,10 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -96,11 +98,65 @@ class AgentProtocolTests(unittest.TestCase):
         self.assertNotIn("bearer-value", value)
         self.assertIn("[REDACTED]", value)
 
+    def test_redacts_full_bearer_authorization_value(self):
+        value = redact_text("Authorization: Bearer actual-bearer-secret")
+        self.assertNotIn("actual-bearer-secret", value)
+        self.assertNotIn("Bearer", value)
+        self.assertEqual(value, "Authorization: [REDACTED]")
+
     def test_control_url_requires_https_except_explicit_localhost(self):
         with self.assertRaises(ValueError):
             ControlPlaneClient("http://control.example.com")
         ControlPlaneClient("http://localhost:8000", allow_http_localhost=True)
         ControlPlaneClient("https://control.example.com")
+
+    def test_control_client_rejects_redirect_without_forwarding_credentials(self):
+        received_headers = []
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received_headers.append(dict(self.headers))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, format, *args):
+                return
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler) as target:
+            target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+            target_thread.start()
+            target_url = f"http://127.0.0.1:{target.server_port}/capture"
+
+            class RedirectHandler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(302)
+                    self.send_header("Location", target_url)
+                    self.end_headers()
+
+                def log_message(self, format, *args):
+                    return
+
+            with ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler) as redirect:
+                redirect_thread = threading.Thread(
+                    target=redirect.serve_forever, daemon=True
+                )
+                redirect_thread.start()
+                client = ControlPlaneClient(
+                    f"http://127.0.0.1:{redirect.server_port}",
+                    allow_http_localhost=True,
+                )
+                with self.assertRaises(ControlPlaneError) as raised:
+                    client.next_command(
+                        {"agent_id": "agent-id", "secret": "agent-secret"}
+                    )
+                self.assertEqual(raised.exception.status, 302)
+                self.assertEqual(received_headers, [])
+                redirect.shutdown()
+                redirect_thread.join()
+            target.shutdown()
+            target_thread.join()
 
 
 class AgentStoreTests(unittest.TestCase):
@@ -136,18 +192,25 @@ class ComposerAgentTests(unittest.TestCase):
                 return {"agent_id": "new-agent", "secret": "new-secret"}
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            args = agent_args(Path(temp_dir))
+            root = Path(temp_dir)
+            store = AgentStore(root / "state")
+            store.save_credentials("old-agent", "old-secret")
+            store.set_meta("control_url", "https://old-panel.test")
+            store.set_meta("revoked", "2026-07-23T10:00:00+00:00")
+            args = agent_args(root)
+            args.control_url = "https://new-panel.test"
             args.enrollment_token = "fresh-token"
             agent = ComposerAgent(args)
             agent.client = Client()
-            agent.store.save_credentials("old-agent", "old-secret")
-            agent.store.set_meta("revoked", "2026-07-23T10:00:00+00:00")
 
             credentials = agent.ensure_enrolled()
 
             self.assertEqual(credentials, {"agent_id": "new-agent", "secret": "new-secret"})
             self.assertEqual(agent.store.load_credentials(), credentials)
             self.assertEqual(agent.store.get_meta("revoked"), "")
+            self.assertEqual(
+                agent.store.get_meta("control_url"), "https://new-panel.test"
+            )
 
     def test_delivered_cancellation_is_honored_before_execution(self):
         class Client:
@@ -280,6 +343,13 @@ class ComposerAgentTests(unittest.TestCase):
             self.assertIn("--force", argv)
             self.assertEqual(agent.store.command_state(value["operation_id"]), "succeeded")
 
+    def test_recovery_deploy_force_requires_a_json_boolean(self):
+        with self.assertRaisesRegex(ProtocolError, "JSON boolean"):
+            command(
+                "composer.recovery_deploy",
+                {"force": "false", "reason": "Malformed central request"},
+            )
+
 
 class AgentPairingTests(unittest.TestCase):
     """UI-driven pairing: DjangoLux delivers control URL + one-use code over the
@@ -335,6 +405,84 @@ class AgentPairingTests(unittest.TestCase):
             second = ComposerAgent(agent_args(Path(temp_dir)))
             self.assertEqual(second.control_url, "https://panel.test")
             self.assertIsNotNone(second.client)
+
+    def test_enrolled_agent_ignores_conflicting_configured_control_url(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = AgentStore(root / "state")
+            store.save_credentials("agent-id", "agent-secret")
+            store.set_meta("control_url", "https://panel.test")
+            args = agent_args(root)
+            args.control_url = "https://other-panel.test"
+
+            agent = ComposerAgent(args)
+
+            self.assertEqual(agent.control_url, "https://panel.test")
+            self.assertEqual(
+                agent.store.get_meta("control_url"), "https://panel.test"
+            )
+
+    def test_enrolled_agent_rejects_pairing_request_for_another_panel(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = AgentStore(root / "state")
+            store.save_credentials("agent-id", "agent-secret")
+            store.set_meta("control_url", "https://panel.test")
+            agent = ComposerAgent(agent_args(root))
+            original_client = agent.client
+            operation_id = str(uuid.uuid4())
+
+            self._write_request(
+                agent,
+                operation_id,
+                "UNUSED-CODE",
+                url="https://other-panel.test",
+            )
+            agent.process_enroll_request()
+
+            self.assertEqual(agent.control_url, "https://panel.test")
+            self.assertEqual(
+                agent.store.get_meta("control_url"), "https://panel.test"
+            )
+            self.assertIs(agent.client, original_client)
+            status = json.loads(agent.agent_status_path.read_text())
+            self.assertEqual(status["last_enroll"]["state"], "error")
+            self.assertIn("pinned", status["last_enroll"]["error"])
+
+    def test_legacy_credentials_without_a_url_reject_spool_rebinding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = AgentStore(root / "state")
+            store.save_credentials("agent-id", "agent-secret")
+            agent = ComposerAgent(agent_args(root))
+            operation_id = str(uuid.uuid4())
+
+            self._write_request(agent, operation_id, "UNUSED-CODE")
+            agent.process_enroll_request()
+
+            self.assertEqual(agent.control_url, "")
+            self.assertEqual(agent.store.get_meta("control_url"), "")
+            status = json.loads(agent.agent_status_path.read_text())
+            self.assertEqual(status["last_enroll"]["state"], "error")
+            self.assertIn("pinned", status["last_enroll"]["error"])
+
+    def test_environment_enrollment_pins_control_url(self):
+        class Client:
+            def enroll(self, token, capabilities):
+                return {"agent_id": "agent-id", "secret": "agent-secret"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = agent_args(Path(temp_dir))
+            args.control_url = "https://panel.test/"
+            args.enrollment_token = "one-use-token"
+            agent = ComposerAgent(args)
+            agent.client = Client()
+
+            agent.ensure_enrolled()
+
+            self.assertEqual(
+                agent.store.get_meta("control_url"), "https://panel.test"
+            )
 
     def test_pairing_failure_reports_error_and_leaves_agent_unenrolled(self):
         class Client:

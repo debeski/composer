@@ -12,6 +12,11 @@ class ControlPlaneError(RuntimeError):
         self.status = status
 
 
+class RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 class ControlPlaneClient:
     def __init__(self, base_url: str, *, allow_http_localhost: bool = False):
         self.base_url = str(base_url or "").strip().rstrip("/")
@@ -23,6 +28,7 @@ class ControlPlaneClient:
             raise ValueError("COMPOSER_CONTROL_URL must use HTTPS (HTTP is localhost-only).")
         if not parsed.netloc:
             raise ValueError("COMPOSER_CONTROL_URL is invalid.")
+        self._opener = urllib.request.build_opener(RejectRedirects)
 
     def _request(
         self,
@@ -45,7 +51,7 @@ class ControlPlaneClient:
             f"{self.base_url}{path}", data=data, headers=headers, method=method
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 if response.status == 204:
                     return None
                 raw = response.read(1024 * 1024)

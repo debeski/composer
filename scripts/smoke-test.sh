@@ -27,10 +27,13 @@ done
 echo "$help" | grep -q -- "run " || { echo "::error::--help is missing the 'run' subcommand"; exit 1; }
 echo "$help" | grep -q -- "restart " || { echo "::error::--help is missing the 'restart' subcommand"; exit 1; }
 echo "$help" | grep -q -- "watch " || { echo "::error::--help is missing the 'watch' subcommand"; exit 1; }
-run run --help >/dev/null || { echo "::error::'run --help' failed"; exit 1; }
-run restart --help >/dev/null || { echo "::error::'restart --help' failed"; exit 1; }
+for subcommand in run restart update stop check log watch agent enable-agent; do
+  run "$subcommand" --help >/dev/null || {
+    echo "::error::'$subcommand --help' failed"
+    exit 1
+  }
+done
 run -r --help >/dev/null || { echo "::error::'-r --help' restart alias failed"; exit 1; }
-run watch --help >/dev/null || { echo "::error::'watch --help' failed"; exit 1; }
 echo "    help: all expected flags present"
 
 # 3. Bundled tooling is present and runnable inside the image.

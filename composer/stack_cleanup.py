@@ -9,6 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
+from .proxy_cleanup import (
+    PROXY_ROUTE_FILES,
+    inspect_legacy_proxy_routes,
+    proxy_route_updates,
+)
+
 
 OBSOLETE_SERVICES = frozenset({"db-backup", "db_backup", "pgadmin"})
 
@@ -263,6 +269,175 @@ def _existing_docker_volumes(
     return {line.strip() for line in str(result.stdout or "").splitlines() if line.strip()}
 
 
+def _active_proxy_mounts(
+    model: Mapping[str, Any],
+    project_root: Path,
+    proxy_updates: Mapping[Path, str],
+) -> list[tuple[str, Path, str, str]]:
+    services = model.get("services")
+    if not isinstance(services, dict):
+        return []
+    kinds = {
+        (project_root / relative).resolve(): kind
+        for relative, kind in PROXY_ROUTE_FILES.items()
+    }
+    mounts = []
+    for service_name in ("caddy", "nginx"):
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            continue
+        volumes = service.get("volumes")
+        if not isinstance(volumes, list):
+            continue
+        for volume in volumes:
+            if not isinstance(volume, dict) or volume.get("type") != "bind":
+                continue
+            source = Path(str(volume.get("source") or "")).resolve()
+            target = str(volume.get("target") or "")
+            if source in proxy_updates and source in kinds and target:
+                mounts.append((service_name, source, target, kinds[source]))
+    return mounts
+
+
+def _validate_proxy_candidates(
+    command_runner,
+    project_root: Path,
+    compose_files: Sequence[Path],
+    environment: Mapping[str, str] | None,
+    mounts: Sequence[tuple[str, Path, str, str]],
+    staged: Mapping[Path, Path],
+) -> list[str]:
+    validated = []
+    for service, source, target, kind in mounts:
+        candidate = staged[source]
+        action = [
+            "run",
+            "--rm",
+            "--no-deps",
+            "-v",
+            f"{candidate}:{target}:ro",
+            service,
+        ]
+        if kind == "caddy":
+            action.extend(
+                ["caddy", "validate", "--config", target, "--adapter", "caddyfile"]
+            )
+        else:
+            action.extend(["nginx", "-t"])
+        result = _run(
+            command_runner,
+            _compose_args(project_root, compose_files, *action),
+            project_root,
+            environment,
+        )
+        if result.returncode != 0:
+            detail = str(result.stderr or result.stdout or "").strip()[:1000]
+            suffix = f": {detail}" if detail else ""
+            raise StackCleanupError(
+                f"{service} rejected the cleaned proxy configuration{suffix}"
+            )
+        validated.append(service)
+    return sorted(set(validated))
+
+
+def _running_services(
+    command_runner,
+    project_root: Path,
+    compose_files: Sequence[Path],
+    environment: Mapping[str, str] | None,
+) -> set[str]:
+    result = _run(
+        command_runner,
+        _compose_args(
+            project_root,
+            compose_files,
+            "ps",
+            "--services",
+            "--status",
+            "running",
+        ),
+        project_root,
+        environment,
+    )
+    if result.returncode != 0:
+        detail = str(result.stderr or "").strip()[:1000]
+        suffix = f": {detail}" if detail else ""
+        raise StackCleanupError(f"Could not inspect running proxy services{suffix}")
+    return {line.strip() for line in str(result.stdout or "").splitlines() if line.strip()}
+
+
+def _reload_proxies(
+    command_runner,
+    project_root: Path,
+    compose_files: Sequence[Path],
+    environment: Mapping[str, str] | None,
+    mounts: Sequence[tuple[str, Path, str, str]],
+    running: set[str],
+) -> tuple[list[str], list[str]]:
+    reloaded = []
+    restarted = []
+    for service, source, target, kind in mounts:
+        if service not in running:
+            continue
+        template_backed_nginx = kind == "nginx" and (
+            source.name.endswith(".template") or "/templates/" in target
+        )
+        if template_backed_nginx:
+            action = ["restart", service]
+        elif kind == "caddy":
+            action = [
+                "exec",
+                "-T",
+                service,
+                "caddy",
+                "reload",
+                "--config",
+                target,
+                "--adapter",
+                "caddyfile",
+            ]
+        else:
+            action = ["exec", "-T", service, "nginx", "-s", "reload"]
+        result = _run(
+            command_runner,
+            _compose_args(project_root, compose_files, *action),
+            project_root,
+            environment,
+        )
+        if result.returncode != 0:
+            detail = str(result.stderr or result.stdout or "").strip()[:1000]
+            suffix = f": {detail}" if detail else ""
+            verb = "restart" if template_backed_nginx else "reload"
+            raise StackCleanupError(f"Could not {verb} {service}{suffix}")
+        if template_backed_nginx:
+            verification = _run(
+                command_runner,
+                _compose_args(
+                    project_root,
+                    compose_files,
+                    "exec",
+                    "-T",
+                    service,
+                    "nginx",
+                    "-t",
+                ),
+                project_root,
+                environment,
+            )
+            if verification.returncode != 0:
+                detail = str(
+                    verification.stderr or verification.stdout or ""
+                ).strip()[:1000]
+                suffix = f": {detail}" if detail else ""
+                raise StackCleanupError(
+                    f"{service} failed its post-restart configuration check{suffix}"
+                )
+            restarted.append(service)
+        else:
+            reloaded.append(service)
+    return sorted(set(reloaded)), sorted(set(restarted))
+
+
 def remove_obsolete_services(
     project_dir: str,
     compose_files: Sequence[str],
@@ -273,24 +448,39 @@ def remove_obsolete_services(
     project_root = Path(project_dir).resolve()
     sources = [_project_file(project_root, value) for value in compose_files]
     originals: Dict[Path, str] = {}
-    updates: Dict[Path, str] = {}
+    compose_updates: Dict[Path, str] = {}
     removed: set[str] = set()
     for source in sources:
         contents = source.read_text(encoding="utf-8")
         originals[source] = contents
         updated, file_removed = remove_obsolete_service_blocks(contents)
         if file_removed:
-            updates[source] = updated
+            compose_updates[source] = updated
             removed.update(file_removed)
+    proxy_updates, unsupported_proxy_files = proxy_route_updates(project_root)
+    if unsupported_proxy_files:
+        raise StackCleanupError(
+            "Refusing to rewrite unrecognized pgAdmin proxy routes: "
+            + ", ".join(unsupported_proxy_files)
+        )
+    for path in proxy_updates:
+        originals[path] = path.read_text(encoding="utf-8")
+    updates = {**compose_updates, **proxy_updates}
 
     result: Dict[str, Any] = {
         "applied": False,
         "files": [str(path.relative_to(project_root)) for path in updates],
         "removed_services": sorted(removed),
+        "proxy_files": sorted(
+            str(path.relative_to(project_root)) for path in proxy_updates
+        ),
         "backup_root": "",
         "container_cleanup_applied": False,
         "postflight_verified": False,
         "preserved_volumes": [],
+        "proxy_candidates_validated": [],
+        "proxy_services_reloaded": [],
+        "proxy_services_restarted": [],
     }
     if not updates:
         return result
@@ -324,12 +514,20 @@ def remove_obsolete_services(
         )
     original_volumes = _declared_volumes(original_model)
     original_volume_declarations = set().union(
-        *(_top_level_mapping_keys(contents, "volumes") for contents in originals.values())
+        *(
+            _top_level_mapping_keys(originals[source], "volumes")
+            for source in sources
+        )
     )
     volumes_before = _existing_docker_volumes(
         command_runner,
         project_root,
         environment,
+    )
+    proxy_mounts = _active_proxy_mounts(
+        original_model,
+        project_root,
+        proxy_updates,
     )
 
     staged: Dict[Path, Path] = {}
@@ -343,6 +541,24 @@ def remove_obsolete_services(
             candidate_files,
             environment,
             "Cleaned candidate",
+        )
+        result["proxy_candidates_validated"] = _validate_proxy_candidates(
+            command_runner,
+            project_root,
+            candidate_files,
+            environment,
+            proxy_mounts,
+            staged,
+        )
+        running_services = (
+            _running_services(
+                command_runner,
+                project_root,
+                sources,
+                environment,
+            )
+            if proxy_mounts
+            else set()
         )
     except (OSError, StackCleanupError) as exc:
         archive = _archive_root(project_root)
@@ -358,7 +574,10 @@ def remove_obsolete_services(
     remaining = sorted(removed.intersection(candidate_service_names))
     candidate_volume_declarations = set().union(
         *(
-            _top_level_mapping_keys(updates.get(source, originals[source]), "volumes")
+            _top_level_mapping_keys(
+                compose_updates.get(source, originals[source]),
+                "volumes",
+            )
             for source in sources
         )
     )
@@ -389,31 +608,32 @@ def remove_obsolete_services(
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, backup)
 
-    try:
-        cleanup = _run(
-            command_runner,
-            _compose_args(
+    if removed:
+        try:
+            cleanup = _run(
+                command_runner,
+                _compose_args(
+                    project_root,
+                    sources,
+                    "rm",
+                    "-s",
+                    "-f",
+                    *sorted(removed),
+                ),
                 project_root,
-                sources,
-                "rm",
-                "-s",
-                "-f",
-                *sorted(removed),
-            ),
-            project_root,
-            environment,
-        )
-    except StackCleanupError:
-        _archive_staged(project_root, staged, archive, "unapplied")
-        raise
-    if cleanup.returncode != 0:
-        _archive_staged(project_root, staged, archive, "unapplied")
-        detail = str(cleanup.stderr or cleanup.stdout or "").strip()[:1000]
-        suffix = f": {detail}" if detail else ""
-        raise StackCleanupError(
-            f"Targeted obsolete-container removal failed; project files were not changed{suffix}"
-        )
-    result["container_cleanup_applied"] = True
+                environment,
+            )
+        except StackCleanupError:
+            _archive_staged(project_root, staged, archive, "unapplied")
+            raise
+        if cleanup.returncode != 0:
+            _archive_staged(project_root, staged, archive, "unapplied")
+            detail = str(cleanup.stderr or cleanup.stdout or "").strip()[:1000]
+            suffix = f": {detail}" if detail else ""
+            raise StackCleanupError(
+                f"Targeted obsolete-container removal failed; project files were not changed{suffix}"
+            )
+        result["container_cleanup_applied"] = True
 
     try:
         for source, candidate in staged.items():
@@ -452,13 +672,22 @@ def remove_obsolete_services(
             project_root,
             environment,
         )
+        proxy_inspection = inspect_legacy_proxy_routes(str(project_root))
     except (OSError, StackCleanupError) as exc:
         raise StackCleanupError(
             f"Post-fix verification failed; restore from {archive}: {exc}"
         ) from exc
     expected_existing = set(original_volumes.values()).intersection(volumes_before)
     missing_runtime_volumes = sorted(expected_existing - volumes_after)
-    if remaining or missing_volume_declarations or missing_runtime_volumes:
+    remaining_proxy_files = (
+        proxy_inspection["recognized"] + proxy_inspection["unsupported"]
+    )
+    if (
+        remaining
+        or missing_volume_declarations
+        or missing_runtime_volumes
+        or remaining_proxy_files
+    ):
         details = []
         if remaining:
             details.append("obsolete services remain: " + ", ".join(remaining))
@@ -471,12 +700,32 @@ def remove_obsolete_services(
             details.append(
                 "existing Docker volumes disappeared: " + ", ".join(missing_runtime_volumes)
             )
+        if remaining_proxy_files:
+            details.append(
+                "pgAdmin proxy routes remain: " + ", ".join(remaining_proxy_files)
+            )
         raise StackCleanupError(
             "Post-fix verification failed; restore from "
             + str(archive)
             + ": "
             + "; ".join(details)
         )
+
+    try:
+        reloaded, restarted = _reload_proxies(
+            command_runner,
+            project_root,
+            sources,
+            environment,
+            proxy_mounts,
+            running_services,
+        )
+        result["proxy_services_reloaded"] = reloaded
+        result["proxy_services_restarted"] = restarted
+    except StackCleanupError as exc:
+        raise StackCleanupError(
+            f"Post-fix proxy reload failed; restore from {archive}: {exc}"
+        ) from exc
 
     result["applied"] = True
     result["postflight_verified"] = True

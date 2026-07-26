@@ -34,7 +34,7 @@ The `Release` workflow then:
 
 - verifies `tag == VERSION`,
 - builds `linux/amd64` + `linux/arm64` with Buildx,
-- pushes `debeski/composer:X.Y.Z` and `debeski/composer:latest`,
+- pushes `debeski/composer:vX.Y.Z` and `debeski/composer:latest`,
 - publishes the GitHub Release using the matching `CHANGELOG.md` section.
 
 ## CI
