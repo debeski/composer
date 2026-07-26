@@ -183,6 +183,47 @@ class AgentStoreTests(unittest.TestCase):
             outbox = store.pending_outbox()
             self.assertEqual([item["sequence"] for item in outbox], [1, 2])
 
+    def test_pending_snapshots_coalesce_to_the_latest_value(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = AgentStore(temp_dir)
+            store.queue_outbox("snapshot", {"versions": {"dlux": "1.5.5"}})
+            store.queue_outbox("local_operation", {"state": "succeeded"})
+            store.queue_outbox("snapshot", {"versions": {"dlux": "1.5.9"}})
+
+            pending = store.pending_outbox()
+
+            snapshots = [item for item in pending if item["kind"] == "snapshot"]
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0]["body"]["versions"]["dlux"], "1.5.9")
+            self.assertEqual(
+                [item["kind"] for item in pending],
+                ["local_operation", "snapshot"],
+            )
+
+    def test_store_startup_collapses_a_legacy_snapshot_backlog(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = AgentStore(temp_dir)
+            with store.connection() as connection:
+                connection.executemany(
+                    "INSERT INTO outbox (kind, body, created_at) VALUES (?, ?, ?)",
+                    (
+                        ("snapshot", '{"versions":{"dlux":"1.5.5"}}', "old"),
+                        ("event", '{"state":"running"}', "event"),
+                        ("snapshot", '{"versions":{"dlux":"1.5.9"}}', "new"),
+                    ),
+                )
+
+            reopened = AgentStore(temp_dir)
+            pending = reopened.pending_outbox()
+
+            snapshots = [item for item in pending if item["kind"] == "snapshot"]
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0]["body"]["versions"]["dlux"], "1.5.9")
+            self.assertEqual(
+                [item["kind"] for item in pending],
+                ["event", "snapshot"],
+            )
+
 
 class ComposerAgentTests(unittest.TestCase):
     def test_revoked_agent_can_reenroll_with_a_fresh_token(self):

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.8
+- **Latest-Only Snapshot Relay**: Coalesces pending snapshots to the newest value and collapses existing snapshot backlogs on startup, preventing stale runtime versions from appearing after first enrollment.
+
 ## v1.2.7
 - **Pinned Agent Control Origin**: Persisted the normalized control URL after enrollment, rejected conflicting pairing requests and startup overrides while credentials remain active, and allowed replacement only after revocation/re-enrollment or local state reset.
 - **No Credentialed Redirects**: Control-plane and registry requests reject HTTP redirects; registry token challenges also require an HTTPS realm.

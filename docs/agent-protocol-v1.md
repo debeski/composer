@@ -34,7 +34,7 @@ Arbitrary shell, `run`, `down`, `purge`, build, database restart, backup restore
 
 ## DLUX bridge and failure semantics
 
-The shared runtime spool is `/opt/dlux-runtime/state/agent/{requests,results,processed}` plus `snapshot.json`. Files are written atomically, and DLUX archives each handled request under `processed/` so later commands cannot be starved by historical files. Documents contain typed operation/display metadata only. No agent credential, application secret, environment dump, or unrestricted log belongs in the spool or central database.
+The shared runtime spool is `/opt/dlux-runtime/state/agent/{requests,results,processed}` plus `snapshot.json`. Files are written atomically, and DLUX archives each handled request under `processed/` so later commands cannot be starved by historical files. Pending snapshots use latest-state semantics: a new snapshot replaces the older unsent snapshot, and startup collapses legacy snapshot backlogs. Commands and events retain ordered durable replay. Documents contain typed operation/display metadata only. No agent credential, application secret, environment dump, or unrestricted log belongs in the spool or central database.
 
 A central image update is successful only after DLUX has accepted the request, completed the selected backup, enabled maintenance, triggered Composer, survived recreation, finalized its durable `DluxImageUpdate`, and cleared maintenance. Backup failure or DLUX rejection produces no Composer deployment. Agent crash and control-plane outage rely on SQLite/outbox replay and do not turn connectivity loss into a deployment result.
 

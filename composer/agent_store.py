@@ -58,6 +58,10 @@ class AgentStore:
                 );
                 """
             )
+            connection.execute(
+                "DELETE FROM outbox WHERE kind='snapshot' "
+                "AND id < (SELECT MAX(id) FROM outbox WHERE kind='snapshot')"
+            )
         try:
             os.chmod(self.db_path, 0o600)
         except OSError:
@@ -231,6 +235,8 @@ class AgentStore:
 
     def queue_outbox(self, kind: str, body: Dict[str, Any], operation_id: str = ""):
         with self.connection() as connection:
+            if kind == "snapshot":
+                connection.execute("DELETE FROM outbox WHERE kind='snapshot'")
             connection.execute(
                 "INSERT INTO outbox (kind, operation_id, body, created_at) VALUES (?, ?, ?, ?)",
                 (kind, operation_id, json.dumps(body, sort_keys=True), utc_now()),

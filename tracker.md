@@ -2,11 +2,11 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; current source is unreleased v1.2.7 and latest tag is v1.2.6.
+- Composer is a Compose orchestrator plus outbound DLUX agent; current source is unreleased v1.2.8 and latest tag is v1.2.7.
 - Code lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and `start.sh`/`start.ps1`.
 - Early subcommands: `run`, `restart`, `update`, `stop`/`down`, `log`/`logs`, `check`, `watch`, `agent`, and `enable-agent`.
 - `COMPOSER_VERSION` is the last deployer version; `agent-status.json` reports the resident `composer_version` separately.
-- v1.2.7 hardens agent/registry auth and `check --fix`; template-backed Nginx is restarted so rendered proxy config is refreshed.
+- v1.2.8 keeps only the latest pending snapshot and migrates existing backlogs; v1.2.7 hardened agent/registry auth and `check --fix`.
 
 ### Current Project Adopted Standards:
 - Use argparse and existing mixin/helper boundaries; resolve active Compose files early.
@@ -28,12 +28,12 @@
 
 ### Current Project's Unsolved Known Bugs:
 - A compromised networked agent can abuse the POST-enabled Docker proxy with host-root-equivalent impact.
-- Shared-volume temp paths permit symlink clobbering; spool/output/queue sizes need effective bounds.
+- Shared-volume temp paths permit symlink clobbering; spool, output, event, and command queues need effective bounds.
 - Version gating fails open on missing labels; mutable refs and Windows `shell=True` reconstruction widen risk.
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish Composer v1.2.7, then run `./start.sh --update` and `composer check --fix` from each deployment root.
+  - [ ] Publish Composer v1.2.8, then run `./start.sh --update` from each deployment root.
   - [ ] Live verify `stop -v` TTY/non-TTY behavior and `log -F`.
   - [ ] Pilot enrollment -> backup -> maintenance -> deploy -> DLUX finalization -> central replay.
   - [ ] Verify cancellation, outage replay, revocation, safe restart, and backup through docker-socket-proxy.
@@ -43,17 +43,18 @@
   - [ ] Add shared `check` drift checks for raw Docker socket mounts and the `dlux_runtime` rw/ro split.
   - [ ] Run pending dependency/container CVE scanners and image smoke tests when tools/images are available.
 - **Completed Recently:**
+  - [x] v1.2.8: coalesce pending snapshots to the latest state and collapse existing snapshot backlogs during store initialization.
   - [x] v1.2.7: pin control origin, reject redirects, harden typed/redacted relay data, block mixed topologies, and safely reconcile legacy proxy routes.
   - [x] v1.2.6: targeted obsolete-service cleanup with candidate validation, original archive, and named-volume postflight.
   - [x] v1.2.5: guarded destructive actions plus `update`, `stop`, `log`, and `check` subcommands.
   - [x] v1.2.0: outbound typed agent, SQLite replay/deduplication, safe restart, DLUX relay, and guarded `enable-agent`.
 
 ### One-line info about last verified Tests:
-- Verified 2026-07-26: 131/131 unittests; release image build/runtime smoke; live Nginx-template cleanup/restart/rendered-config postflight; Docker Hub digest lookup from the image; workflow YAML/version/changelog gates.
+- Verified 2026-07-26: 133/133 unittests, including latest-only snapshot writes and legacy-backlog startup migration; prior v1.2.7 release/image/live postflight remains green.
 - Dependency/container CVE scanning remains pending because the scanners are unavailable locally.
 
 ### One-line info about last time edited Docs:
-- Edited README, release guide, protocol, CLI help, and changelog on 2026-07-26 for the final v1.2.7 release candidate.
+- Edited README, protocol, changelog, and tracker on 2026-07-26 for v1.2.8 latest-only snapshot relay.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:
