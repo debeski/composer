@@ -3,7 +3,7 @@
 ## Part 1: Project Related
 ### Current Verified Snapshot:
 - Composer is a Docker Compose orchestration tool for plaintext env secrets, health checks, post-start hooks, status files, and resident image updates.
-- Current source is unreleased v1.2.5; latest tag is v1.2.4.
+- Current source is unreleased v1.2.6; latest tag is v1.2.5.
 - Implementation lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and wrapper scripts `start.sh`/`start.ps1`.
 - Subcommands intercepted before flat parse: `run`, `restart`/`-r`, `update`, `stop`/`down`, `log`/`logs`, `check`, `watch`, `agent`, `enable-agent`.
 - Two versions are distinct: `COMPOSER_VERSION` env = deploying composer (last recreate); resident composer-agent binary version = `composer_version`/`agent_version` in `agent-status.json`. They can drift; not guaranteeable equal.
@@ -39,7 +39,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish Composer v1.2.5 (confirmation guard + `update`/`stop`/`log` subcommands), then re-run `./start.sh --update` on the VM.
+  - [ ] Publish Composer v1.2.6 (`check --fix` obsolete-service cleanup), then re-run `./start.sh --update` on the VM.
   - [ ] Live verify `stop -v` prompting through `start.sh` (TTY) and the non-TTY refusal, plus `log -F` streaming.
   - [ ] Pilot v1.2.0 end to end: enrollment -> DLUX backup -> maintenance -> Composer deploy -> DLUX finalization -> replayed central result.
   - [ ] Live verify cancellation, outage replay, revocation, safe restart, and data/full backup creation through docker-socket-proxy.
@@ -47,11 +47,11 @@
   - [ ] Verify `python -m composer` startup with `build:`, `COMPOSER_VERSION`, exit-1 diagnostics, and failing `post_start`.
 - **Priority 2:**
   - [ ] Classify `SAFE_RESTART_CANDIDATES`/`PROTECTED_RESTART_SERVICES` from the `org.dlux.restart` label (`safe`/`protected`) DLUX now emits on every scaffold service, instead of hardcoded name lists. (The `smtp-relay`+`dlux_updater`→`dlux_agent` merge was ABANDONED — they stay separate with distinct lifecycles; the label is the replacement. `safe` set == existing `COMPOSER_AGENT_RESTART_SERVICES`.)
-  - [ ] `check --deep` command name is finalized as `python manage.py dlux_doctor` (`dlux_check` is a deprecated alias); DLUX also ships `python manage.py dlux_stack_contract` (version-stamped) for the drift-diff. `db-backup` + `pgadmin` are dropped from the DLUX default stack and listed under the contract's `removed_services`, so `check` should flag them as safe-to-remove on existing deployments.
   - [ ] `check` security-invariant drift: verify the Docker-socket mount (only the socket-proxy may mount `/var/run/docker.sock:ro`) and the `dlux_runtime` rw/ro split against a deployment. The contract already exposes the data (`invariants.docker_socket.allowed_services`, `invariants.runtime_volume`); needs a shared `diff_security()` helper on the DLUX side (`dlux/stack_contract.py`) so both check identically. Topology / removed-service / frontend↔egress-bridging drift is already covered by `diff_attachments()` + `removed_services_present()`.
   - [ ] Rebuild/push pending Composer images as needed and confirm runtime smoke tests.
   - [ ] Decrees redeploy note: `stop` + `up -d` from project root; named volumes preserved.
 - **Completed Recently:**
+  - [x] v1.2.6: `check --fix` validates/archives, targets obsolete containers with `compose rm -sf`, applies service removal, rediscovers services, and verifies pre-existing named volumes survive.
   - [x] v1.2.5: `confirm()` guard on `-v`/`-p` with `-y`/`COMPOSER_ASSUME_YES` bypass; `update`, `stop` (alias `down`), and `log`/`logs` intercepted subcommands with multi-service scoping and default `--tail 50`.
   - [x] v1.2.5: `composer check` doctor (`CheckupMixin`) for docker/compose/secrets/env/topology/version-drift with `--fix` (enable-agent) and `--deep` in-container relay; `agent-status.json` gains distinct `composer_version` beside `agent_version`.
   - [x] v1.2.4: `enable-agent` dropped the `manage.py` source-tree gate (deploy dirs only hold `compose.yml`/`.proxy`/`.secrets`); the DjangoLux 1.5.0+ bridge check is advisory when no dependency manifest exists and blocking otherwise.
@@ -70,11 +70,11 @@
   - [x] v1.1.3-v1.1.4 `run` subcommand, `-u` scoped update/recreate, `-uo` legacy full startup update, `-r` restart branch.
 
 ### One-line info about last verified Tests:
-- Verified 2026-07-25: 98/98 unittest pass; `composer check` smoke-tested live against Docker 29.6.2 / Compose 5.3.1 in a scratch stack.
+- Verified 2026-07-26: 112/112 unittest pass; live `check --fix` removed two targeted containers, retained the named volume, and passed postflight on Docker 29.6.2 / Compose 5.3.1.
 - Security dependency/container CVE scanning remains pending because Bandit, Semgrep, pip-audit, Trivy, ShellCheck, and Hadolint are unavailable locally.
 
 ### One-line info about last time edited Docs:
-- Edited `README.md` and `CHANGELOG.md` on 2026-07-25 for the confirmation guard, `update`/`stop`/`log`/`check` subcommands, and the two-version distinction.
+- Edited `README.md` and `CHANGELOG.md` on 2026-07-26 for the v1.2.6 targeted cleanup and postflight lifecycle.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

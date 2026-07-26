@@ -25,6 +25,7 @@ PROTECTED_SERVICE_NAMES = (
     "redis",
     "backup",
     "db-backup",
+    "db_backup",
     "pgadmin",
 )
 

@@ -28,6 +28,7 @@ PROTECTED_RESTART_SERVICES = frozenset(
         "redis",
         "backup",
         "db-backup",
+        "db_backup",
         "pgadmin",
         "dlux-updater",
         "composer-agent",

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.6
+- **Obsolete DLUX Service Cleanup**: `composer check` now warns on `pgadmin`, `db-backup`, and `db_backup`; guarded `check --fix` validates the candidate, archives originals, runs targeted `docker compose rm -sf` only for those services, applies their service-block removal, and verifies the services are gone while pre-existing named volumes remain.
+
 ## v1.2.5
 - **Typed Confirmation Guard For Destructive Actions**: New `composer/confirmation.py` `confirm()` requires a literal `y`/`yes` before `-v`/`--volumes` and `-p`/`--purge` run, printing the exact consequences first. `-y`/`--yes` (or `COMPOSER_ASSUME_YES=1`) skips the prompt; a non-interactive stdin without either fails closed instead of destroying data.
 - **`stop` Subcommand**: `composer stop [-v] [-p] [-y] [-f FILE] [-d] [service...]` is dispatched before the flat parse like `run`/`restart`, via `configure_stop()`; `down_containers()` forwards named services so a single service can be stopped. The project-wide `-v`/`-p` flags are rejected alongside service names. `composer down` is an alias and `composer --down` still works.

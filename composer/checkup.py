@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from .config import ConfigMixin
 from .confirmation import confirm
 from .secrets_manager import SecretsMixin
+from .stack_cleanup import OBSOLETE_SERVICES
 
 OK = "ok"
 WARN = "warn"
@@ -169,6 +170,20 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             "No composer-agent or composer-updater service found; this stack is not composer-managed.",
         )
 
+    def _check_removed_services(self) -> Dict[str, Any]:
+        present = sorted(OBSOLETE_SERVICES.intersection(self.services))
+        if not present:
+            return _result(OK, "removed-services", "No obsolete DLUX services detected.")
+        return _result(
+            WARN,
+            "removed-services",
+            "Obsolete DLUX service(s) detected: " + ", ".join(present) + ".",
+            fix=(
+                "Run 'composer check --fix' to remove their Compose service definitions; "
+                "named volumes and stored data are preserved."
+            ),
+        )
+
     def _resident_agent_version(self) -> Optional[str]:
         if "composer-agent" not in set(self.services):
             return None
@@ -223,6 +238,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if self.services:
             results.append(self._check_required_vars())
             results.append(self._check_topology())
+            results.append(self._check_removed_services())
             results.append(self._check_versions())
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
@@ -236,29 +252,91 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         else:
             self._print_checkup(results, fixed)
 
-        return 1 if any(r["level"] == FAIL for r in results) else 0
+        return 1 if any(r["level"] == FAIL for r in results + fixed) else 0
 
     def _maybe_fix(self, args, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         fixes: List[Dict[str, Any]] = []
         legacy = "composer-updater" in set(self.services) and "composer-agent" not in set(self.services)
-        if not legacy:
+        obsolete = sorted(OBSOLETE_SERVICES.intersection(self.services))
+        if not legacy and not obsolete:
             return fixes
+        consequences = []
+        if obsolete:
+            consequences.append(
+                "Remove Compose service definitions: "
+                + ", ".join(obsolete)
+                + " (named volumes and stored data are kept)."
+            )
+            consequences.append(
+                "Stop and remove only those obsolete service containers."
+            )
+        if legacy:
+            consequences.extend(
+                [
+                    "Migrate composer-updater to composer-agent.",
+                    "Create or refresh docker-socket-proxy and composer-agent.",
+                ]
+            )
+        consequences.extend(
+            [
+                "Validate the candidate with docker compose config before replacement.",
+                "Preserve original deployment files under .xpose/.",
+            ]
+        )
         if not confirm(
-            "composer check --fix will migrate this stack from composer-updater to composer-agent",
-            ["compose.yml is rewritten in place (a backup is kept under .xpose/).", "docker-socket-proxy and composer-agent are (re)created."],
+            "composer check --fix will apply safe stack migrations",
+            consequences,
             assume_yes=getattr(args, "yes", False),
         ):
-            fixes.append(_result(WARN, "fix:enable-agent", "Migration declined."))
+            fixes.append(_result(WARN, "fix", "Changes declined."))
             return fixes
-        from .agent_installer import AgentInstallError, enable_agent
 
-        try:
-            outcome = enable_agent(".", compose_file=args.file or "", apply=True)
-            fixes.append(
-                _result(OK, "fix:enable-agent", "Migrated to composer-agent. Backup: " + (outcome.get("backup_root") or "n/a"))
-            )
-        except AgentInstallError as exc:
-            fixes.append(_result(FAIL, "fix:enable-agent", f"Migration failed: {exc}"))
+        if obsolete:
+            from .stack_cleanup import StackCleanupError, remove_obsolete_services
+
+            environment = self.build_compose_env()
+            for candidate in self.plaintext_env_candidates():
+                try:
+                    environment.update(self.parse_env_file(candidate))
+                    break
+                except (OSError, ValueError):
+                    continue
+            try:
+                outcome = remove_obsolete_services(
+                    ".",
+                    self.active_compose_files,
+                    environment=environment,
+                )
+                not_found = sorted(set(obsolete) - set(outcome["removed_services"]))
+                if not_found:
+                    raise StackCleanupError(
+                        "Could not locate removable service blocks for: "
+                        + ", ".join(not_found)
+                    )
+                fixes.append(
+                    _result(
+                        OK,
+                        "fix:removed-services",
+                        "Removed "
+                        + ", ".join(outcome["removed_services"])
+                        + " service definitions and containers; post-fix checks passed. Backup: "
+                        + (outcome.get("backup_root") or "n/a")
+                    )
+                )
+            except StackCleanupError as exc:
+                fixes.append(_result(FAIL, "fix:removed-services", f"Cleanup failed: {exc}"))
+                return fixes
+
+        if legacy:
+            from .agent_installer import AgentInstallError, enable_agent
+
+            try:
+                outcome = enable_agent(".", compose_file=args.file or "", apply=True)
+                fixes.append(
+                    _result(OK, "fix:enable-agent", "Migrated to composer-agent. Backup: " + (outcome.get("backup_root") or "n/a"))
+                )
+            except AgentInstallError as exc:
+                fixes.append(_result(FAIL, "fix:enable-agent", f"Migration failed: {exc}"))
         return fixes
 
     @staticmethod
