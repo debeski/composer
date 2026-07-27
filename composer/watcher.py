@@ -1,7 +1,7 @@
 """Resident, trigger-driven updater loop for `composer watch`.
 
 Composer stays a one-shot tool: this loop is a thin supervisor that watches a
-trigger file and, on each new request, shells the existing `composer -u`
+trigger file and, on each new request, shells the existing `composer update`
 pipeline (pull + version gate + recreate + health + post_start). Running the
 update in a child process keeps all one-shot behavior (including per-run state
 and exit codes) intact — no refactor of the launcher's run path.
@@ -176,17 +176,94 @@ def check_availability(images: List[str]) -> Tuple[bool, list]:
     return any_new, results
 
 
-def write_availability(path: str, images: List[str]):
+def availability_payload(images: List[str]) -> dict:
     any_new, results = check_availability(images)
-    payload = {"available": any_new, "checked_at": _now_iso(), "images": results}
+    return {"available": any_new, "checked_at": _now_iso(), "images": results}
+
+
+def _write_availability_payload(path: str, payload: dict):
     target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp")
+    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    os.replace(tmp, target)
+
+
+def write_availability(path: str, images: List[str]):
+    payload = availability_payload(images)
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{target.name}.tmp")
-        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-        os.replace(tmp, target)
+        _write_availability_payload(path, payload)
     except OSError:
         pass
+
+
+def _check_update_images(args) -> List[str]:
+    images = list(getattr(args, "image", None) or [])
+    if not images:
+        fallback = (
+            os.environ.get("COMPOSER_CHECK_IMAGE")
+            or os.environ.get("WEB_IMAGE")
+            or ""
+        )
+        if fallback.strip():
+            images = [fallback.strip()]
+    unique = []
+    for image in images:
+        image = str(image or "").strip()
+        if image and image not in unique:
+            unique.append(image)
+    return unique
+
+
+def run_agent_check(args) -> int:
+    images = _check_update_images(args)
+    if not images:
+        print(
+            "✖ agent-check: provide at least one IMAGE, or set "
+            "COMPOSER_CHECK_IMAGE or WEB_IMAGE.",
+            file=sys.stderr,
+        )
+        return 2
+    pinned = [image for image in images if "@" in image]
+    if pinned:
+        print(
+            "✖ agent-check requires mutable tag references, not digest-pinned "
+            f"references: {', '.join(pinned)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    payload = availability_payload(images)
+    output_path = getattr(args, "availability_file", None)
+    if output_path:
+        try:
+            _write_availability_payload(output_path, payload)
+        except OSError as exc:
+            print(
+                f"✖ agent-check could not write {output_path}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    else:
+        for entry in payload["images"]:
+            image = entry["image"]
+            remote = entry["remote_digest"]
+            local = entry["local_digest"]
+            if not remote:
+                print(f"? {image}: registry digest unavailable (local: {local or 'missing'})")
+            elif entry["update_available"]:
+                version = f" · version {entry['version']}" if entry.get("version") else ""
+                print(
+                    f"↑ {image}: update available"
+                    f" ({local or 'not pulled'} → {remote}){version}"
+                )
+            else:
+                print(f"✓ {image}: current ({remote})")
+
+    return 1 if any(not entry["remote_digest"] for entry in payload["images"]) else 0
 
 
 def _read_request_token(trigger: Path) -> Optional[str]:
@@ -303,7 +380,7 @@ class WatchRuntime:
         self.trigger = Path(args.trigger_file)
         self.ack = Path(f"{self.trigger}.ack")
         self.interval = max(2.0, float(args.interval))
-        self.child = [sys.executable, "-m", "composer", "-u"]
+        self.child = [sys.executable, "-m", "composer", "update"]
         if args.dev:
             self.child.append("-d")
         if args.file:
@@ -355,7 +432,7 @@ class WatchRuntime:
     def process(self, request: dict) -> int:
         token = str(request["token"])
         operation_id = str(request.get("operation_id") or "").strip()
-        print(f"⟳ update request {token} — running `composer -u`", flush=True)
+        print(f"⟳ update request {token} — running `composer update`", flush=True)
         if self.log_file:
             try:
                 Path(self.log_file).parent.mkdir(parents=True, exist_ok=True)

@@ -2,11 +2,11 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; current source is unreleased v1.2.8 and latest tag is v1.2.7.
+- Composer is a Compose orchestrator plus outbound DLUX agent; current source is unreleased v1.2.9 and latest tag is v1.2.8.
 - Code lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and `start.sh`/`start.ps1`.
-- Early subcommands: `run`, `restart`, `update`, `stop`/`down`, `log`/`logs`, `check`, `watch`, `agent`, and `enable-agent`.
+- Update surface: `update`, `pull`, `update-self`, `agent-check`, `agent-update`, `agent-restart`, and `agent-off`; `-u` remains compact.
 - `COMPOSER_VERSION` is the last deployer version; `agent-status.json` reports the resident `composer_version` separately.
-- v1.2.8 keeps only the latest pending snapshot and migrates existing backlogs; v1.2.7 hardened agent/registry auth and `check --fix`.
+- v1.2.9 normalizes update/agent commands and adds typed image availability checks; v1.2.8 coalesces pending snapshots.
 
 ### Current Project Adopted Standards:
 - Use argparse and existing mixin/helper boundaries; resolve active Compose files early.
@@ -18,7 +18,7 @@
 ### Adopted Standards' rules and policies:
 - Secrets are plaintext-only: `.env` -> `secrets/.env` -> `.secrets/.env`.
 - Destructive flags require typed confirmation unless `-y` or `COMPOSER_ASSUME_YES=1`; non-TTY fails closed.
-- `-u` pulls and deploys; `-uo` is pull-only; exclusions apply to unscoped restarts.
+- `update` deploys, `pull` only downloads, `update-self` updates Composer, and `-u` is the sole compact update argument.
 - Never modify a tagged changelog entry; append changes to the next unreleased version.
 - Preserve user changes and move generated caches under `.xpose/`.
 
@@ -33,7 +33,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish Composer v1.2.8, then run `./start.sh --update` from each deployment root.
+  - [ ] Publish Composer v1.2.9, then run `./start.sh update-self` from each deployment root.
   - [ ] Live verify `stop -v` TTY/non-TTY behavior and `log -F`.
   - [ ] Pilot enrollment -> backup -> maintenance -> deploy -> DLUX finalization -> central replay.
   - [ ] Verify cancellation, outage replay, revocation, safe restart, and backup through docker-socket-proxy.
@@ -43,6 +43,7 @@
   - [ ] Add shared `check` drift checks for raw Docker socket mounts and the `dlux_runtime` rw/ro split.
   - [ ] Run pending dependency/container CVE scanners and image smoke tests when tools/images are available.
 - **Completed Recently:**
+  - [x] v1.2.9: normalize update/pull/self/agent commands and add typed `agent-check` image availability.
   - [x] v1.2.8: coalesce pending snapshots to the latest state and collapse existing snapshot backlogs during store initialization.
   - [x] v1.2.7: pin control origin, reject redirects, harden typed/redacted relay data, block mixed topologies, and safely reconcile legacy proxy routes.
   - [x] v1.2.6: targeted obsolete-service cleanup with candidate validation, original archive, and named-volume postflight.
@@ -50,11 +51,11 @@
   - [x] v1.2.0: outbound typed agent, SQLite replay/deduplication, safe restart, DLUX relay, and guarded `enable-agent`.
 
 ### One-line info about last verified Tests:
-- Verified 2026-07-26: 133/133 unittests, including latest-only snapshot writes and legacy-backlog startup migration; prior v1.2.7 release/image/live postflight remains green.
+- Verified 2026-07-27: 150/150 tests; v1.2.9 image smoke, live agent lifecycle, Docker Hub `agent-check`, and retired `-uo` diagnostics passed.
 - Dependency/container CVE scanning remains pending because the scanners are unavailable locally.
 
 ### One-line info about last time edited Docs:
-- Edited README, protocol, changelog, and tracker on 2026-07-26 for v1.2.8 latest-only snapshot relay.
+- Edited README, changelog, and tracker on 2026-07-27 for the v1.2.9 command vocabulary.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

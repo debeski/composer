@@ -4,15 +4,21 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .cli import (
+    parse_agent_check_args,
     parse_agent_args,
+    parse_agent_off_args,
+    parse_agent_restart_args,
+    parse_agent_update_args,
     parse_args,
     parse_check_args,
     parse_enable_agent_args,
     parse_log_args,
+    parse_pull_args,
     parse_restart_args,
     parse_run_args,
     parse_stop_args,
     parse_update_args,
+    parse_update_self_args,
     parse_watch_args,
 )
 from .checkup import CheckupMixin
@@ -28,6 +34,10 @@ from .service_selection import parse_service_list
 from .status_writer import StatusWriterMixin
 from .version import read_composer_version
 from .version_gate import VersionGateMixin
+
+
+AGENT_SERVICE = "composer-agent"
+DEFAULT_SELF_IMAGE = "debeski/composer:latest"
 
 
 class DockerComposeLauncher(
@@ -96,6 +106,7 @@ class DockerComposeLauncher(
         }
 
         self.services: List[str] = []
+        self.monitored_services: List[str] = []
         self.service_state: Dict[str, str] = {}
 
     def cleanup(self):
@@ -172,15 +183,34 @@ class DockerComposeLauncher(
         )
         sys.exit(code)
 
+    def handle_update_self(self, argv):
+        parse_update_self_args(argv)
+        image = os.environ.get("COMPOSER_SELF_IMAGE") or DEFAULT_SELF_IMAGE
+        print(f"Current Composer version: {self.composer_version}")
+        print(f"Pulling {image}...")
+        code = self.run_command_interactive(["docker", "pull", image])
+        if code != 0:
+            sys.exit(code)
+        ok, out, err = self.run_command(
+            ["docker", "run", "--rm", "--entrypoint", "cat", image, "/app/VERSION"],
+            timeout=30,
+        )
+        if not ok:
+            print(
+                f"✖ Pulled {image}, but could not read its version: {err or out}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"Installed Composer version: {out.strip()}")
+
     def configure_update(self, argv):
         """Configure `composer update [opts] [service...]` for the update pipeline."""
         update_args = parse_update_args(argv)
         self.update_images = True
-        self.pull_only_mode = update_args.only
+        self.pull_only_mode = False
         if update_args.service:
             self.pull_service = list(update_args.service)
-            if not update_args.only:
-                self.up_service = list(update_args.service)
+            self.up_service = list(update_args.service)
         self.compose_file = update_args.file
         self.dev_mode = update_args.dev
         self.build_images = update_args.build
@@ -198,6 +228,61 @@ class DockerComposeLauncher(
         self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
         self.exclude_services = parse_service_list(
             os.environ.get("COMPOSER_EXCLUDE_SERVICES")
+        )
+
+    def configure_pull(self, argv):
+        pull_args = parse_pull_args(argv)
+        self.update_images = True
+        self.pull_only_mode = True
+        if pull_args.service:
+            self.pull_service = list(pull_args.service)
+        self.compose_file = pull_args.file
+        self.dev_mode = pull_args.dev
+        self.resolve_active_compose_files()
+        self.status_file = (
+            pull_args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
+        )
+        self.log_file = os.environ.get("COMPOSER_LOG_FILE") or None
+        self.exclude_services = parse_service_list(
+            os.environ.get("COMPOSER_EXCLUDE_SERVICES")
+        )
+
+    @staticmethod
+    def _agent_target_argv(args, *, status_file=False):
+        argv = []
+        if args.dev:
+            argv.append("-d")
+        if args.file:
+            argv.extend(["-f", args.file])
+        if status_file and args.status_file:
+            argv.extend(["--status-file", args.status_file])
+        argv.append(AGENT_SERVICE)
+        return argv
+
+    def configure_agent_update(self, argv):
+        args = parse_agent_update_args(argv)
+        self.configure_update(self._agent_target_argv(args, status_file=True))
+        self.no_migrate = True
+        self.active_version_file = None
+        self.active_version_key = None
+        self.monitored_services = [AGENT_SERVICE]
+        self.exclude_services = [
+            service for service in self.exclude_services if service != AGENT_SERVICE
+        ]
+
+    def configure_agent_restart(self, argv):
+        args = parse_agent_restart_args(argv)
+        self.configure_restart(self._agent_target_argv(args, status_file=True))
+        self.monitored_services = [AGENT_SERVICE]
+        self.exclude_services = [
+            service for service in self.exclude_services if service != AGENT_SERVICE
+        ]
+
+    def configure_agent_off(self, argv):
+        args = parse_agent_off_args(argv)
+        self.configure_stop(
+            self._agent_target_argv(args),
+            command="agent-off",
         )
 
     def configure_stop(self, argv, command="stop"):
@@ -264,6 +349,18 @@ class DockerComposeLauncher(
     def run(self):
         try:
             argv = sys.argv[1:]
+            if any(
+                token == "-uo" or token.startswith("--update-only")
+                for token in argv
+            ):
+                print(
+                    "✖ -uo/--update-only has been replaced by 'composer pull'.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if argv == ["--update"] or (argv and argv[0] == "update-self"):
+                self.handle_update_self([] if argv == ["--update"] else argv[1:])
+                return
             if argv and argv[0] == "run":
                 self.handle_run(argv[1:])
                 return
@@ -284,12 +381,24 @@ class DockerComposeLauncher(
                 return
             if argv and argv[0] == "check":
                 sys.exit(self.run_checkup(parse_check_args(argv[1:])))
-            if argv and argv[0] in {"restart", "-r", "--restart"}:
+            if argv and argv[0] == "agent-check":
+                from .watcher import run_agent_check
+
+                sys.exit(run_agent_check(parse_agent_check_args(argv[1:])))
+            if argv and argv[0] == "agent-update":
+                self.configure_agent_update(argv[1:])
+            elif argv and argv[0] == "agent-restart":
+                self.configure_agent_restart(argv[1:])
+            elif argv and argv[0] == "agent-off":
+                self.configure_agent_off(argv[1:])
+            elif argv and argv[0] in {"restart", "-r", "--restart"}:
                 self.configure_restart(argv[1:])
             elif argv and argv[0] in {"stop", "down"}:
                 self.configure_stop(argv[1:], command=argv[0])
             elif argv and argv[0] == "update":
                 self.configure_update(argv[1:])
+            elif argv and argv[0] == "pull":
+                self.configure_pull(argv[1:])
             else:
                 args = parse_args()
 
@@ -313,13 +422,6 @@ class DockerComposeLauncher(
                     if isinstance(args.update, str):
                         self.pull_service = args.update
                         self.up_service = args.update
-                elif args.update_only:
-                    # -uo: pull only. A service name scopes the pull; no compose up,
-                    # health checks, or post-start hooks run after the pull.
-                    self.update_images = True
-                    self.pull_only_mode = True
-                    if isinstance(args.update_only, str):
-                        self.pull_service = args.update_only
                 self.down_mode = args.down
                 self.stop_command = "--down"
                 self.down_volumes = args.volumes
@@ -347,7 +449,12 @@ class DockerComposeLauncher(
                 if not self.confirm_stop():
                     sys.exit(1)
                 scope = ", ".join(self.down_services) if self.down_services else "all services"
-                print(f"🛑 Stopping and removing containers ({scope})...")
+                action = (
+                    "Stopping containers"
+                    if self.down_services
+                    else "Stopping and removing containers"
+                )
+                print(f"🛑 {action} ({scope})...")
                 if self.down_volumes or self.purge:
                     print("   (Volumes will be removed)")
                 if self.purge:

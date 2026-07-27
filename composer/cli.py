@@ -15,10 +15,13 @@ def parse_args():
             "  restart [-f FILE] [-d] [--status-file PATH] [service]\n"
             "      Restart running containers (short alias: composer -r).\n"
             "      Run 'composer restart --help' for details.\n"
-            "  update [-o] [-b] [--force] [-f FILE] [-d] [service...]\n"
+            "  update [-b] [--force] [-f FILE] [-d] [service...]\n"
             "      Pull the latest image(s), then recreate, health-check, and run\n"
-            "      post-start tasks. -o/--only stops after the pull. Name services\n"
-            "      to scope it. Run 'composer update --help' for details.\n"
+            "      post-start tasks. Name services to scope it.\n"
+            "  pull [-f FILE] [-d] [service...]\n"
+            "      Pull images without recreating containers.\n"
+            "  update-self\n"
+            "      Pull the Composer deployer image (legacy alias: --update).\n"
             "  stop [-v] [-p] [-y] [-f FILE] [-d] [service...]\n"
             "      Stop and remove containers, or only the named services.\n"
             "      -v/--volumes and -p/--purge are destructive and ask for\n"
@@ -28,6 +31,12 @@ def parse_args():
             "      Doctor: verify Docker, compose config, secrets, required env,\n"
             "      topology, and version drift; --fix applies safe migrations,\n"
             "      --deep relays the in-container checks. Run 'composer check --help'.\n"
+            "  agent-check [--json] [--availability-file PATH] [IMAGE ...]\n"
+            "      Compare remote tag digests with locally pulled images without\n"
+            "      pulling or deploying. Defaults to COMPOSER_CHECK_IMAGE or\n"
+            "      WEB_IMAGE.\n"
+            "  agent-update | agent-restart | agent-off\n"
+            "      Update, restart, or stop this stack's composer-agent service.\n"
             "  log [-n N|all] [--follow] [-f FILE] [-d] [service...]\n"
             "      Read Compose logs for the whole stack or named services\n"
             "      (default: last 50 lines). Run 'composer log --help'.\n"
@@ -70,19 +79,11 @@ def parse_args():
     )
     parser.add_argument(
         "-u",
-        "--update",
+        dest="update",
         nargs="?",
         const=True,
         metavar="SERVICE",
         help="Pull latest image(s) then recreate immediately; pass a service name to update and recreate only that service",
-    )
-    parser.add_argument(
-        "-uo",
-        "--update-only",
-        nargs="?",
-        const=True,
-        metavar="SERVICE",
-        help="Pull latest image(s) only, then exit; pass a service name to pull only that service",
     )
     parser.add_argument(
         "-b",
@@ -150,12 +151,6 @@ def parse_update_args(argv):
         help="Target the dev compose files (adds compose.dev.yml override)",
     )
     parser.add_argument(
-        "-o",
-        "--only",
-        action="store_true",
-        help="Pull only, then exit: no version gate, recreate, health checks, or post-start tasks",
-    )
-    parser.add_argument(
         "-b",
         "--build",
         action="store_true",
@@ -192,6 +187,42 @@ def parse_update_args(argv):
         "service",
         nargs="*",
         help="Update only these Compose services (default: every service)",
+    )
+    return parser.parse_args(argv)
+
+
+def parse_pull_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="composer pull",
+        description=(
+            "Pull the latest image(s) without recreating containers, running "
+            "health checks, or executing post-start tasks."
+        ),
+    )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    parser.add_argument(
+        "--status-file",
+        metavar="PATH",
+        help="Write a JSON pull-status file to PATH (overrides COMPOSER_STATUS_FILE)",
+    )
+    parser.add_argument(
+        "service",
+        nargs="*",
+        help="Pull only these Compose services (default: every service)",
+    )
+    return parser.parse_args(argv)
+
+
+def parse_update_self_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="composer update-self",
+        description="Pull the latest Composer deployer image.",
     )
     return parser.parse_args(argv)
 
@@ -247,6 +278,81 @@ def parse_check_args(argv):
     )
     parser.add_argument("--json", action="store_true", help="Emit results as JSON")
     return parser.parse_args(argv)
+
+
+def parse_agent_check_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="composer agent-check",
+        description=(
+            "Check whether newer image tag digests are available without pulling "
+            "or changing the deployment. The JSON form uses the same availability "
+            "contract as composer-agent."
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the complete machine-readable availability document",
+    )
+    parser.add_argument(
+        "--availability-file",
+        metavar="PATH",
+        help="Also atomically write the availability document to PATH",
+    )
+    parser.add_argument(
+        "image",
+        nargs="*",
+        metavar="IMAGE",
+        help=(
+            "Tagged image reference to check; repeat for multiple images "
+            "(default: COMPOSER_CHECK_IMAGE or WEB_IMAGE)"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def _parse_agent_service_args(argv, prog, description, *, status_file=False):
+    parser = argparse.ArgumentParser(prog=prog, description=description)
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    if status_file:
+        parser.add_argument(
+            "--status-file",
+            metavar="PATH",
+            help="Write operation status JSON to PATH",
+        )
+    return parser.parse_args(argv)
+
+
+def parse_agent_update_args(argv):
+    return _parse_agent_service_args(
+        argv,
+        "composer agent-update",
+        "Pull and recreate only this stack's composer-agent service.",
+        status_file=True,
+    )
+
+
+def parse_agent_restart_args(argv):
+    return _parse_agent_service_args(
+        argv,
+        "composer agent-restart",
+        "Restart and health-check only this stack's composer-agent service.",
+        status_file=True,
+    )
+
+
+def parse_agent_off_args(argv):
+    return _parse_agent_service_args(
+        argv,
+        "composer agent-off",
+        "Stop this stack's composer-agent service without changing the application.",
+    )
 
 
 def parse_stop_args(argv, prog="composer stop"):
@@ -430,7 +536,7 @@ def parse_watch_args(argv):
         prog="composer watch",
         description=(
             "Resident updater. Watches a trigger file and, on each new request "
-            "(a changed token / mtime), runs a full update via 'composer -u' "
+            "(a changed token / mtime), runs a full update via 'composer update' "
             "(pull + version gate + recreate + health + post_start). Records the "
             "processed token in <trigger-file>.ack so a request survives restarts "
             "and is not re-run."

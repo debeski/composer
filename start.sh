@@ -2,21 +2,21 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+composer_self_image="${COMPOSER_SELF_IMAGE:-debeski/composer:latest}"
 
-# `--update` as the *only* argument self-updates the Composer tool image.
-# `--update <service>` (and -u/-uo/restart/-r) pass through to the app instead.
-if [[ $# -eq 1 && "${1:-}" == "--update" ]]; then
+# `update-self` replaces the legacy one-argument `--update` route.
+if [[ $# -eq 1 && ("${1:-}" == "update-self" || "${1:-}" == "--update") ]]; then
     # Show current version from image's VERSION file
     echo "=== Current Composer Version ==="
-    docker run --rm --entrypoint cat debeski/composer:latest /app/VERSION 2>/dev/null || echo "  (not present locally)"
+    docker run --rm --entrypoint cat "${composer_self_image}" /app/VERSION 2>/dev/null || echo "  (not present locally)"
     
     echo ""
     echo "Pulling latest composer image..."
-    docker pull debeski/composer:latest
+    docker pull "${composer_self_image}"
     
     echo ""
     echo "=== Installed Version ==="
-    docker run --rm --entrypoint cat debeski/composer:latest /app/VERSION
+    docker run --rm --entrypoint cat "${composer_self_image}" /app/VERSION
     
     exit 0
 fi
@@ -56,4 +56,4 @@ docker run "${docker_flags[@]}" \
   -v "${script_dir}:${script_dir}" \
   -w "${script_dir}" \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  debeski/composer:latest "$@"
+  "${composer_self_image}" "$@"

@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.9
+- **Clear Update Command Vocabulary**: Added `pull`, `update-self`, `agent-update`, `agent-restart`, and `agent-off`; retained `-u` plus legacy one-argument `--update`, and retired `-uo`, `update -o`, and the ambiguous long application `--update`.
+- **Agent Image Availability Check**: Added `agent-check` with tagged-image or `WEB_IMAGE` discovery, human/JSON output, atomic file publication, and explicit unknown-registry failure semantics using the agent digest/version/manifest contract.
+
 ## v1.2.8
 - **Latest-Only Snapshot Relay**: Coalesces pending snapshots to the newest value and collapses existing snapshot backlogs on startup, preventing stale runtime versions from appearing after first enrollment.
 

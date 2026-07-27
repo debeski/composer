@@ -380,7 +380,7 @@ class ComposerAgentTests(unittest.TestCase):
             with patch("composer.agent.subprocess.run", return_value=SimpleNamespace(returncode=0)) as run:
                 agent.execute_received_command()
             argv = run.call_args.args[0]
-            self.assertIn("-u", argv)
+            self.assertIn("update", argv)
             self.assertIn("--force", argv)
             self.assertEqual(agent.store.command_state(value["operation_id"]), "succeeded")
 

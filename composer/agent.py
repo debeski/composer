@@ -475,7 +475,7 @@ class ComposerAgent:
             else:
                 env["COMPOSER_RESTART_SERVICES"] = join_service_list(allowed)
         else:
-            argv.append("-u")
+            argv.append("update")
             if command["payload"].get("force"):
                 argv.append("--force")
         if self.args.dev:

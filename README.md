@@ -37,22 +37,30 @@ one migration cycle. New deployments use `composer agent`.
 
 `composer restart [-f FILE] [-d] [--status-file PATH] [service]` restarts running containers through `docker compose restart`, then waits for their health checks. Containers are preserved and post-start tasks are skipped. Pass a service to restart only that service. `composer -r ...` and `composer --restart ...` remain short leading aliases. See `composer restart --help`.
 
-`composer update [-o] [-b] [--force] [-nm] [-mm] [-a APP] [--status-file PATH] [-f FILE] [-d] [service...]` pulls the latest image(s), then recreates the affected containers, waits for health checks, and runs post-start tasks. Name services to scope both the pull and the recreate (Compose still starts their dependencies). `-o`/`--only` stops right after the pull — no version gate, recreate, health checks, or post-start tasks. The flat `composer -u [service]` / `-uo [service]` flags remain, and `./start.sh --update` on its own still means "update the Composer tool image", not the app. See `composer update --help`.
+`composer update [-b] [--force] [-nm] [-mm] [-a APP] [--status-file PATH] [-f FILE] [-d] [service...]` pulls the latest application image(s), recreates the affected containers, waits for health checks, and runs post-start tasks. Name services to scope both the pull and recreate; the Composer agent and watcher use this same subcommand internally. `-u [service]` remains the compact argument form. See `composer update --help`.
+
+`composer pull [--status-file PATH] [-f FILE] [-d] [service...]` only downloads images. It never recreates containers, runs health checks, or executes post-start tasks. This replaces the retired `-uo` and `update -o` forms.
+
+`composer update-self` pulls `debeski/composer:latest`, the Composer deployer used by `start.sh`. `./start.sh --update` remains a legacy forwarding alias for one migration cycle. Set `COMPOSER_SELF_IMAGE` only when using a compatible Composer image mirror.
 
 `composer check [--fix] [-y] [--deep] [--json] [-f FILE] [-d]` is the doctor for the *outside* of a DLUX stack. It verifies Docker + Compose v2, that the compose config resolves, that a secrets source is present/readable/non-empty, that every externally-required compose variable has a value, the topology mode (composer-agent vs legacy composer-updater vs unmanaged), obsolete DLUX services and proxy routes, and version drift between the deploying composer and the resident `composer-agent`. A mixed `composer-agent` + `composer-updater` topology fails closed. It warns when `pgadmin`, `db-backup`, or the legacy `db_backup` spelling is present, and independently detects recognized pgAdmin routes in `.proxy/Caddyfile`, `.proxy/default.conf.template`, and `.nginx/nginx.conf`. Guarded `--fix` validates the complete cleaned Compose candidate, archives every changed deployment/proxy file under `.xpose/composer-check/`, validates each changed proxy mounted by Caddy or Nginx, stops and removes only detected obsolete containers with targeted `docker compose rm -sf`, applies the service and route cleanup, rediscovers services, and verifies every pre-existing named Docker volume remains. A running Caddy or direct-config Nginx service is reloaded; template-backed Nginx is restarted and checked so its live rendered configuration is regenerated. This proxy-only path also repairs projects whose obsolete services were removed by v1.2.6. Unrecognized customized pgAdmin routes fail closed for manual review. The fix never uses a broad orphan-cleaning redeploy and never removes volumes; it also migrates legacy `composer-updater` → `composer-agent` through `enable-agent`. `--deep` relays the in-container app-level doctor — `python manage.py dlux_doctor` in the `web` service by default, overridable with `--deep-service`/`--deep-command` — and prints its output. `--json` emits structured results; exit is non-zero on a blocking problem or failed fix/postflight. This is the single evolving check that replaces per-change `enable-*` one-offs: composer owns the outside and hands the rest to the container(s). See `composer check --help`.
 
-`composer stop [-v] [-p] [-y] [-f FILE] [-d] [service...]` stops and removes this project's containers. Secrets, health checks, and post-start tasks are skipped. Pass service names to stop only those services instead of the whole stack. `-v`/`--volumes` and `-p`/`--purge` are destructive and project-wide, so they cannot be combined with service names and they require a typed confirmation (see below). `composer down ...` is an alias and `composer --down ...` remains a flat-flag equivalent. See `composer stop --help`.
+`composer agent-check [--json] [--availability-file PATH] [IMAGE ...]` performs the image-availability half of the inline DLUX update flow without pulling, recreating, or enabling maintenance. It compares each remote tag digest with the locally pulled digest and reuses the resident agent's JSON contract, including optional candidate `version` and release `manifest` metadata. Pass tagged image references explicitly, or omit them to use `COMPOSER_CHECK_IMAGE` and then `WEB_IMAGE`. `--json` is intended for DLUX; `--availability-file` atomically publishes the same document. Exit `0` means every registry lookup was definitive, even when an update is available; exit `1` means at least one lookup was unknown or the output file could not be written; exit `2` means invalid input. Digest-pinned references are rejected because they cannot represent a moving update channel. `COMPOSER_REGISTRY_TOKEN`, `COMPOSER_VERSION_LABEL`, and `COMPOSER_RELEASE_MANIFEST_LABEL` retain their existing meanings.
+
+The resident service has three host-side lifecycle commands: `composer agent-update` pulls and recreates only `composer-agent`, `composer agent-restart` restarts and health-checks only it, and `composer agent-off` stops it without touching the application or Compose project. The dedicated commands ignore the agent's normal self-exclusion only for that explicit target. `agent-update` does not run application version gates or post-start hooks.
+
+`composer stop [-v] [-p] [-y] [-f FILE] [-d] [service...]` stops and removes the whole Compose project when unscoped. Pass service names to use `docker compose stop` for only those containers. Secrets, health checks, and post-start tasks are skipped. `-v`/`--volumes` and `-p`/`--purge` are destructive and project-wide, so they cannot be combined with service names and require a typed confirmation (see below). `composer down ...` is an alias and `composer --down ...` remains a flat-flag equivalent. See `composer stop --help`.
 
 `composer log [-n N|all] [-F] [-t] [--since TIME] [-f FILE] [-d] [service...]` reads Compose logs for the whole stack (interleaved, one color per service) or for the services you name. Defaults to the last 50 lines per service; `-n all` (or `-n 0`) lifts the limit, `-F`/`--follow` streams, `-t`/`--timestamps` prefixes each line, and `--since`/`--until` bound the window. `composer logs` is an alias. See `composer log --help`.
 
-`composer watch --trigger-file PATH [--interval N]` runs composer as a resident, in-compose updater. It watches the trigger file and, on each new request (a changed `token`, or the file's `mtime`), runs a full update (`composer -u`: pull → version gate → recreate → health → post_start). The processed token and child exit code are recorded in `<trigger-file>.ack`, so a request is applied once and survives a restart. Add `--status-file PATH` to have each run publish [deploy status](#deploy-status); if the child exits before publishing its own terminal failure, the watcher guarantees a token-matched `failed` status so maintenance consumers are never left waiting on a dead process. See `composer watch --help`.
+`composer watch --trigger-file PATH [--interval N]` runs composer as a resident, in-compose updater. It watches the trigger file and, on each new request (a changed `token`, or the file's `mtime`), runs the full `composer update` pipeline (pull → version gate → recreate → health → post_start). The processed token and child exit code are recorded in `<trigger-file>.ack`, so a request is applied once and survives a restart. Add `--status-file PATH` to have each run publish [deploy status](#deploy-status); if the child exits before publishing its own terminal failure, the watcher guarantees a token-matched `failed` status so maintenance consumers are never left waiting on a dead process. See `composer watch --help`.
 
 `composer agent` is the durable successor to `watch`. It preserves the same local trigger/status/ack and registry-availability files, adds a typed DLUX spool, SQLite command/outbox replay, operation correlation, safe restart allowlisting, and optional outbound HTTPS long polling. Configure `COMPOSER_CONTROL_URL`, a 15-minute one-use `COMPOSER_ENROLLMENT_TOKEN`, and `COMPOSER_AGENT_STATE_DIR` (default `/var/lib/composer-agent`). Enrollment pins the normalized control URL in local state; changing panels requires revocation and re-enrollment or an explicit local state reset. Control requests reject redirects. Pending snapshots coalesce to the newest state, while commands and events retain durable replay. Local DLUX-triggered updates continue while the control plane is unavailable or the machine credential is revoked. See [Agent Protocol v1](docs/agent-protocol-v1.md).
 
 Migrate an existing generated DLUX project with Composer itself:
 
 ```bash
-./start.sh --update
+./start.sh update-self
 ./start.sh enable-agent
 ./start.sh enable-agent --apply
 ```
@@ -87,8 +95,7 @@ With `--status-file` (or `--log-file PATH`), each update run also writes a clean
 | flag | result |
 | :--- | :--- |
 | `-d`, `--dev` | Development mode. Loads `compose.dev.yml` on top of the base compose file (two files) and forces `DEBUG=True` / `DEBUG_STATUS=True` into every service. |
-| `-u`, `--update [service]` | Pull the latest image(s) then recreate immediately. Pass a service name to update and recreate only that service (Compose still starts its dependencies; dependents aren't auto-restarted unless their own image changed). Same as the `update` subcommand. |
-| `-uo`, `--update-only [service]` | Pull the latest image(s) only, then exit. Pass a service name to pull only that service. Does not run `up`, health checks, or post-start tasks. Same as `update -o`. |
+| `-u [service]` | Compact form of `update`: pull the latest image(s), then recreate immediately. Pass a service name to scope it. |
 | `-b`, `--build` | Rebuild images during startup. |
 | `--force` | Bypass the preflight version gate (allow updating onto an older image version). |
 | `--status-file PATH` | Write a JSON deploy-status file to `PATH` (overrides `COMPOSER_STATUS_FILE`). |
@@ -129,13 +136,13 @@ dashboard) can watch a deploy:
 ```
 
 States: `starting` → `pulling` → `recreating` → `migrating` → `ready`, or
-`failed` (with an `error`). Pull-only reports `starting` → `pulling` → `pulled`.
+`failed` (with an `error`). `pull` reports `starting` → `pulling` → `pulled`.
 The restart flow reports `restarting`/`ready`/`failed`.
 Nothing is written unless configured.
 
 ## version gate
 
-When deploying an update (`-u`), composer can refuse to recreate onto an image that
+When deploying through `update` or `-u`, composer can refuse to recreate onto an image that
 is **older** than the version already deployed — the one thing a pull-and-restart
 can't safely undo when forward-only migrations have already run. It is opt-in and
 generic: set `COMPOSER_ACTIVE_VERSION_FILE` (a JSON file, e.g. a runtime
@@ -148,9 +155,9 @@ gate is disabled. `--force` overrides a block.
 - **Secrets**: Plaintext env file (`.env` → `secrets/.env` → `.secrets/.env`); the first that satisfies the compose's required vars wins.
 - **Version**: Every service gets `COMPOSER_VERSION`.
 - **Runtime override**: The generated Compose override is a private system-temp file, not a project-root file, so Composer supports host-owned and read-only project mounts without extra Linux capabilities.
-- **Service exclusions**: `COMPOSER_EXCLUDE_SERVICES` is a comma/space-separated service list omitted from generated runtime overrides, bulk pulls, bulk `up -d`, health checks, and diagnostics. Explicit `-u SERVICE`/`-uo SERVICE` still targets the named service.
+- **Service exclusions**: `COMPOSER_EXCLUDE_SERVICES` is a comma/space-separated service list omitted from generated runtime overrides, bulk pulls, bulk `up -d`, health checks, and diagnostics. Explicit `update SERVICE`, `pull SERVICE`, and `-u SERVICE` still target the named service.
 - **UI**: Progress stays on one status line.
-- **Image**: Wrapper scripts target `debeski/composer:latest`.
+- **Image**: Wrapper scripts target `debeski/composer:latest`, overridable with `COMPOSER_SELF_IMAGE`.
 
 ## why
 Installing Python and a compose toolchain everywhere is friction. Composer keeps the toolchain inside the container and leaves the project root alone.

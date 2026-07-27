@@ -76,14 +76,14 @@ class StopCommandTests(unittest.TestCase):
                     launcher.configure_stop([flag, "web"])
                 self.assertEqual(caught.exception.code, 2)
 
-    def test_named_services_are_passed_to_compose_down(self):
+    def test_named_services_use_compose_stop(self):
         launcher = DockerComposeLauncher()
         launcher.configure_stop(["web", "celery"])
 
         with patch.object(launcher, "run_docker_compose", return_value=(True, "", "")) as run:
             launcher.down_containers()
 
-        self.assertEqual(run.call_args.args[0], ["down", "web", "celery"])
+        self.assertEqual(run.call_args.args[0], ["stop", "web", "celery"])
 
     def test_purge_confirmation_is_required_and_bypassable(self):
         launcher = DockerComposeLauncher()

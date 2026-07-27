@@ -36,7 +36,9 @@ class WatcherTerminalStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def fail_with_operation(*_args, **kwargs):
+            def fail_with_operation(*child_args, **kwargs):
+                self.assertIn("update", child_args[0])
+                self.assertNotIn("-u", child_args[0])
                 self.assertEqual(kwargs["env"]["COMPOSER_OPERATION_ID"], operation_id)
                 return SimpleNamespace(returncode=1)
 

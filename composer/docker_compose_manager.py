@@ -285,6 +285,9 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             return False
         discovered = [s for s in out.splitlines() if s]
         excluded = set(getattr(self, "exclude_services", []) or [])
+        monitored = set(getattr(self, "monitored_services", []) or [])
+        if monitored:
+            discovered = [service for service in discovered if service in monitored]
         self.services = [s for s in discovered if s not in excluded]
         if excluded and discovered and not self.services:
             self.last_runtime_diagnostic = (
@@ -389,6 +392,10 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         )
 
     def down_containers(self) -> Tuple[bool, str]:
+        services = list(getattr(self, "down_services", []) or [])
+        if services:
+            ok, _, err = self.run_docker_compose(["stop", *services])
+            return ok, err
         down_args = ["down"]
         # --purge implies volume removal even when -v is omitted.
         if self.down_volumes or self.purge:
@@ -397,7 +404,6 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             # Remove locally built (untagged) images and any orphaned containers
             # for this compose. Networks are already removed by `down` itself.
             down_args.extend(["--rmi", "local", "--remove-orphans"])
-        down_args.extend(getattr(self, "down_services", []) or [])
         ok, _, err = self.run_docker_compose(down_args)
         return ok, err
 

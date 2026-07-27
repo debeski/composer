@@ -21,13 +21,13 @@ echo "    version: image='$actual' file='$expected'"
 
 # 2. --help exposes the key CLI flags.
 help="$(run --help)"
-for flag in --down --purge --volumes --update --update-only --build --force --status-file; do
+for flag in --down --purge --volumes --build --force --status-file; do
   echo "$help" | grep -q -- "$flag" || { echo "::error::--help is missing '$flag'"; exit 1; }
 done
 echo "$help" | grep -q -- "run " || { echo "::error::--help is missing the 'run' subcommand"; exit 1; }
 echo "$help" | grep -q -- "restart " || { echo "::error::--help is missing the 'restart' subcommand"; exit 1; }
 echo "$help" | grep -q -- "watch " || { echo "::error::--help is missing the 'watch' subcommand"; exit 1; }
-for subcommand in run restart update stop check log watch agent enable-agent; do
+for subcommand in run restart update pull update-self stop check agent-check agent-update agent-restart agent-off log watch agent enable-agent; do
   run "$subcommand" --help >/dev/null || {
     echo "::error::'$subcommand --help' failed"
     exit 1
@@ -88,5 +88,29 @@ assert ok, error
 assert launcher.secrets_source == "inherited launcher environment"
 '
 echo "    secrets: inherited resident environment accepted without project-file access"
+
+# 6. Dedicated lifecycle commands must target only composer-agent.
+agent_compose="$PWD/tests/fixtures/agent-lifecycle-compose.yml"
+agent_lifecycle() {
+  docker run --rm \
+    -e COMPOSER_INHERITED_SECRET_KEYS=SMOKE_VALUE \
+    -e SMOKE_VALUE=smoke \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "$PWD/tests/fixtures:/workspace:ro" \
+    -w /workspace \
+    "$IMAGE" "$@" -f agent-lifecycle-compose.yml
+}
+cleanup_agent_lifecycle() {
+  docker compose -f "$agent_compose" down >/dev/null 2>&1 || true
+}
+trap cleanup_agent_lifecycle EXIT
+agent_lifecycle agent-update
+agent_lifecycle agent-restart
+agent_lifecycle agent-off
+running="$(docker compose -f "$agent_compose" ps --status running --services)"
+[ -z "$running" ] || { echo "::error::agent-off left services running: $running"; exit 1; }
+cleanup_agent_lifecycle
+trap - EXIT
+echo "    agent lifecycle: update, restart, and off target composer-agent only"
 
 echo "==> All runtime smoke tests passed"

@@ -52,6 +52,42 @@ class WrapperSecretsTests(unittest.TestCase):
             )
             self.assertNotIn("top-secret", "\n".join(args))
 
+    def test_update_self_and_legacy_alias_pull_before_starting_composer(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        for command in ("update-self", "--update"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                project = root / "project"
+                fake_bin = root / "bin"
+                project.mkdir()
+                fake_bin.mkdir()
+                shutil.copy2(repo_root / "start.sh", project / "start.sh")
+                calls_path = root / "docker-calls.txt"
+                fake_docker = fake_bin / "docker"
+                fake_docker.write_text(
+                    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALLS_FILE"\n',
+                    encoding="utf-8",
+                )
+                fake_docker.chmod(0o755)
+
+                env = os.environ.copy()
+                env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+                env["DOCKER_CALLS_FILE"] = str(calls_path)
+                env["COMPOSER_SELF_IMAGE"] = "registry.example/composer:test"
+                result = subprocess.run(
+                    ["bash", str(project / "start.sh"), command],
+                    cwd=project,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = calls_path.read_text(encoding="utf-8").splitlines()
+                self.assertIn("pull registry.example/composer:test", calls)
+                self.assertNotIn(command, "\n".join(calls))
+
 
 if __name__ == "__main__":
     unittest.main()
