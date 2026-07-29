@@ -146,6 +146,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
     def _check_topology(self) -> Dict[str, Any]:
         services = set(self.services)
         has_agent = "composer-agent" in services
+        has_executor = "composer-executor" in services
         has_legacy = "composer-updater" in services
         has_proxy = "docker-socket-proxy" in services
         if has_agent and has_legacy:
@@ -158,16 +159,45 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     "which generated block owns the deployment."
                 ),
             )
+        if has_executor and not has_agent:
+            return _result(
+                WARN,
+                "topology",
+                "composer-executor is present without composer-agent; the resident pair is incomplete.",
+                fix="Both roles are required. Recreate the composer-agent + composer-executor pair.",
+            )
         if has_agent:
-            note = "Managed by composer-agent."
+            if has_executor:
+                # Hardened: Docker authority is isolated in the executor; the
+                # network-facing agent has none. The proxy, if present, is the
+                # agent's read-only path (health/availability).
+                note = "Hardened topology: composer-executor holds Docker authority; composer-agent has none."
+                if has_proxy:
+                    note += " docker-socket-proxy provides the agent's read-only Docker access."
+                else:
+                    note += " No docker-socket-proxy (agent performs no Docker reads)."
+                return _result(OK, "topology", note)
+            # Legacy-agent: valid and supported (backwards compatible, so this
+            # never FAILs), but the network-facing agent still drives Docker
+            # directly. A WARN surfaces the fix hint and nudges toward hardening.
             if not has_proxy:
                 return _result(
                     WARN,
                     "topology",
-                    note + " docker-socket-proxy is missing, so the agent cannot drive Docker.",
+                    "Managed by composer-agent. docker-socket-proxy is missing, so the agent cannot drive Docker.",
                     fix="Re-run 'composer check --fix' or 'composer enable-agent --apply'.",
                 )
-            return _result(OK, "topology", note)
+            return _result(
+                WARN,
+                "topology",
+                "Managed by composer-agent (the agent drives Docker directly through docker-socket-proxy).",
+                fix=(
+                    "Harden with 'composer check --fix' (runs enable-executor) or "
+                    "'composer enable-executor --apply': moves Docker authority off the network-facing "
+                    "agent into composer-executor and demotes docker-socket-proxy to read-only. "
+                    "See docs/executor-hardening.md."
+                ),
+            )
         if has_legacy:
             return _result(
                 WARN,
@@ -294,6 +324,9 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
     def _maybe_fix(self, args, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         fixes: List[Dict[str, Any]] = []
         legacy = "composer-updater" in set(self.services) and "composer-agent" not in set(self.services)
+        needs_hardening = (
+            "composer-agent" in set(self.services) and "composer-executor" not in set(self.services)
+        )
         obsolete = sorted(OBSOLETE_SERVICES.intersection(self.services))
         proxy_inspection = inspect_legacy_proxy_routes(".")
         if proxy_inspection["unsupported"]:
@@ -307,7 +340,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
             return fixes
         proxy_routes = proxy_inspection["recognized"]
-        if not legacy and not obsolete and not proxy_routes:
+        if not legacy and not obsolete and not proxy_routes and not needs_hardening:
             return fixes
         consequences = []
         if obsolete:
@@ -334,6 +367,15 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 [
                     "Migrate composer-updater to composer-agent.",
                     "Create or refresh docker-socket-proxy and composer-agent.",
+                ]
+            )
+        if needs_hardening:
+            consequences.extend(
+                [
+                    "Harden composer-agent into the executor topology: add composer-executor "
+                    "(sole Docker-write authority), demote docker-socket-proxy to read-only, and "
+                    "keep the agent read-only.",
+                    "Recreate docker-socket-proxy, composer-executor, and composer-agent.",
                 ]
             )
         consequences.extend(
@@ -415,6 +457,21 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:enable-agent", f"Migration failed: {exc}"))
+        if needs_hardening:
+            from .agent_installer import AgentInstallError, enable_executor
+
+            try:
+                outcome = enable_executor(".", compose_file=args.file or "", apply=True)
+                fixes.append(
+                    _result(
+                        OK,
+                        "fix:enable-executor",
+                        "Hardened composer-agent into the executor topology. Backup: "
+                        + (outcome.get("backup_root") or "n/a"),
+                    )
+                )
+            except AgentInstallError as exc:
+                fixes.append(_result(FAIL, "fix:enable-executor", f"Hardening failed: {exc}"))
         return fixes
 
     @staticmethod

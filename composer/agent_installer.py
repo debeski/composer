@@ -15,6 +15,10 @@ COMPOSER_UPDATER_START = "  # Composer-as-updater start"
 COMPOSER_UPDATER_END = "  # Composer-as-updater end"
 COMPOSER_AGENT_START = "  # DjangoLux Composer agent start"
 COMPOSER_AGENT_END = "  # DjangoLux Composer agent end"
+# Hardened-topology socket wiring (dedicated shared volume, not a dlux_runtime subpath).
+COMPOSER_EXEC_SOCKET_DIR = "/run/composer-exec"
+COMPOSER_EXEC_SOCKET_PATH = "/run/composer-exec/composer-exec.sock"
+COMPOSER_EXEC_SOCKET_VOLUME = "composer_exec_sock"
 MINIMUM_DLUX_VERSION = (1, 5, 0)
 SAFE_RESTART_CANDIDATES = ("web", "celery", "smtp-relay", "caddy", "nginx")
 PROTECTED_SERVICE_NAMES = (
@@ -86,6 +90,22 @@ def _legacy_topology(block: str, project_slug: str) -> Dict[str, Any]:
         "version_label": _environment_value(updater, "COMPOSER_VERSION_LABEL")
         or f"org.{project_slug}.dlux_baked_version",
         "web_image": _environment_value(updater, "WEB_IMAGE")
+        or f"${{WEB_IMAGE:-{project_slug.lower()}:latest}}",
+    }
+
+
+def _current_agent_topology(block: str, project_slug: str) -> Dict[str, Any]:
+    """Carry the current agent block's networks, version label, and image into
+    the hardened topology, so the migration never invents undeclared references."""
+    bodies = _block_bodies(block)
+    agent = bodies.get("composer-agent", "")
+    proxy = bodies.get("docker-socket-proxy", "")
+    return {
+        "proxy_networks": _service_networks(proxy),
+        "agent_networks": _service_networks(agent),
+        "version_label": _environment_value(agent, "COMPOSER_VERSION_LABEL")
+        or f"org.{project_slug}.dlux_baked_version",
+        "web_image": _environment_value(agent, "WEB_IMAGE")
         or f"${{WEB_IMAGE:-{project_slug.lower()}:latest}}",
     }
 
@@ -177,6 +197,130 @@ def _agent_stack(project_slug: str, services: set[str], topology: Dict[str, Any]
 {COMPOSER_AGENT_END}'''
 
 
+def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, Any]) -> str:
+    """The hardened topology block: a read-only docker-socket-proxy, a
+    composer-executor holding the real docker.sock (the sole write authority), and
+    a composer-agent that keeps only read-only proxy access and delegates writes
+    to the executor over the shared unix socket.
+    """
+    restart_services = [name for name in SAFE_RESTART_CANDIDATES if name in services]
+    excluded_services = ["composer-agent", "composer-executor", "docker-socket-proxy"]
+    excluded_services.extend(name for name in PROTECTED_SERVICE_NAMES if name in services)
+    restart_value = ",".join(restart_services)
+    exclusion_value = ",".join(excluded_services)
+    image = topology["web_image"]
+    version_label = topology["version_label"]
+    proxy_networks = _networks_block(topology["proxy_networks"])
+    agent_networks = _networks_block(topology["agent_networks"])
+    return f'''{COMPOSER_AGENT_START}
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      EVENTS: 1
+      INFO: 1
+      PING: 1
+      VERSION: 1
+      NETWORKS: 0
+      VOLUMES: 0
+      POST: 0
+      EXEC: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro{proxy_networks}
+
+  composer-executor:
+    image: debeski/composer:latest
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: "${{PWD}}"
+    command:
+      - executor
+      - --socket
+      - {COMPOSER_EXEC_SOCKET_PATH}
+      - --trigger-file
+      - /opt/dlux-runtime/state/image-update-request.json
+      - --status-file
+      - /opt/dlux-runtime/state/deploy-status.json
+      - --interval
+      - "2"
+    environment:
+      WEB_IMAGE: "{image}"
+      COMPOSER_EXECUTOR_SOCKET: "{COMPOSER_EXEC_SOCKET_PATH}"
+      COMPOSER_VERSION_LABEL: "{version_label}"
+      COMPOSER_RELEASE_MANIFEST_LABEL: "org.dlux.project.release-manifest"
+      COMPOSER_ACTIVE_VERSION_FILE: "/opt/dlux-runtime/state/active.json"
+      COMPOSER_ACTIVE_VERSION_KEY: "version"
+      COMPOSER_STATUS_FILE: "/opt/dlux-runtime/state/deploy-status.json"
+      COMPOSER_WATCH_SELF_SERVICE: "composer-executor"
+      COMPOSER_EXCLUDE_SERVICES: "{exclusion_value}"
+      COMPOSER_AGENT_RESTART_SERVICES: "{restart_value}"
+    volumes:
+      - "${{PWD}}:${{PWD}}:ro"
+      - dlux_runtime:/opt/dlux-runtime:rw
+      - {COMPOSER_EXEC_SOCKET_VOLUME}:{COMPOSER_EXEC_SOCKET_DIR}:rw
+      - /var/run/docker.sock:/var/run/docker.sock:rw{proxy_networks}
+
+  composer-agent:
+    image: debeski/composer:latest
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: "${{PWD}}"
+    command:
+      - agent
+      - --trigger-file
+      - /opt/dlux-runtime/state/image-update-request.json
+      - --status-file
+      - /opt/dlux-runtime/state/deploy-status.json
+      - --bridge-dir
+      - /opt/dlux-runtime/state/agent
+      - --interval
+      - "2"
+      - --check-image
+      - {image}
+      - --availability-file
+      - /opt/dlux-runtime/state/image-available.json
+      - --check-interval
+      - "3600"
+    environment:
+      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
+      WEB_IMAGE: "{image}"
+      COMPOSER_CONTROL_URL: "${{COMPOSER_CONTROL_URL:-}}"
+      COMPOSER_ENROLLMENT_TOKEN: "${{COMPOSER_ENROLLMENT_TOKEN:-}}"
+      COMPOSER_AGENT_STATE_DIR: "/var/lib/composer-agent"
+      COMPOSER_EXECUTOR_SOCKET: "{COMPOSER_EXEC_SOCKET_PATH}"
+      COMPOSER_VERSION_LABEL: "{version_label}"
+      COMPOSER_RELEASE_MANIFEST_LABEL: "org.dlux.project.release-manifest"
+      COMPOSER_ACTIVE_VERSION_FILE: "/opt/dlux-runtime/state/active.json"
+      COMPOSER_ACTIVE_VERSION_KEY: "version"
+      COMPOSER_STATUS_FILE: "/opt/dlux-runtime/state/deploy-status.json"
+      COMPOSER_WATCH_SELF_SERVICE: "composer-agent"
+      COMPOSER_EXCLUDE_SERVICES: "{exclusion_value}"
+      COMPOSER_AGENT_RESTART_SERVICES: "{restart_value}"
+    volumes:
+      - "${{PWD}}:${{PWD}}:ro"
+      - dlux_runtime:/opt/dlux-runtime:rw
+      - composer_agent_state:/var/lib/composer-agent:rw
+      - {COMPOSER_EXEC_SOCKET_VOLUME}:{COMPOSER_EXEC_SOCKET_DIR}:rw
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
+      composer-executor:
+        condition: service_started{agent_networks}
+{COMPOSER_AGENT_END}'''
+
+
 def _transform_compose(contents: str, project_slug: str) -> str:
     if COMPOSER_AGENT_START in contents:
         if (
@@ -217,6 +361,51 @@ def _transform_compose(contents: str, project_slug: str) -> str:
         "  # Isolated path from composer-agent to the docker-socket-proxy only.",
         1,
     )
+
+
+def _transform_to_hardened(contents: str, project_slug: str) -> str:
+    """Rewrite a current composer-agent block into the hardened topology:
+    read-only proxy + composer-executor (sole write authority) + agent that
+    delegates writes. Idempotent, and refuses anything it does not recognize."""
+    if COMPOSER_AGENT_START not in contents:
+        raise AgentInstallError(
+            "No recognized composer-agent block to harden. Run 'composer enable-agent' first."
+        )
+    if (
+        contents.count(COMPOSER_AGENT_START) != 1
+        or contents.count(COMPOSER_AGENT_END) != 1
+        or contents.count("  composer-agent:\n") != 1
+    ):
+        raise AgentInstallError("The existing Composer agent block is incomplete.")
+    services = _service_names(contents)
+    # Idempotent: already hardened.
+    if "composer-executor" in services:
+        if "  composer-executor:\n" not in contents:
+            raise AgentInstallError("An unmarked composer-executor service already exists.")
+        return contents
+    if "composer-agent" not in services or "docker-socket-proxy" not in services:
+        raise AgentInstallError("The marked agent block is not a recognized topology.")
+    if COMPOSER_UPDATER_START in contents or "  composer-updater:\n" in contents:
+        raise AgentInstallError("The project contains both agent and legacy updater services.")
+    start = contents.index(COMPOSER_AGENT_START)
+    end = contents.index(COMPOSER_AGENT_END, start) + len(COMPOSER_AGENT_END)
+    block = contents[start:end]
+    topology = _current_agent_topology(block, project_slug)
+    declared = _declared_networks(contents)
+    referenced = set(topology["proxy_networks"]) | set(topology["agent_networks"])
+    missing = sorted(referenced - declared)
+    if declared and missing:
+        raise AgentInstallError(
+            "The agent block references undeclared networks: " + ", ".join(missing)
+        )
+    updated = contents[:start] + _hardened_stack(project_slug, services, topology) + contents[end:]
+    volume_anchor = re.compile(r"(?m)^  composer_agent_state:\s*$")
+    if len(volume_anchor.findall(updated)) != 1:
+        raise AgentInstallError("Expected one generated composer_agent_state volume anchor.")
+    updated = volume_anchor.sub(
+        f"  composer_agent_state:\n  {COMPOSER_EXEC_SOCKET_VOLUME}:", updated, count=1
+    )
+    return updated
 
 
 def _dlux_readiness_warning(project_root: Path) -> tuple[str, bool]:
@@ -270,15 +459,20 @@ def _atomic_write(path: Path, contents: str):
     os.replace(temporary, path)
 
 
-def enable_agent(
-    project_dir: str = ".",
+def _apply_stack_migration(
+    project_dir: str,
     *,
-    compose_file: str = "",
-    apply: bool = False,
-    allow_unverified_dlux: bool = False,
-    include_diff: bool = False,
-    command_runner=subprocess.run,
+    compose_file: str,
+    transform,
+    redeploy_command: str,
+    apply: bool,
+    allow_unverified_dlux: bool,
+    include_diff: bool,
+    command_runner,
 ) -> Dict[str, Any]:
+    """Shared dry-run-first stack migration: transform the Compose file, and on
+    --apply validate with `docker compose config`, back up to .xpose/, and
+    atomically write. Used by both enable-agent and enable-executor."""
     project_root = Path(project_dir).resolve()
     selected_file = compose_file or (
         "compose.yml" if (project_root / "compose.yml").is_file() else "docker-compose.yml"
@@ -290,17 +484,13 @@ def enable_agent(
     name_match = re.search(r"(?m)^name:\s*([A-Za-z0-9_-]+)\s*$", contents)
     if not name_match:
         raise AgentInstallError("Could not determine the generated Compose project name.")
-    updated = _transform_compose(contents, name_match.group(1))
+    updated = transform(contents, name_match.group(1))
     changed = [str(compose_path.relative_to(project_root))] if updated != contents else []
     warning, blocking = _dlux_readiness_warning(project_root) if changed else ("", False)
     result: Dict[str, Any] = {
         "applied": False,
         "files": changed,
-        "command": (
-            "docker compose up -d --force-recreate docker-socket-proxy composer-agent"
-            if changed
-            else ""
-        ),
+        "command": redeploy_command if changed else "",
         "backup_root": "",
         "warnings": [warning] if warning else [],
     }
@@ -327,7 +517,7 @@ def enable_agent(
         text=True,
     )
     if probe.returncode != 0:
-        raise AgentInstallError("Docker Compose v2 is required to apply the agent bootstrap.")
+        raise AgentInstallError("Docker Compose v2 is required to apply the stack migration.")
     validation = command_runner(
         ["docker", "compose", "--project-directory", str(project_root), "-f", "-", "config"],
         cwd=str(project_root),
@@ -349,6 +539,51 @@ def enable_agent(
         result["backup_root"] = str(backup_root)
     result["applied"] = True
     return result
+
+
+def enable_agent(
+    project_dir: str = ".",
+    *,
+    compose_file: str = "",
+    apply: bool = False,
+    allow_unverified_dlux: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    return _apply_stack_migration(
+        project_dir,
+        compose_file=compose_file,
+        transform=_transform_compose,
+        redeploy_command="docker compose up -d --force-recreate docker-socket-proxy composer-agent",
+        apply=apply,
+        allow_unverified_dlux=allow_unverified_dlux,
+        include_diff=include_diff,
+        command_runner=command_runner,
+    )
+
+
+def enable_executor(
+    project_dir: str = ".",
+    *,
+    compose_file: str = "",
+    apply: bool = False,
+    allow_unverified_dlux: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    return _apply_stack_migration(
+        project_dir,
+        compose_file=compose_file,
+        transform=_transform_to_hardened,
+        redeploy_command=(
+            "docker compose up -d --force-recreate "
+            "docker-socket-proxy composer-executor composer-agent"
+        ),
+        apply=apply,
+        allow_unverified_dlux=allow_unverified_dlux,
+        include_diff=include_diff,
+        command_runner=command_runner,
+    )
 
 
 def run_enable_agent(args) -> int:
@@ -382,4 +617,38 @@ def run_enable_agent(args) -> int:
         print(f"Redeploy once: {result['command']}")
     else:
         print("Agent topology is already enabled.")
+    return 0
+
+
+def run_enable_executor(args) -> int:
+    try:
+        result = enable_executor(
+            args.project_dir,
+            compose_file=args.file or "",
+            apply=args.apply,
+            allow_unverified_dlux=args.allow_unverified_dlux,
+            include_diff=not args.json and not args.apply,
+        )
+    except AgentInstallError as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)}, sort_keys=True))
+        else:
+            print(f"✖ enable-executor: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    mode = "Applied" if result["applied"] else "Dry run"
+    files = ", ".join(result["files"]) if result["files"] else "no changes"
+    print(f"{mode}: {files}")
+    for warning in result["warnings"]:
+        print(f"⚠ {warning}")
+    if result.get("diff"):
+        print(result["diff"], end="" if result["diff"].endswith("\n") else "\n")
+    if result["backup_root"]:
+        print(f"Preserved originals: {result['backup_root']}")
+    if result["command"]:
+        print(f"Redeploy once: {result['command']}")
+    else:
+        print("Hardened executor topology is already enabled.")
     return 0

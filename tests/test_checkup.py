@@ -96,9 +96,36 @@ class CheckupCheckTests(unittest.TestCase):
         result = self.launcher._check_topology()
         self.assertEqual(result["level"], WARN)
 
-    def test_topology_healthy_agent_is_ok(self):
+    def test_topology_agent_without_executor_warns_to_harden(self):
+        # A functional but un-hardened agent stack: WARN (non-blocking, never
+        # FAILs), surfacing the hint and committing to check --fix / enable-executor.
         self.launcher.services = ["web", "composer-agent", "docker-socket-proxy"]
-        self.assertEqual(self.launcher._check_topology()["level"], OK)
+        result = self.launcher._check_topology()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("composer-executor", result["fix"])
+        self.assertIn("check --fix", result["fix"])
+        self.assertIn("enable-executor", result["fix"])
+        self.assertIn("executor-hardening", result["fix"])
+
+    def test_topology_hardened_pair_is_ok_and_labeled(self):
+        self.launcher.services = ["web", "composer-agent", "composer-executor", "docker-socket-proxy"]
+        result = self.launcher._check_topology()
+        self.assertEqual(result["level"], OK)
+        self.assertIn("Hardened", result["message"])
+        self.assertIn("composer-executor holds Docker authority", result["message"])
+        self.assertNotIn("fix", result.get("fix", ""))  # nothing to nudge
+
+    def test_topology_hardened_without_proxy_is_ok(self):
+        self.launcher.services = ["web", "composer-agent", "composer-executor"]
+        result = self.launcher._check_topology()
+        self.assertEqual(result["level"], OK)
+        self.assertIn("Hardened", result["message"])
+
+    def test_topology_executor_without_agent_is_incomplete(self):
+        self.launcher.services = ["web", "composer-executor", "docker-socket-proxy"]
+        result = self.launcher._check_topology()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("incomplete", result["message"])
 
     def test_mixed_agent_and_legacy_topology_is_blocking(self):
         self.launcher.services = [
@@ -193,6 +220,35 @@ class CheckupRunTests(unittest.TestCase):
         ):
             launcher.run_checkup(_args(fix=True))
         enable.assert_called_once()
+
+    def test_fix_hardens_agent_topology_through_enable_executor(self):
+        launcher = DockerComposeLauncher()
+        launcher.composer_version = "1.2.5"
+        with (
+            patch.object(launcher, "run_command", return_value=(True, "27.0\n", "")),
+            patch.object(
+                launcher,
+                "discover_services",
+                side_effect=lambda silent=False: setattr(
+                    launcher, "services", ["web", "composer-agent", "docker-socket-proxy"]
+                )
+                or True,
+            ),
+            patch.object(launcher, "plaintext_env_candidates", return_value=[]),
+            patch.object(launcher, "required_compose_vars", return_value=set()),
+            patch.object(launcher, "run_docker_compose", return_value=(False, "", "")),
+            patch("composer.checkup.os.path.exists", return_value=True),
+            patch("composer.checkup.confirm", return_value=True),
+            patch(
+                "composer.agent_installer.enable_executor",
+                return_value={"backup_root": "/x/.xpose/h"},
+            ) as harden,
+            patch("composer.agent_installer.enable_agent") as legacy,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            launcher.run_checkup(_args(fix=True))
+        harden.assert_called_once()  # check --fix runs enable-executor
+        legacy.assert_not_called()  # not the legacy path (agent already present)
 
     def test_fix_removes_obsolete_services(self):
         launcher = DockerComposeLauncher()

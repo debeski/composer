@@ -8,19 +8,20 @@ from composer.launcher import DockerComposeLauncher
 
 
 class AgentLifecycleCommandTests(unittest.TestCase):
-    def test_agent_update_targets_only_the_agent_and_skips_app_hooks(self):
+    def test_agent_update_targets_only_the_agent_when_no_executor(self):
         launcher = DockerComposeLauncher()
-        with patch.dict(
-            os.environ,
-            {
-                "COMPOSER_EXCLUDE_SERVICES": "composer-agent,db",
-                "COMPOSER_ACTIVE_VERSION_FILE": "/state/active.json",
-            },
-            clear=True,
-        ):
-            launcher.configure_agent_update(
-                ["-d", "-f", "compose.alt.yml", "--status-file", "agent.json"]
-            )
+        with patch.object(launcher, "_resident_pair_scope", return_value=["composer-agent"]):
+            with patch.dict(
+                os.environ,
+                {
+                    "COMPOSER_EXCLUDE_SERVICES": "composer-agent,db",
+                    "COMPOSER_ACTIVE_VERSION_FILE": "/state/active.json",
+                },
+                clear=True,
+            ):
+                launcher.configure_agent_update(
+                    ["-d", "-f", "compose.alt.yml", "--status-file", "agent.json"]
+                )
 
         self.assertEqual(launcher.pull_service, ["composer-agent"])
         self.assertEqual(launcher.up_service, ["composer-agent"])
@@ -30,30 +31,78 @@ class AgentLifecycleCommandTests(unittest.TestCase):
         self.assertEqual(launcher.exclude_services, ["db"])
         self.assertEqual(launcher.status_file, "agent.json")
 
-    def test_agent_restart_targets_only_the_agent(self):
+    def test_agent_update_targets_the_pair_when_executor_present(self):
         launcher = DockerComposeLauncher()
-        with patch.dict(
-            os.environ,
-            {"COMPOSER_EXCLUDE_SERVICES": "composer-agent"},
-            clear=True,
-        ):
-            launcher.configure_agent_restart(["-f", "compose.alt.yml"])
+        pair = ["composer-agent", "composer-executor"]
+        with patch.object(launcher, "_resident_pair_scope", return_value=pair):
+            with patch.dict(os.environ, {}, clear=True):
+                launcher.configure_agent_update(["--status-file", "agent.json"])
+        # Both resident roles are pulled + recreated from the one shared image so
+        # they can never drift to different versions.
+        self.assertEqual(launcher.pull_service, pair)
+        self.assertEqual(launcher.up_service, pair)
+        self.assertEqual(launcher.monitored_services, pair)
 
-        self.assertEqual(launcher.restart_service, "composer-agent")
+    def test_agent_restart_targets_only_the_agent_when_no_executor(self):
+        launcher = DockerComposeLauncher()
+        with patch.object(launcher, "_resident_pair_scope", return_value=["composer-agent"]):
+            with patch.dict(os.environ, {"COMPOSER_EXCLUDE_SERVICES": "composer-agent"}, clear=True):
+                launcher.configure_agent_restart(["-f", "compose.alt.yml"])
+
+        self.assertIsNone(launcher.restart_service)  # uses the list form
+        self.assertEqual(launcher.restart_services, ["composer-agent"])
         self.assertEqual(launcher.exclude_services, [])
 
-    def test_agent_off_uses_compose_stop_not_project_down(self):
+    def test_agent_restart_targets_the_pair_when_executor_present(self):
         launcher = DockerComposeLauncher()
-        launcher.configure_agent_off([])
+        pair = ["composer-agent", "composer-executor"]
+        with patch.object(launcher, "_resident_pair_scope", return_value=pair):
+            with patch.dict(os.environ, {}, clear=True):
+                launcher.configure_agent_restart([])
+        self.assertEqual(launcher.restart_services, pair)
 
-        with patch.object(
-            launcher,
-            "run_docker_compose",
-            return_value=(True, "", ""),
-        ) as run:
+    def test_agent_off_stops_the_agent_when_no_executor(self):
+        launcher = DockerComposeLauncher()
+        with patch.object(launcher, "_resident_pair_scope", return_value=["composer-agent"]):
+            launcher.configure_agent_off([])
+
+        with patch.object(launcher, "run_docker_compose", return_value=(True, "", "")) as run:
             launcher.down_containers()
-
         self.assertEqual(run.call_args.args[0], ["stop", "composer-agent"])
+
+    def test_agent_off_stops_the_pair_when_executor_present(self):
+        launcher = DockerComposeLauncher()
+        pair = ["composer-agent", "composer-executor"]
+        with patch.object(launcher, "_resident_pair_scope", return_value=pair):
+            launcher.configure_agent_off([])
+
+        with patch.object(launcher, "run_docker_compose", return_value=(True, "", "")) as run:
+            launcher.down_containers()
+        self.assertEqual(run.call_args.args[0], ["stop", "composer-agent", "composer-executor"])
+
+    def test_resident_pair_scope_detects_executor_from_compose_services(self):
+        launcher = DockerComposeLauncher()
+        launcher.active_compose_files = ["compose.yml"]
+        with patch.object(
+            launcher, "run_docker_compose",
+            return_value=(True, "web\ncomposer-agent\ncomposer-executor\ndb\n", ""),
+        ):
+            self.assertEqual(launcher._resident_pair_scope(), ["composer-agent", "composer-executor"])
+
+    def test_resident_pair_scope_is_agent_only_for_legacy_stack(self):
+        launcher = DockerComposeLauncher()
+        launcher.active_compose_files = ["compose.yml"]
+        with patch.object(
+            launcher, "run_docker_compose",
+            return_value=(True, "web\ncomposer-agent\ndocker-socket-proxy\n", ""),
+        ):
+            self.assertEqual(launcher._resident_pair_scope(), ["composer-agent"])
+
+    def test_resident_pair_scope_falls_back_to_agent_on_discovery_failure(self):
+        launcher = DockerComposeLauncher()
+        launcher.active_compose_files = ["compose.yml"]
+        with patch.object(launcher, "run_docker_compose", return_value=(False, "", "boom")):
+            self.assertEqual(launcher._resident_pair_scope(), ["composer-agent"])
 
     def test_agent_lifecycle_commands_dispatch_before_flat_arguments(self):
         methods = {

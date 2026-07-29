@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.0
+- **Docker Authority Isolated In composer-executor**: New `executor` role holds the real `docker.sock` and performs every Docker write — the trigger-watched image-update loop plus typed `restart`/`recovery_deploy` over a private unix socket (`protocol_version` handshake, one-op lease, `SO_PEERCRED` auth, 0660 bind). The network-facing `composer-agent` loses all write authority: it keeps only read-only access (`DOCKER_HOST` → a `POST=0`/`EXEC=0` `docker-socket-proxy`), delegates writes via `executor_client`, and observes image-update completion through the existing `<trigger>.ack`. `PROTECTED_RESTART_SERVICES` moved to `service_selection`.
+- **enable-executor Migration + check --fix**: New `composer enable-executor` (dry-run default; shares `_apply_stack_migration` with `enable-agent`) rewrites a marked composer-agent block into the hardened topology (adds `composer-executor`, demotes the proxy, adds the `composer_exec_sock` volume) with `.xpose/` backup, `docker compose config` validation, and atomic write; idempotent. `composer check --fix` runs it automatically on un-hardened agent stacks, and `composer check` WARNs (non-blocking) with a hardening hint. `agent-update`/`agent-restart`/`agent-off` now act on the resident pair (composer-agent + composer-executor) so they can never version-drift.
+
 ## v1.2.9
 - **Clear Update Command Vocabulary**: Added `pull`, `update-self`, `agent-update`, `agent-restart`, and `agent-off`; retained `-u` plus legacy one-argument `--update`, and retired `-uo`, `update -o`, and the ambiguous long application `--update`.
 - **Agent Image Availability Check**: Added `agent-check` with tagged-image or `WEB_IMAGE` discovery, human/JSON output, atomic file publication, and explicit unknown-registry failure semantics using the agent digest/version/manifest contract.

@@ -670,3 +670,54 @@ def parse_enable_agent_args(argv):
     )
     parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
+
+
+def parse_enable_executor_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="composer enable-executor",
+        description=(
+            "Harden a generated composer-agent stack: move Docker write authority "
+            "into a composer-executor, demote docker-socket-proxy to read-only, and "
+            "keep the agent read-only. The default is a read-only dry run."
+        ),
+    )
+    parser.add_argument("--apply", action="store_true", help="Apply after Compose validation")
+    parser.add_argument(
+        "--project-dir",
+        default=".",
+        help="Generated DLUX project directory (default: current directory)",
+    )
+    parser.add_argument("-f", "--file", help="Compose file relative to the project directory")
+    parser.add_argument(
+        "--allow-unverified-dlux",
+        action="store_true",
+        help="Allow apply when a DjangoLux 1.5+ dependency cannot be verified",
+    )
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    return parser.parse_args(argv)
+
+
+def parse_executor_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="composer executor",
+        description=(
+            "Run the privileged composer-executor: the sole holder of Docker "
+            "authority. Serves a private Unix socket for the agent's typed "
+            "restart/recovery operations. Not for interactive use."
+        ),
+    )
+    parser.add_argument(
+        "--socket",
+        metavar="PATH",
+        help="Unix socket path (default: COMPOSER_EXECUTOR_SOCKET or the runtime default)",
+    )
+    parser.add_argument(
+        "--trigger-file",
+        metavar="PATH",
+        help="Image-update trigger file to watch and perform (enables the watch loop)",
+    )
+    parser.add_argument("--status-file", metavar="PATH", help="Deploy status JSON path")
+    parser.add_argument("--interval", type=float, default=2.0, help="Watch poll interval seconds")
+    parser.add_argument("-f", "--file", help="Alternate compose file")
+    parser.add_argument("-d", "--dev", action="store_true", help="Target the dev compose files")
+    return parser.parse_args(argv)

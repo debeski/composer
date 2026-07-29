@@ -14,28 +14,13 @@ from typing import Any, Dict, Optional
 from .agent_protocol import ProtocolError, redact_text, utc_now, validate_command
 from .agent_store import AgentStore
 from .control_client import ControlPlaneClient, ControlPlaneError
-from .service_selection import join_service_list, parse_service_list
+from .service_selection import (
+    PROTECTED_RESTART_SERVICES,
+    join_service_list,
+    parse_service_list,
+)
 from .version import read_composer_version
 from .watcher import WatchRuntime
-
-
-PROTECTED_RESTART_SERVICES = frozenset(
-    {
-        "db",
-        "database",
-        "postgres",
-        "postgresql",
-        "redis",
-        "backup",
-        "db-backup",
-        "db_backup",
-        "pgadmin",
-        "dlux-updater",
-        "composer-agent",
-        "composer-updater",
-        "docker-socket-proxy",
-    }
-)
 
 
 class ComposerAgent:
@@ -451,6 +436,26 @@ class ComposerAgent:
     def _run_child(self, command: Dict[str, Any]) -> tuple[int, str]:
         operation_id = command["operation_id"]
         action = command["action"]
+        # Executor mode: the agent holds no Docker authority. Restart/recovery are
+        # synchronous, so delegate over the private socket and report the
+        # executor's exit code exactly as the legacy path would. The executor
+        # re-validates (the security boundary). No executor configured => legacy.
+        from . import executor_client
+        if executor_client.executor_configured():
+            if action == "composer.restart":
+                return executor_client.run_operation(
+                    "restart",
+                    {"service": str(command["payload"].get("service") or "")},
+                    operation_id,
+                )
+            return executor_client.run_operation(
+                "recovery_deploy",
+                {
+                    "force": bool(command["payload"].get("force")),
+                    "reason": str(command["payload"].get("reason") or "recovery"),
+                },
+                operation_id,
+            )
         env = self._child_env(operation_id)
         argv = [sys.executable, "-m", "composer"]
         if action == "composer.restart":
@@ -575,14 +580,10 @@ class ComposerAgent:
         self.store.set_meta("capabilities_digest", digest)
         self.store.queue_outbox("capabilities", capabilities)
 
-    def process_local_update(self):
-        request = self.watch.pending_request()
-        if not request:
-            return
-        operation_id = str(request.get("operation_id") or "").strip()
-        if operation_id and self.store.command_state(operation_id):
-            self.store.transition(operation_id, "running", {"phase": "composer_deploy"})
-        exit_code = self.watch.process(request)
+    def _report_local_update(self, token: str, operation_id: str, exit_code: int):
+        """Report a completed image update to the control plane. Same reporting
+        the legacy inline path did, factored so the executor-mode observer reuses
+        it."""
         if operation_id and self.store.command_state(operation_id):
             self.store.transition(
                 operation_id,
@@ -590,7 +591,6 @@ class ComposerAgent:
                 {"phase": "awaiting_dlux_finalization", "composer_exit_code": exit_code},
             )
             return
-        token = str(request.get("token") or "")
         local_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"composer-local:{token}"))
         self.store.queue_outbox(
             "local_operation",
@@ -606,6 +606,48 @@ class ComposerAgent:
             },
             local_id,
         )
+
+    def _observe_executor_update(self):
+        """Executor mode: the executor performs the update; the agent only reads
+        the completion ack (no Docker) and reports it, de-duped by token so a
+        restart never re-reports. Seeds the marker on first sight so a
+        pre-existing ack is treated as already handled."""
+        ack = self.watch.read_ack()
+        token = str(ack.get("token") or "").strip()
+        if not token:
+            return
+        last = self.store.get_meta("last_reported_ack_token")
+        if not last:
+            # First sight: treat any pre-existing ack as already handled so a
+            # fresh agent does not re-report a completion from before it started.
+            self.store.set_meta("last_reported_ack_token", token)
+            return
+        if token == last:
+            return
+        operation_id = str(ack.get("operation_id") or "").strip()
+        try:
+            exit_code = int(ack.get("exit_code", 0) or 0)
+        except (TypeError, ValueError):
+            exit_code = 1
+        self._report_local_update(token, operation_id, exit_code)
+        self.store.set_meta("last_reported_ack_token", token)
+
+    def process_local_update(self):
+        # Executor mode: the executor owns the trigger-watched update; the agent
+        # holds no Docker authority and only observes the result.
+        from . import executor_client
+        if executor_client.executor_configured():
+            self._observe_executor_update()
+            return
+        request = self.watch.pending_request()
+        if not request:
+            return
+        operation_id = str(request.get("operation_id") or "").strip()
+        if operation_id and self.store.command_state(operation_id):
+            self.store.transition(operation_id, "running", {"phase": "composer_deploy"})
+        exit_code = self.watch.process(request)
+        token = str(request.get("token") or "")
+        self._report_local_update(token, operation_id, exit_code)
 
     def run_once(self):
         self.watch.maybe_check_availability()

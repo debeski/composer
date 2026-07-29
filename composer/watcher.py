@@ -429,6 +429,18 @@ class WatchRuntime:
         value["token"] = token
         return value
 
+    def read_ack(self) -> dict:
+        """Return the last completion ack ({token, exit_code, operation_id}) or {}.
+
+        Reads only — the agent uses this to observe an update the executor
+        performed, so it can report completion without holding Docker authority.
+        """
+        try:
+            value = json.loads(self.ack.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
     def process(self, request: dict) -> int:
         token = str(request["token"])
         operation_id = str(request.get("operation_id") or "").strip()

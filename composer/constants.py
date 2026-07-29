@@ -45,5 +45,7 @@ PROGRESS_KEYWORDS = (
 VERSION_FILE_NAME = "VERSION"
 DEFAULT_COMPOSER_VERSION = "0.0.0"
 DEFAULT_RESIDENT_SERVICE = "composer-updater"
+# The privileged Docker-authority role; the network-facing agent holds none.
+EXECUTOR_SERVICE = "composer-executor"
 INHERITED_SECRET_KEYS_ENV = "COMPOSER_INHERITED_SECRET_KEYS"
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

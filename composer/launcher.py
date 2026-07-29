@@ -12,6 +12,8 @@ from .cli import (
     parse_args,
     parse_check_args,
     parse_enable_agent_args,
+    parse_enable_executor_args,
+    parse_executor_args,
     parse_log_args,
     parse_pull_args,
     parse_restart_args,
@@ -24,7 +26,7 @@ from .cli import (
 from .checkup import CheckupMixin
 from .config import ConfigMixin
 from .confirmation import confirm
-from .constants import ERROR, IDLE, OK, RUNNING
+from .constants import ERROR, EXECUTOR_SERVICE, IDLE, OK, RUNNING
 from .docker_compose_manager import DockerComposeMixin
 from .health_monitor import HealthMonitorMixin
 from .post_start_hooks import PostStartHooksMixin
@@ -259,23 +261,51 @@ class DockerComposeLauncher(
         argv.append(AGENT_SERVICE)
         return argv
 
+    def _resident_pair_scope(self):
+        """Resident services the agent-* commands act on: composer-agent, plus
+        composer-executor when the hardened topology defines it.
+
+        agent-update in particular must recreate both from the one shared image
+        so they can never drift to different versions (both are debeski/composer).
+        Legacy stacks with no executor resolve to just composer-agent.
+        """
+        pair = [AGENT_SERVICE]
+        try:
+            if not getattr(self, "active_compose_files", None):
+                self.resolve_active_compose_files()
+            ok, out, _ = self.run_docker_compose(["config", "--services"], timeout=10)
+            if ok:
+                defined = {s.strip() for s in out.splitlines() if s.strip()}
+                if EXECUTOR_SERVICE in defined:
+                    pair.append(EXECUTOR_SERVICE)
+        except Exception:
+            pass
+        return pair
+
     def configure_agent_update(self, argv):
         args = parse_agent_update_args(argv)
         self.configure_update(self._agent_target_argv(args, status_file=True))
         self.no_migrate = True
         self.active_version_file = None
         self.active_version_key = None
-        self.monitored_services = [AGENT_SERVICE]
+        pair = self._resident_pair_scope()
+        self.pull_service = list(pair)
+        self.up_service = list(pair)
+        self.monitored_services = list(pair)
         self.exclude_services = [
-            service for service in self.exclude_services if service != AGENT_SERVICE
+            service for service in self.exclude_services if service not in pair
         ]
 
     def configure_agent_restart(self, argv):
         args = parse_agent_restart_args(argv)
         self.configure_restart(self._agent_target_argv(args, status_file=True))
-        self.monitored_services = [AGENT_SERVICE]
+        pair = self._resident_pair_scope()
+        # Use the multi-service list form (restart_service singular is bypassed).
+        self.restart_service = None
+        self.restart_services = list(pair)
+        self.monitored_services = list(pair)
         self.exclude_services = [
-            service for service in self.exclude_services if service != AGENT_SERVICE
+            service for service in self.exclude_services if service not in pair
         ]
 
     def configure_agent_off(self, argv):
@@ -284,6 +314,7 @@ class DockerComposeLauncher(
             self._agent_target_argv(args),
             command="agent-off",
         )
+        self.down_services = self._resident_pair_scope()
 
     def configure_stop(self, argv, command="stop"):
         """Configure `composer stop [opts] [service...]` for the down pipeline."""
@@ -372,10 +403,18 @@ class DockerComposeLauncher(
                 from .agent import run_agent
 
                 sys.exit(run_agent(parse_agent_args(argv[1:])))
+            if argv and argv[0] == "executor":
+                from .executor import run_executor
+
+                sys.exit(run_executor(parse_executor_args(argv[1:])))
             if argv and argv[0] == "enable-agent":
                 from .agent_installer import run_enable_agent
 
                 sys.exit(run_enable_agent(parse_enable_agent_args(argv[1:])))
+            if argv and argv[0] == "enable-executor":
+                from .agent_installer import run_enable_executor
+
+                sys.exit(run_enable_executor(parse_enable_executor_args(argv[1:])))
             if argv and argv[0] in {"log", "logs"}:
                 self.handle_log(argv[1:])
                 return
