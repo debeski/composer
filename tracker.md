@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; current source is unreleased v1.3.0 (executor hardening); v1.2.9 is tagged/published. NEVER append to a tagged version — check `git tag` first.
+- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.0 (executor hardening) is tagged/published; current source is unreleased v1.3.1 (agent-check compose fallback). NEVER append to a tagged version — check `git tag` first.
 - Code lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and `start.sh`/`start.ps1`.
 - Update surface: `update`, `pull`, `update-self`, `agent-check`, `agent-update`, `agent-restart`, and `agent-off`; `-u` remains compact.
 - `COMPOSER_VERSION` is the last deployer version; `agent-status.json` reports the resident `composer_version` separately.
@@ -44,7 +44,7 @@
       - CLI `composer enable-executor` (dry-run default) + launcher dispatch.
       - `check --fix` runs `enable-executor` (`_maybe_fix`); agent-without-executor topology is now WARN (non-blocking) so the hint prints. +15 tests (5 gen + 9 migration + 1 check-fix), suite 218.
     - [x] Slice 5 (DONE, in dlux repo): scaffold generates the hardened topology (executor + read-only proxy + agent delegates), stack_contract + topology tests updated, generated compose passes real `docker compose config`, dlux suite 1040 GREEN. Executor hardening now COMPLETE end-to-end (composer + scaffold). Release-coordinated: dlux scaffold ships AFTER composer v1.3.0.
-  - [ ] Publish Composer v1.2.9, then run `./start.sh update-self` from each deployment root.
+  - [ ] Publish Composer v1.3.1, then run `./start.sh update-self` from each deployment root.
   - [ ] Live verify `stop -v` TTY/non-TTY behavior and `log -F`.
   - [ ] Pilot enrollment -> backup -> maintenance -> deploy -> DLUX finalization -> central replay.
   - [ ] Verify cancellation, outage replay, revocation, safe restart, and backup through docker-socket-proxy.
@@ -54,6 +54,7 @@
   - [ ] Add shared `check` drift checks for raw Docker socket mounts and the `dlux_runtime` rw/ro split.
   - [ ] Run pending dependency/container CVE scanners and image smoke tests when tools/images are available.
 - **Completed Recently:**
+  - [x] v1.3.1: `agent-check` falls back to compose-file image discovery (agent block `--check-image`/`WEB_IMAGE`, `${VAR:-default}` resolution, `-f` scoping).
   - [x] v1.2.9: normalize update/pull/self/agent commands and add typed `agent-check` image availability.
   - [x] v1.2.8: coalesce pending snapshots to the latest state and collapse existing snapshot backlogs during store initialization.
   - [x] v1.2.7: pin control origin, reject redirects, harden typed/redacted relay data, block mixed topologies, and safely reconcile legacy proxy routes.
@@ -62,11 +63,11 @@
   - [x] v1.2.0: outbound typed agent, SQLite replay/deduplication, safe restart, DLUX relay, and guarded `enable-agent`.
 
 ### One-line info about last verified Tests:
-- Verified 2026-07-28: 218/218 tests (prior + slice-4: hardened_stack gen, enable_executor transform/apply/idempotent/refuse, YAML-valid, check--fix→enable-executor). Generated hardened compose passes real `docker compose config`. Composer side of executor hardening COMPLETE; slice-5 = dlux scaffold parity.
+- Verified 2026-07-29: 222/222 tests (prior + agent-check compose fallback: discovery, interpolation default, unresolvable skip, `-f` scoping).
 - Dependency/container CVE scanning remains pending because the scanners are unavailable locally.
 
 ### One-line info about last time edited Docs:
-- Edited README, changelog, and tracker on 2026-07-27 for the v1.2.9 command vocabulary.
+- Edited README, changelog, and tracker on 2026-07-29 for the v1.3.1 agent-check compose fallback.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

@@ -1,5 +1,7 @@
+import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -8,6 +10,35 @@ from unittest.mock import patch
 
 from composer.cli import parse_agent_check_args
 from composer.watcher import run_agent_check
+
+
+AGENT_COMPOSE = '''name: demo
+services:
+  web:
+    image: "${WEB_IMAGE:-demo:latest}"
+  composer-agent:
+    image: debeski/composer:latest
+    command:
+      - agent
+      - --trigger-file
+      - /opt/dlux-runtime/state/image-update-request.json
+      - --check-image
+      - registry.example/dlux/app:latest
+      - --availability-file
+      - /opt/dlux-runtime/state/image-available.json
+    environment:
+      WEB_IMAGE: "registry.example/dlux/app:latest"
+'''
+
+
+@contextlib.contextmanager
+def workdir(path):
+    previous = os.getcwd()
+    os.chdir(path)
+    try:
+        yield Path(path)
+    finally:
+        os.chdir(previous)
 
 
 def payload(*, available=False, remote="sha256:same", local="sha256:same"):
@@ -82,11 +113,84 @@ class AgentCheckCommandTests(unittest.TestCase):
         args = parse_agent_check_args([])
         stderr = io.StringIO()
 
-        with patch.dict("os.environ", {}, clear=True), redirect_stderr(stderr):
+        with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir), patch.dict(
+            "os.environ", {}, clear=True
+        ), redirect_stderr(stderr):
             code = run_agent_check(args)
 
         self.assertEqual(code, 2)
-        self.assertIn("provide at least one IMAGE", stderr.getvalue())
+        self.assertIn("no image to check", stderr.getvalue())
+
+    @patch("composer.watcher.availability_payload")
+    def test_compose_agent_block_is_the_deployment_default(self, build):
+        build.return_value = payload()
+        args = parse_agent_check_args(["--json"])
+
+        with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir) as root:
+            (root / "compose.yml").write_text(AGENT_COMPOSE, encoding="utf-8")
+            with patch.dict("os.environ", {}, clear=True), redirect_stdout(
+                io.StringIO()
+            ):
+                code = run_agent_check(args)
+
+        self.assertEqual(code, 0)
+        build.assert_called_once_with(["registry.example/dlux/app:latest"])
+
+    @patch("composer.watcher.availability_payload")
+    def test_compose_interpolation_resolves_defaults_and_environment(self, build):
+        build.return_value = payload()
+        compose = (
+            "name: demo\n"
+            "services:\n"
+            "  composer-updater:\n"
+            "    environment:\n"
+            '      WEB_IMAGE: "${WEB_IMAGE:-registry.example/dlux/app:latest}"\n'
+        )
+        args = parse_agent_check_args(["--json"])
+
+        with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir) as root:
+            (root / "docker-compose.yml").write_text(compose, encoding="utf-8")
+            with patch.dict("os.environ", {}, clear=True), redirect_stdout(
+                io.StringIO()
+            ):
+                code = run_agent_check(args)
+
+        self.assertEqual(code, 0)
+        build.assert_called_once_with(["registry.example/dlux/app:latest"])
+
+    def test_unresolvable_compose_interpolation_is_not_checked(self):
+        compose = (
+            "name: demo\n"
+            "services:\n"
+            "  composer-agent:\n"
+            "    environment:\n"
+            '      WEB_IMAGE: "${WEB_IMAGE}"\n'
+        )
+        args = parse_agent_check_args([])
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir) as root:
+            (root / "compose.yml").write_text(compose, encoding="utf-8")
+            with patch.dict("os.environ", {}, clear=True), redirect_stderr(stderr):
+                code = run_agent_check(args)
+
+        self.assertEqual(code, 2)
+        self.assertIn("no image to check", stderr.getvalue())
+
+    @patch("composer.watcher.availability_payload")
+    def test_alternate_compose_file_flag_scopes_discovery(self, build):
+        build.return_value = payload()
+
+        with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir) as root:
+            (root / "compose.prod.yml").write_text(AGENT_COMPOSE, encoding="utf-8")
+            args = parse_agent_check_args(["--json", "-f", "compose.prod.yml"])
+            with patch.dict("os.environ", {}, clear=True), redirect_stdout(
+                io.StringIO()
+            ):
+                code = run_agent_check(args)
+
+        self.assertEqual(code, 0)
+        build.assert_called_once_with(["registry.example/dlux/app:latest"])
 
     def test_digest_pinned_reference_is_rejected(self):
         args = parse_agent_check_args(["example/app@sha256:abc"])

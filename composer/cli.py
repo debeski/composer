@@ -33,8 +33,8 @@ def parse_args():
             "      --deep relays the in-container checks. Run 'composer check --help'.\n"
             "  agent-check [--json] [--availability-file PATH] [IMAGE ...]\n"
             "      Compare remote tag digests with locally pulled images without\n"
-            "      pulling or deploying. Defaults to COMPOSER_CHECK_IMAGE or\n"
-            "      WEB_IMAGE.\n"
+            "      pulling or deploying. Defaults to COMPOSER_CHECK_IMAGE,\n"
+            "      WEB_IMAGE, or the compose file's agent-watched images.\n"
             "  agent-update | agent-restart | agent-off\n"
             "      Update, restart, or stop this stack's composer-agent service.\n"
             "  log [-n N|all] [--follow] [-f FILE] [-d] [service...]\n"
@@ -299,13 +299,15 @@ def parse_agent_check_args(argv):
         metavar="PATH",
         help="Also atomically write the availability document to PATH",
     )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
     parser.add_argument(
         "image",
         nargs="*",
         metavar="IMAGE",
         help=(
             "Tagged image reference to check; repeat for multiple images "
-            "(default: COMPOSER_CHECK_IMAGE or WEB_IMAGE)"
+            "(default: COMPOSER_CHECK_IMAGE, WEB_IMAGE, or the images the "
+            "compose file's composer agent watches)"
         ),
     )
     return parser.parse_args(argv)

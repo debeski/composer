@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.1
+- **agent-check Compose Fallback**: With no IMAGE argument and no `COMPOSER_CHECK_IMAGE`/`WEB_IMAGE`, `agent-check` now discovers the watched images from the deployment's own compose file (`--check-image` entries and `WEB_IMAGE` in the composer-agent/executor/updater block, with `${VAR:-default}` resolution); added `-f/--file` to scope discovery.
+
 ## v1.3.0
 - **Docker Authority Isolated In composer-executor**: New `executor` role holds `docker.sock` and does every Docker write (trigger-watched image update + typed `restart`/`recovery_deploy` over a private unix socket). The `composer-agent` keeps read-only proxy access only and delegates writes.
 - **enable-executor + check --fix**: `composer enable-executor` migrates a composer-agent stack to the hardened topology (`.xpose/` backup, `docker compose config` validate, atomic write; idempotent); `composer check --fix` runs it automatically. `agent-update`/`agent-restart`/`agent-off` now target the resident pair.

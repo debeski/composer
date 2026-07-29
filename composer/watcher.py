@@ -21,6 +21,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -197,6 +198,57 @@ def write_availability(path: str, images: List[str]):
         pass
 
 
+_COMPOSE_INTERPOLATION = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}"
+)
+
+
+def _resolve_compose_value(value: str) -> str:
+    """Resolve compose-style ${VAR}/${VAR:-default} interpolation against the
+    environment; an unresolvable reference yields "" (never a literal '$')."""
+
+    def substitute(match):
+        return os.environ.get(match.group(1)) or (match.group(2) or "")
+
+    resolved = _COMPOSE_INTERPOLATION.sub(substitute, str(value or "").strip())
+    return "" if "$" in resolved else resolved.strip()
+
+
+def _compose_check_images(compose_file: str = "") -> List[str]:
+    """Discover the deployment's watched images from its own Compose file: the
+    resident agent/updater/executor block records them as --check-image command
+    entries and the WEB_IMAGE environment value."""
+    candidates = [compose_file] if compose_file else ["compose.yml", "docker-compose.yml"]
+    contents = ""
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.is_file():
+            try:
+                contents = path.read_text(encoding="utf-8")
+            except OSError:
+                return []
+            break
+    if not contents:
+        return []
+    from .agent_installer import _block_bodies, _environment_value
+
+    images = []
+    bodies = _block_bodies(contents)
+    for service in ("composer-agent", "composer-executor", "composer-updater"):
+        body = bodies.get(service, "")
+        if not body:
+            continue
+        images.extend(
+            re.findall(
+                r'(?m)^\s*-\s*--check-image\s*\n\s*-\s*"?([^\s"]+)"?\s*$', body
+            )
+        )
+        web_image = _environment_value(body, "WEB_IMAGE")
+        if web_image:
+            images.append(web_image)
+    return [image for image in map(_resolve_compose_value, images) if image]
+
+
 def _check_update_images(args) -> List[str]:
     images = list(getattr(args, "image", None) or [])
     if not images:
@@ -207,6 +259,8 @@ def _check_update_images(args) -> List[str]:
         )
         if fallback.strip():
             images = [fallback.strip()]
+    if not images:
+        images = _compose_check_images(getattr(args, "file", None) or "")
     unique = []
     for image in images:
         image = str(image or "").strip()
@@ -219,8 +273,9 @@ def run_agent_check(args) -> int:
     images = _check_update_images(args)
     if not images:
         print(
-            "✖ agent-check: provide at least one IMAGE, or set "
-            "COMPOSER_CHECK_IMAGE or WEB_IMAGE.",
+            "✖ agent-check: no image to check. Provide an IMAGE, set "
+            "COMPOSER_CHECK_IMAGE or WEB_IMAGE, or run from a deployment "
+            "whose compose file defines the composer agent.",
             file=sys.stderr,
         )
         return 2
