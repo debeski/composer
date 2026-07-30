@@ -327,6 +327,19 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         needs_hardening = (
             "composer-agent" in set(self.services) and "composer-executor" not in set(self.services)
         )
+        # Already-hardened stacks are not caught by legacy/needs_hardening, so a
+        # deployer missing the secrets read capability would otherwise be skipped.
+        # A dry-run reports a file change only when the cap must be added.
+        needs_secret_cap = False
+        if "composer-executor" in set(self.services):
+            try:
+                from .agent_installer import enable_executor
+
+                needs_secret_cap = bool(
+                    enable_executor(".", compose_file=args.file or "", apply=False).get("files")
+                )
+            except Exception:
+                needs_secret_cap = False
         obsolete = sorted(OBSOLETE_SERVICES.intersection(self.services))
         proxy_inspection = inspect_legacy_proxy_routes(".")
         if proxy_inspection["unsupported"]:
@@ -340,7 +353,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
             return fixes
         proxy_routes = proxy_inspection["recognized"]
-        if not legacy and not obsolete and not proxy_routes and not needs_hardening:
+        if not legacy and not obsolete and not proxy_routes and not needs_hardening and not needs_secret_cap:
             return fixes
         consequences = []
         if obsolete:
@@ -377,6 +390,12 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     "keep the agent read-only.",
                     "Recreate docker-socket-proxy, composer-executor, and composer-agent.",
                 ]
+            )
+        if needs_secret_cap:
+            consequences.append(
+                "Add cap_add: DAC_READ_SEARCH to composer-executor so it can read the "
+                "project's 0600 .secrets/.env to deploy (read-only override; fixes inline "
+                "updates failing the secrets guard)."
             )
         consequences.extend(
             [
@@ -472,6 +491,21 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:enable-executor", f"Hardening failed: {exc}"))
+        if needs_secret_cap:
+            from .agent_installer import AgentInstallError, enable_executor
+
+            try:
+                outcome = enable_executor(".", compose_file=args.file or "", apply=True)
+                fixes.append(
+                    _result(
+                        OK,
+                        "fix:secrets-read-cap",
+                        "Added cap_add: DAC_READ_SEARCH to composer-executor. Recreate it to apply. Backup: "
+                        + (outcome.get("backup_root") or "n/a"),
+                    )
+                )
+            except AgentInstallError as exc:
+                fixes.append(_result(FAIL, "fix:secrets-read-cap", f"Capability repair failed: {exc}"))
         return fixes
 
     @staticmethod

@@ -28,8 +28,10 @@ and a key manifest only to that service. The agent and its update children then
 use the inherited environment instead of reopening the host bind-mounted file.
 Host mode-`0600` secrets therefore need no ACL or capability exception.
 
-Legacy `composer-updater` services remain supported through `composer watch` for
-one migration cycle. New deployments use `composer agent`.
+New deployments run the hardened resident pair: `composer agent` plus
+`composer executor`. Legacy `composer-updater` stacks still deploy, but
+`composer check` reports them as a legacy topology and `check --fix` (or
+`composer enable-agent --apply`) migrates them to `composer-agent`.
 
 ## the surface
 
@@ -37,17 +39,17 @@ one migration cycle. New deployments use `composer agent`.
 
 `composer restart [-f FILE] [-d] [--status-file PATH] [service]` restarts running containers through `docker compose restart`, then waits for their health checks. Containers are preserved and post-start tasks are skipped. Pass a service to restart only that service. `composer -r ...` and `composer --restart ...` remain short leading aliases. See `composer restart --help`.
 
-`composer update [-b] [--force] [-nm] [-mm] [-a APP] [--status-file PATH] [-f FILE] [-d] [service...]` pulls the latest application image(s), recreates the affected containers, waits for health checks, and runs post-start tasks. Name services to scope both the pull and recreate; the Composer agent and watcher use this same subcommand internally. `-u [service]` remains the compact argument form. See `composer update --help`.
+`composer update [-b] [--force] [-nm] [-mm] [-a APP] [--status-file PATH] [-f FILE] [-d] [service...]` pulls the latest application image(s), recreates the affected containers, waits for health checks, and runs post-start tasks. Name services to scope both the pull and recreate; the resident agent/executor and the watcher use this same subcommand internally. `-u [service]` remains the compact argument form. See `composer update --help`.
 
 `composer pull [--status-file PATH] [-f FILE] [-d] [service...]` only downloads images. It never recreates containers, runs health checks, or executes post-start tasks. This replaces the retired `-uo` and `update -o` forms.
 
 `composer update-self` pulls `debeski/composer:latest`, the Composer deployer used by `start.sh`. `./start.sh --update` remains a legacy forwarding alias for one migration cycle. Set `COMPOSER_SELF_IMAGE` only when using a compatible Composer image mirror.
 
-`composer check [--fix] [-y] [--deep] [--json] [-f FILE] [-d]` is the doctor for the *outside* of a DLUX stack. It verifies Docker + Compose v2, that the compose config resolves, that a secrets source is present/readable/non-empty, that every externally-required compose variable has a value, the topology mode (composer-agent vs legacy composer-updater vs unmanaged), obsolete DLUX services and proxy routes, and version drift between the deploying composer and the resident `composer-agent`. A mixed `composer-agent` + `composer-updater` topology fails closed. It warns when `pgadmin`, `db-backup`, or the legacy `db_backup` spelling is present, and independently detects recognized pgAdmin routes in `.proxy/Caddyfile`, `.proxy/default.conf.template`, and `.nginx/nginx.conf`. Guarded `--fix` validates the complete cleaned Compose candidate, archives every changed deployment/proxy file under `.xpose/composer-check/`, validates each changed proxy mounted by Caddy or Nginx, stops and removes only detected obsolete containers with targeted `docker compose rm -sf`, applies the service and route cleanup, rediscovers services, and verifies every pre-existing named Docker volume remains. A running Caddy or direct-config Nginx service is reloaded; template-backed Nginx is restarted and checked so its live rendered configuration is regenerated. This proxy-only path also repairs projects whose obsolete services were removed by v1.2.6. Unrecognized customized pgAdmin routes fail closed for manual review. The fix never uses a broad orphan-cleaning redeploy and never removes volumes; it also migrates legacy `composer-updater` → `composer-agent` through `enable-agent`. `--deep` relays the in-container app-level doctor — `python manage.py dlux_doctor` in the `web` service by default, overridable with `--deep-service`/`--deep-command` — and prints its output. `--json` emits structured results; exit is non-zero on a blocking problem or failed fix/postflight. This is the single evolving check that replaces per-change `enable-*` one-offs: composer owns the outside and hands the rest to the container(s). See `composer check --help`.
+`composer check [--fix] [-y] [--deep] [--json] [-f FILE] [-d]` is the doctor for the *outside* of a DLUX stack. It verifies Docker + Compose v2, that the compose config resolves, that a secrets source is present/readable/non-empty, that every externally-required compose variable has a value, the topology mode (hardened `composer-agent` + `composer-executor`, agent-only, legacy `composer-updater`, or unmanaged), obsolete DLUX services and proxy routes, and version drift between the deploying composer and the resident `composer-agent`. A mixed `composer-agent` + `composer-updater` topology fails closed. It warns when `pgadmin`, `db-backup`, or the legacy `db_backup` spelling is present, and independently detects recognized pgAdmin routes in `.proxy/Caddyfile`, `.proxy/default.conf.template`, and `.nginx/nginx.conf`. Guarded `--fix` validates the complete cleaned Compose candidate, archives every changed deployment/proxy file under `.xpose/composer-check/`, validates each changed proxy mounted by Caddy or Nginx, stops and removes only detected obsolete containers with targeted `docker compose rm -sf`, applies the service and route cleanup, rediscovers services, and verifies every pre-existing named Docker volume remains. A running Caddy or direct-config Nginx service is reloaded; template-backed Nginx is restarted and checked so its live rendered configuration is regenerated. This proxy-only path also repairs projects whose obsolete services were removed by v1.2.6. Unrecognized customized pgAdmin routes fail closed for manual review. The fix never uses a broad orphan-cleaning redeploy and never removes volumes; it also migrates legacy `composer-updater` → `composer-agent` through `enable-agent` and hardens agent-only stacks into the executor topology through `enable-executor`. `--deep` relays the in-container app-level doctor — `python manage.py dlux_doctor` in the `web` service by default, overridable with `--deep-service`/`--deep-command` — and prints its output. `--json` emits structured results; exit is non-zero on a blocking problem or failed fix/postflight. This is the single evolving check that replaces per-change `enable-*` one-offs: composer owns the outside and hands the rest to the container(s). See `composer check --help`.
 
 `composer agent-check [--json] [--availability-file PATH] [IMAGE ...]` performs the image-availability half of the inline DLUX update flow without pulling, recreating, or enabling maintenance. It compares each remote tag digest with the locally pulled digest and reuses the resident agent's JSON contract, including optional candidate `version` and release `manifest` metadata. Pass tagged image references explicitly, or omit them to use `COMPOSER_CHECK_IMAGE`, then `WEB_IMAGE`, and finally the images the compose file's composer-agent/executor/updater block watches (`--check-image` entries and its `WEB_IMAGE` value, with `${VAR:-default}` interpolation resolved against the environment); `-f FILE` selects an alternate compose file for that discovery. `--json` is intended for DLUX; `--availability-file` atomically publishes the same document. Exit `0` means every registry lookup was definitive, even when an update is available; exit `1` means at least one lookup was unknown or the output file could not be written; exit `2` means invalid input. Digest-pinned references are rejected because they cannot represent a moving update channel. `COMPOSER_REGISTRY_TOKEN`, `COMPOSER_VERSION_LABEL`, and `COMPOSER_RELEASE_MANIFEST_LABEL` retain their existing meanings.
 
-The resident service has three host-side lifecycle commands: `composer agent-update` pulls and recreates only `composer-agent`, `composer agent-restart` restarts and health-checks only it, and `composer agent-off` stops it without touching the application or Compose project. The dedicated commands ignore the agent's normal self-exclusion only for that explicit target. `agent-update` does not run application version gates or post-start hooks.
+The resident services have three host-side lifecycle commands: `composer agent-update` pulls and recreates, `composer agent-restart` restarts and health-checks, and `composer agent-off` stops — without touching the application or Compose project. When the compose file defines `composer-executor`, all three target the `composer-agent` + `composer-executor` pair together (both run the same image, so they can never drift to different versions); legacy stacks resolve to just `composer-agent`. The dedicated commands ignore the resident services' normal self-exclusion only for those explicit targets. `agent-update` does not run application version gates or post-start hooks.
 
 `composer stop [-v] [-p] [-y] [-f FILE] [-d] [service...]` stops and removes the whole Compose project when unscoped. Pass service names to use `docker compose stop` for only those containers. Secrets, health checks, and post-start tasks are skipped. `-v`/`--volumes` and `-p`/`--purge` are destructive and project-wide, so they cannot be combined with service names and require a typed confirmation (see below). `composer down ...` is an alias and `composer --down ...` remains a flat-flag equivalent. See `composer stop --help`.
 
@@ -57,12 +59,16 @@ The resident service has three host-side lifecycle commands: `composer agent-upd
 
 `composer agent` is the durable successor to `watch`. It preserves the same local trigger/status/ack and registry-availability files, adds a typed DLUX spool, SQLite command/outbox replay, operation correlation, safe restart allowlisting, and optional outbound HTTPS long polling. Configure `COMPOSER_CONTROL_URL`, a 15-minute one-use `COMPOSER_ENROLLMENT_TOKEN`, and `COMPOSER_AGENT_STATE_DIR` (default `/var/lib/composer-agent`). Enrollment pins the normalized control URL in local state; changing panels requires revocation and re-enrollment or an explicit local state reset. Control requests reject redirects. Pending snapshots coalesce to the newest state, while commands and events retain durable replay. Local DLUX-triggered updates continue while the control plane is unavailable or the machine credential is revoked. See [Agent Protocol v1](docs/agent-protocol-v1.md).
 
+`composer executor` runs the privileged half of the hardened topology. The executor is the sole holder of Docker write authority: it owns the real `docker.sock`, runs the trigger-watched image-update loop, and serves typed restart/recovery operations to the agent over a private Unix socket (`COMPOSER_EXECUTOR_SOCKET`). The network-facing `composer-agent` keeps only read-only Docker access through a `docker-socket-proxy` with POST and exec disabled, and delegates every write. The generated Compose block starts it; it is not for interactive use. See [docs/executor-hardening.md](docs/executor-hardening.md).
+
 Migrate an existing generated DLUX project with Composer itself:
 
 ```bash
 ./start.sh update-self
 ./start.sh enable-agent
 ./start.sh enable-agent --apply
+./start.sh enable-executor
+./start.sh enable-executor --apply
 ```
 
 The default dry run prints the exact Compose diff. Apply accepts only a recognized
@@ -80,11 +86,19 @@ directory that holds nothing but `compose.yml`, `.proxy/`, and `.secrets/`. When
 `requirements.txt`/`pyproject.toml` is present it must declare DjangoLux 1.5.0+
 or apply refuses without `--allow-unverified-dlux`; with no manifest to read the
 check is reported as an advisory warning instead.
-A locally installed binary may instead run `composer enable-agent --project-dir
-/path/to/project`. The deprecated `python -m dlux enable-agent` route forwards to
-this command for one migration cycle; Composer is the sole transformer.
+`composer enable-executor` takes the second step: it hardens an existing
+`composer-agent` stack by moving Docker write authority into a new
+`composer-executor` service, demoting `docker-socket-proxy` to read-only, and
+leaving the agent to observe and delegate. It uses the same guardrails —
+dry-run by default, `.xpose/` backup, `docker compose config` validation,
+atomic write, idempotent re-runs — and `composer check --fix` runs whichever
+migration applies automatically.
 
-When `watch` runs inside the same Compose project it is updating, it excludes the resident updater service from child runs by default (`composer-updater`). The child receives `COMPOSER_EXCLUDE_SERVICES=composer-updater`, so pull/config/up/health/post-start operate on the application services and do not recreate the container that is supervising the update. Override the service name with `COMPOSER_WATCH_SELF_SERVICE`, disable the default with `COMPOSER_WATCH_SELF_SERVICE=""`, or set additional exclusions with `COMPOSER_EXCLUDE_SERVICES`.
+A locally installed binary may instead run `composer enable-agent --project-dir
+/path/to/project` (or `enable-executor --project-dir ...`); Composer is the sole
+transformer.
+
+When `watch` runs inside the same Compose project it is updating, it excludes the resident services from child runs by default (`composer-updater` and `composer-agent`), so pull/config/up/health/post-start operate on the application services and do not recreate the container that is supervising the update. Override the excluded name(s) with `COMPOSER_WATCH_SELF_SERVICE`, disable the default with `COMPOSER_WATCH_SELF_SERVICE=""`, or set additional exclusions with `COMPOSER_EXCLUDE_SERVICES`.
 
 `watch` can also **detect a newer image** and publish availability for another process to act on: `--check-image IMAGE` (repeatable) + `--availability-file PATH` (and `--check-interval SECONDS`, default 3600) poll the registry's tag digest vs the locally-pulled one and write `{ "available": …, "images": [ … ] }`. It only reports *readable* differences (an unreachable registry is "unknown", never a false positive), needs no registry access from the consumer, and re-checks right after an applied update. `COMPOSER_REGISTRY_TOKEN` covers private repositories.
 
@@ -130,7 +144,7 @@ dashboard) can watch a deploy:
 
 ```json
 { "status": "migrating", "updated_at": "2026-07-04T08:31:38+00:00",
-  "composer_version": "1.1.5", "compose_files": ["compose.yml"],
+  "composer_version": "1.3.1", "compose_files": ["compose.yml"],
   "target_images": ["debeski/app:latest"], "target_version": "1.2.10",
   "active_version": "1.2.9" }
 ```

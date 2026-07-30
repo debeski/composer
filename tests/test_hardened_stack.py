@@ -59,6 +59,41 @@ class HardenedStackTests(unittest.TestCase):
         self.assertNotIn("COMPOSER_ENROLLMENT_TOKEN", ex)
         self.assertIn("no-new-privileges:true", ex)
 
+    def test_executor_can_read_the_projects_secrets_to_deploy(self):
+        # The executor runs the deploy (docker compose up), which reads the
+        # project's 0600 .secrets/.env. cap_drop:ALL strips CAP_DAC_READ_SEARCH,
+        # so UID 0 can't read a file it doesn't own; the read cap must be added
+        # back or every inline deploy fails on the secrets guard.
+        ex = _section(self.block, "composer-executor")
+        self.assertIn("cap_drop:\n      - ALL", ex)
+        self.assertIn("cap_add:\n      - DAC_READ_SEARCH", ex)
+
+    def test_agent_stays_read_only_without_the_file_override(self):
+        # The network-facing agent never deploys, so it must NOT carry the read
+        # override — least privilege for the internet-reachable role.
+        agent = _section(self.block, "composer-agent")
+        self.assertIn("cap_drop:\n      - ALL", agent)
+        self.assertNotIn("DAC_READ_SEARCH", agent)
+
+    def test_missing_read_cap_is_healed_on_the_executor_only(self):
+        from composer.agent_installer import _ensure_deployer_read_cap
+
+        stripped = self.block.replace("    cap_add:\n      - DAC_READ_SEARCH\n", "")
+        self.assertNotIn("DAC_READ_SEARCH", stripped)
+        healed = _ensure_deployer_read_cap(stripped, "decrees")
+        self.assertIn("DAC_READ_SEARCH", _section(healed, "composer-executor"))
+        self.assertNotIn("DAC_READ_SEARCH", _section(healed, "composer-agent"))
+        # Idempotent once the cap is present.
+        self.assertEqual(_ensure_deployer_read_cap(healed, "decrees"), healed)
+
+    def test_agent_only_deployer_is_healed(self):
+        from composer.agent_installer import _agent_stack, _ensure_deployer_read_cap
+
+        block = _agent_stack("decrees", {"web", "celery", "db", "redis"}, _topology())
+        stripped = block.replace("    cap_add:\n      - DAC_READ_SEARCH\n", "")
+        healed = _ensure_deployer_read_cap(stripped, "decrees")
+        self.assertIn("DAC_READ_SEARCH", _section(healed, "composer-agent"))
+
     def test_agent_keeps_readonly_proxy_and_delegates_writes(self):
         agent = _section(self.block, "composer-agent")
         # Reads via the (now read-only) proxy.

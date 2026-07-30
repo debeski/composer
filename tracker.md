@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.0 (executor hardening) is tagged/published; current source is unreleased v1.3.1 (agent-check compose fallback). NEVER append to a tagged version — check `git tag` first.
+- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.1 (agent-check compose fallback) is tagged/published — next changes start v1.3.2. NEVER append to a tagged version — check `git tag` first.
 - Code lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and `start.sh`/`start.ps1`.
 - Update surface: `update`, `pull`, `update-self`, `agent-check`, `agent-update`, `agent-restart`, and `agent-off`; `-u` remains compact.
 - `COMPOSER_VERSION` is the last deployer version; `agent-status.json` reports the resident `composer_version` separately.
@@ -44,7 +44,7 @@
       - CLI `composer enable-executor` (dry-run default) + launcher dispatch.
       - `check --fix` runs `enable-executor` (`_maybe_fix`); agent-without-executor topology is now WARN (non-blocking) so the hint prints. +15 tests (5 gen + 9 migration + 1 check-fix), suite 218.
     - [x] Slice 5 (DONE, in dlux repo): scaffold generates the hardened topology (executor + read-only proxy + agent delegates), stack_contract + topology tests updated, generated compose passes real `docker compose config`, dlux suite 1040 GREEN. Executor hardening now COMPLETE end-to-end (composer + scaffold). Release-coordinated: dlux scaffold ships AFTER composer v1.3.0.
-  - [ ] Publish Composer v1.3.1, then run `./start.sh update-self` from each deployment root.
+  - [ ] Run `./start.sh update-self` from each deployment root now that v1.3.1 is tagged.
   - [ ] Live verify `stop -v` TTY/non-TTY behavior and `log -F`.
   - [ ] Pilot enrollment -> backup -> maintenance -> deploy -> DLUX finalization -> central replay.
   - [ ] Verify cancellation, outage replay, revocation, safe restart, and backup through docker-socket-proxy.
@@ -63,11 +63,12 @@
   - [x] v1.2.0: outbound typed agent, SQLite replay/deduplication, safe restart, DLUX relay, and guarded `enable-agent`.
 
 ### One-line info about last verified Tests:
+- Verified 2026-07-30: 227/227 tests. v1.3.2 FIX: deployer role adds `cap_add: DAC_READ_SEARCH` over `cap_drop: ALL` so it can read `0600 .secrets/.env` (executor in hardened, agent in agent-only). PLUS `check --fix`/`enable-*` now self-heal a missing cap in place via targeted insert (`_ensure_deployer_read_cap`, safe for dlux-scaffold + composer blocks); validated healing a real dlux-scaffolded block. Fixes inline-deploy secrets Permission-denied that needed manual setfacl.
 - Verified 2026-07-29: 222/222 tests (prior + agent-check compose fallback: discovery, interpolation default, unresolvable skip, `-f` scoping).
 - Dependency/container CVE scanning remains pending because the scanners are unavailable locally.
 
 ### One-line info about last time edited Docs:
-- Edited README, changelog, and tracker on 2026-07-29 for the v1.3.1 agent-check compose fallback.
+- 2026-07-30 README refresh: executor topology, enable-executor, pair-scoped agent-* commands, updated legacy composer-updater stance.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

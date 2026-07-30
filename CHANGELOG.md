@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.2
+- **Deployer Can Read Project Secrets**: The deploying role (`composer-executor`, and `composer-agent` in the agent-only topology) adds `cap_add: DAC_READ_SEARCH` on top of `cap_drop: ALL`, so the uncapped UID-0 process can read the project's `0600` `.secrets/.env` to deploy. Fixes inline deploys failing the secrets guard with a Permission-denied error and needing a manual `setfacl`. Read-only override only; the network-facing agent in the hardened topology keeps no file caps.
+- **check --fix Repairs the Cap In Place**: `composer check --fix` now heals an already-hardened stack that lacks the read cap — a targeted insert (not a full re-render, so the dlux-scaffold and composer-generated blocks are both safe) that adds `cap_add: DAC_READ_SEARCH` to the deployer only. `enable-agent`/`enable-executor` self-heal the same way instead of no-opping on an already-migrated stack.
+
 ## v1.3.1
 - **agent-check Compose Fallback**: With no IMAGE argument and no `COMPOSER_CHECK_IMAGE`/`WEB_IMAGE`, `agent-check` now discovers the watched images from the deployment's own compose file (`--check-image` entries and `WEB_IMAGE` in the composer-agent/executor/updater block, with `${VAR:-default}` resolution); added `-f/--file` to scope discovery.
 

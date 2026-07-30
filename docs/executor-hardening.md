@@ -85,6 +85,21 @@ The executor is the **sole holder of write authority** and the **security
 boundary**. The agent pre-validates for UX; the executor re-validates as the
 authority (defense in depth — never trust the caller).
 
+### Capabilities: the deployer needs to read project secrets
+
+Both roles run `cap_drop: ALL` with `no-new-privileges:true`. But the deploying
+role runs `docker compose up`, which reads the project's `0600` `.secrets/.env`
+locally to resolve secrets before handing the config to dockerd. `cap_drop: ALL`
+strips `CAP_DAC_READ_SEARCH`, so even UID 0 cannot read a file it does not own —
+the deploy then fails the secrets guard with a Permission-denied error, and the
+only workaround is a manual per-host `setfacl`, which defeats unattended inline
+updates. The deploying role therefore carries `cap_add: [DAC_READ_SEARCH]` — a
+**read-only** file/dir override (no write, exec, or setuid bypass). In the
+hardened topology that is `composer-executor` only; the network-facing
+`composer-agent` never deploys and keeps no file caps. In the agent-only
+topology the agent is the deployer and carries the cap. Regressing this (dropping
+the `cap_add`) breaks every inline deploy — it is asserted in the stack tests.
+
 ---
 
 ## 3. What the executor owns

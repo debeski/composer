@@ -156,6 +156,10 @@ def _agent_stack(project_slug: str, services: set[str], topology: Dict[str, Any]
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Read-only file override so this uncapped UID-0 process can read the
+    # project's 0600 .secrets/.env to deploy. No write/exec/setuid bypass.
+    cap_add:
+      - DAC_READ_SEARCH
     working_dir: "${{PWD}}"
     command:
       - agent
@@ -241,6 +245,10 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Read-only file override so this uncapped UID-0 process can read the
+    # project's 0600 .secrets/.env to deploy. No write/exec/setuid bypass.
+    cap_add:
+      - DAC_READ_SEARCH
     working_dir: "${{PWD}}"
     command:
       - executor
@@ -321,6 +329,41 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
 {COMPOSER_AGENT_END}'''
 
 
+def _ensure_deployer_read_cap(contents: str, project_slug: str) -> str:
+    """Add ``cap_add: DAC_READ_SEARCH`` to the deploying role when missing.
+
+    The deployer runs ``docker compose up``, which reads the project's 0600
+    ``.secrets/.env``; under ``cap_drop: ALL`` a UID-0 process without
+    ``CAP_DAC_READ_SEARCH`` cannot read a file it does not own, so the deploy
+    fails the secrets guard. Stacks generated before the capability was required
+    self-heal here. Targeted insert rather than a full block re-render, because
+    the dlux scaffold and the composer generator emit slightly different blocks;
+    a scoped edit is safe for both. No-op when the cap is already present.
+    """
+    if COMPOSER_AGENT_START not in contents:
+        return contents
+    start = contents.index(COMPOSER_AGENT_START)
+    end = contents.index(COMPOSER_AGENT_END, start) + len(COMPOSER_AGENT_END)
+    block = contents[start:end]
+    bodies = _block_bodies(block)
+    deployer = "composer-executor" if "composer-executor" in bodies else (
+        "composer-agent" if "composer-agent" in bodies else "")
+    if not deployer:
+        return contents
+    body = bodies[deployer]
+    if "DAC_READ_SEARCH" in body:
+        return contents
+    cap_drop = re.compile(r"(?m)^    cap_drop:\n      - ALL\n")
+    if not cap_drop.search(body):
+        raise AgentInstallError(
+            f"Cannot add the secrets read capability: {deployer} has no recognized cap_drop block."
+        )
+    healed = cap_drop.sub(
+        "    cap_drop:\n      - ALL\n    cap_add:\n      - DAC_READ_SEARCH\n", body, count=1
+    )
+    return contents[:start] + block.replace(body, healed, 1) + contents[end:]
+
+
 def _transform_compose(contents: str, project_slug: str) -> str:
     if COMPOSER_AGENT_START in contents:
         if (
@@ -333,7 +376,7 @@ def _transform_compose(contents: str, project_slug: str) -> str:
             raise AgentInstallError("The project contains both agent and legacy updater services.")
         if not re.search(r"(?m)^  composer_agent_state:\s*$", contents):
             raise AgentInstallError("The existing Composer agent has no dedicated state volume.")
-        return contents
+        return _ensure_deployer_read_cap(contents, project_slug)
     if contents.count(COMPOSER_UPDATER_START) != 1 or contents.count(COMPOSER_UPDATER_END) != 1:
         raise AgentInstallError("No single recognized generated composer-updater block was found.")
     services = _service_names(contents)
@@ -378,11 +421,11 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
     ):
         raise AgentInstallError("The existing Composer agent block is incomplete.")
     services = _service_names(contents)
-    # Idempotent: already hardened.
+    # Already hardened: no re-render, but heal a missing secrets read capability.
     if "composer-executor" in services:
         if "  composer-executor:\n" not in contents:
             raise AgentInstallError("An unmarked composer-executor service already exists.")
-        return contents
+        return _ensure_deployer_read_cap(contents, project_slug)
     if "composer-agent" not in services or "docker-socket-proxy" not in services:
         raise AgentInstallError("The marked agent block is not a recognized topology.")
     if COMPOSER_UPDATER_START in contents or "  composer-updater:\n" in contents:

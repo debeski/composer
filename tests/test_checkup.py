@@ -250,6 +250,31 @@ class CheckupRunTests(unittest.TestCase):
         harden.assert_called_once()  # check --fix runs enable-executor
         legacy.assert_not_called()  # not the legacy path (agent already present)
 
+    def test_fix_adds_missing_secrets_read_cap_on_hardened_stack(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "composer-agent", "composer-executor", "docker-socket-proxy"]
+        launcher.active_compose_files = ["compose.yml"]
+        calls = []
+
+        def fake_enable_executor(path, compose_file="", apply=False, **kw):
+            calls.append(apply)
+            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xpose/cap"}
+
+        with (
+            patch("composer.agent_installer.enable_executor", side_effect=fake_enable_executor),
+            patch(
+                "composer.checkup.inspect_legacy_proxy_routes",
+                return_value={"unsupported": [], "recognized": []},
+            ),
+            patch("composer.checkup.confirm", return_value=True),
+        ):
+            fixes = launcher._maybe_fix(_args(fix=True), [])
+
+        self.assertIn(True, calls)  # applied the repair
+        self.assertTrue(
+            any(f["name"] == "fix:secrets-read-cap" and f["level"] == OK for f in fixes)
+        )
+
     def test_fix_removes_obsolete_services(self):
         launcher = DockerComposeLauncher()
         launcher.services = ["web", "composer-agent", "docker-socket-proxy", "pgadmin", "db_backup"]

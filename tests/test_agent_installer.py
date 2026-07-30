@@ -120,6 +120,10 @@ class AgentInstallerTests(unittest.TestCase):
             self.assertTrue(result["applied"])
             self.assertNotIn("composer-updater:", updated)
             self.assertIn("composer-agent:", updated)
+            # The agent-only topology deploys from the agent itself, so it must
+            # keep the read-only file override to read the project's 0600 secrets.
+            self.assertIn("cap_drop:\n      - ALL", updated)
+            self.assertIn("cap_add:\n      - DAC_READ_SEARCH", updated)
             self.assertIn("composer_agent_state:", updated)
             self.assertIn('COMPOSER_AGENT_RESTART_SERVICES: "web,celery,caddy"', updated)
             self.assertIn(
