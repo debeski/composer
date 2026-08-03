@@ -1,15 +1,26 @@
 #!/bin/bash
 set -euo pipefail
 
+# Closing the terminal must not abort a run in flight. The ignored disposition
+# is inherited by `docker run`, so the client is not killed by the hangup and
+# the container keeps going; Ctrl+C still reaches composer and cancels.
+trap '' HUP
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 composer_self_image="${COMPOSER_SELF_IMAGE:-debeski/composer:latest}"
 
 # `update-self` replaces the legacy one-argument `--update` route.
 if [[ $# -eq 1 && ("${1:-}" == "update-self" || "${1:-}" == "--update") ]]; then
-    # Show current version from image's VERSION file
+    # Show current version from image's VERSION file. `docker image inspect`
+    # first, because `docker run` on a missing image pulls it — silently, since
+    # the progress goes to the stderr this used to discard.
     echo "=== Current Composer Version ==="
-    docker run --rm --entrypoint cat "${composer_self_image}" /app/VERSION 2>/dev/null || echo "  (not present locally)"
-    
+    if docker image inspect "${composer_self_image}" >/dev/null 2>&1; then
+        docker run --rm --entrypoint cat "${composer_self_image}" /app/VERSION
+    else
+        echo "  (not present locally)"
+    fi
+
     echo ""
     echo "Pulling latest composer image..."
     docker pull "${composer_self_image}"
@@ -19,6 +30,14 @@ if [[ $# -eq 1 && ("${1:-}" == "update-self" || "${1:-}" == "--update") ]]; then
     docker run --rm --entrypoint cat "${composer_self_image}" /app/VERSION
     
     exit 0
+fi
+
+# Announce the first-run download instead of letting `docker run` pull an
+# unnamed image while the command appears to hang.
+if ! docker image inspect "${composer_self_image}" >/dev/null 2>&1; then
+  echo "Composer image not installed locally — fetching ${composer_self_image}..."
+  docker pull "${composer_self_image}"
+  echo ""
 fi
 
 docker_flags=(--rm)

@@ -631,6 +631,10 @@ class ComposerAgent:
             exit_code = 1
         self._report_local_update(token, operation_id, exit_code)
         self.store.set_meta("last_reported_ack_token", token)
+        # The executor deployed it, so nothing refreshed the availability
+        # document — republish now instead of advertising the update the
+        # deployment just installed.
+        self.watch.maybe_check_availability(force=True)
 
     def process_local_update(self):
         # Executor mode: the executor owns the trigger-watched update; the agent

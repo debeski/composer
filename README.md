@@ -102,6 +102,8 @@ When `watch` runs inside the same Compose project it is updating, it excludes th
 
 `watch` can also **detect a newer image** and publish availability for another process to act on: `--check-image IMAGE` (repeatable) + `--availability-file PATH` (and `--check-interval SECONDS`, default 3600) poll the registry's tag digest vs the locally-pulled one and write `{ "available": …, "images": [ … ] }`. It only reports *readable* differences (an unreachable registry is "unknown", never a false positive), needs no registry access from the consumer, and re-checks right after an applied update. `COMPOSER_REGISTRY_TOKEN` covers private repositories.
 
+The published document also self-corrects after an update applied by **someone else** — `composer update` run from the project root, the executor in the hardened topology, a manual `docker compose pull`. Between scheduled checks the watched images' local digests are polled every 30s, and a moved digest re-publishes immediately, so an already-installed update stops being advertised within seconds instead of lingering until the next `--check-interval`. An unreadable local digest is "unknown" and never triggers a re-publish.
+
 For an available image, Composer also reads remote image labels once and publishes two independent, optional fields. `version` comes from `COMPOSER_VERSION_LABEL` (default `org.opencontainers.image.version`). `manifest` comes from `COMPOSER_RELEASE_MANIFEST_LABEL` (default `org.dlux.project.release-manifest`) when that label contains a schema-1 JSON object with any of `version`, `summary`, up to eight `highlights`, or an HTTPS `release_url`. Raw JSON remains supported, but CI/build pipelines should use `base64:<URL-safe-base64-JSON>` so quoting cannot corrupt the label while it crosses YAML, action inputs, and Docker build arguments. Missing or malformed metadata is omitted without affecting digest detection or deployment.
 
 With `--status-file` (or `--log-file PATH`), each update run also writes a clean, ANSI-free **console log** (`deploy-log.txt` beside the status file, fresh per run). Together with the deploy status, a proxy can render a live progress page + console while the app is being recreated and unreachable.
@@ -134,6 +136,24 @@ proceeding.
 ./start.sh stop web        # only the web service
 ./start.sh stop -v         # prompts: type y or yes
 ./start.sh stop -p -y      # no prompt, purges immediately
+```
+
+## surviving the terminal
+
+Closing the terminal (or dropping an SSH session) no longer aborts a run. On the
+hangup composer keeps going in the background, finishes the deploy — recreate,
+health checks, post-start hooks — and moves its console output to
+`composer-detached.log` in the deployment root (`COMPOSER_DETACH_LOG` overrides
+the path; an already-configured `COMPOSER_LOG_FILE` is reused). Compose itself
+runs in its own session, so the hangup never reaches it either.
+
+**Ctrl+C is still the way out**: an explicit interrupt is relayed to the running
+Compose command and exits `130`. `run`, `log`, and `logs` stay bound to the
+terminal — they are the terminal — and end with it.
+
+```bash
+./start.sh update            # close the terminal: the update finishes anyway
+tail -f composer-detached.log
 ```
 
 ## deploy status
@@ -170,7 +190,8 @@ gate is disabled. `--force` overrides a block.
 - **Version**: Every service gets `COMPOSER_VERSION`.
 - **Runtime override**: The generated Compose override is a private system-temp file, not a project-root file, so Composer supports host-owned and read-only project mounts without extra Linux capabilities.
 - **Service exclusions**: `COMPOSER_EXCLUDE_SERVICES` is a comma/space-separated service list omitted from generated runtime overrides, bulk pulls, bulk `up -d`, health checks, and diagnostics. Explicit `update SERVICE`, `pull SERVICE`, and `-u SERVICE` still target the named service.
-- **UI**: Progress stays on one status line.
+- **UI**: Progress stays on one status line. Image pulls (`update-self`, `update`/`-u`, and any `up` that has to fetch an image) draw an aggregated bar — `web ████████░░░░ 62% · 2/4 layers (2 cached) · 144MB/240MB` — built from the per-layer phases Docker reports. It names every image still in flight and drops each one as Compose reports it pulled, because Compose interleaves layers without saying which service they belong to; `(n cached)` counts the layers already on the host, so a full re-download is visible as `0 cached`. Progress only moves forward and reaches 100% when the pull actually reports it. Non-pull output keeps the plain status line, and a detached run logs coarse summaries instead of redrawing.
+- **Service circles**: ⚪ not seen · 🔵 updating · 🟡 starting · 🟢 healthy · 🔴 failed. A service stops showing 🟢 the moment its pull/recreate/restart starts — the health it last reported belongs to the container being replaced — and health monitoring resolves it back.
 - **Image**: Wrapper scripts target `debeski/composer:latest`, overridable with `COMPOSER_SELF_IMAGE`.
 
 ## why

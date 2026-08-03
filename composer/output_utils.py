@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 from .agent_protocol import redact_text
 
 from .constants import ANSI_ESCAPE_RE, ERROR_KEYWORDS, PROGRESS_KEYWORDS
+from .session import terminal_detached
 
 
 class OutputUtilsMixin:
@@ -106,7 +107,7 @@ class OutputUtilsMixin:
         self.last_progress_text = message
         self.last_progress_label = label
         self.append_console(f"[{label}] {message}")
-        print(f"\r\033[2K   [{label}] {message}", end="", flush=True)
+        self.print_progress_line(label, message)
 
     def emit_status(self, label: str, message: str):
         if message == self.last_progress_text:
@@ -114,4 +115,37 @@ class OutputUtilsMixin:
         self.last_progress_text = message
         self.last_progress_label = label
         self.append_console(f"[{label}] {message}")
+        self.print_progress_line(label, message)
+
+    def print_progress_line(self, label: str, message: str):
+        if terminal_detached():
+            print(f"   [{label}] {message}", flush=True)
+            return
         print(f"\r\033[2K   [{label}] {message}", end="", flush=True)
+
+    def finish_progress_line(self):
+        """Close the in-place status line so later output starts on its own row."""
+        if self.last_progress_text and not terminal_detached():
+            print("", flush=True)
+        self.last_progress_text = ""
+        self.last_progress_label = ""
+
+    def emit_pull_progress(self, label: str, raw_line: str):
+        """Draw the aggregated pull bar; anything that is not pull output keeps
+        the plain status line. A pull is the one step long enough to look like a
+        hang, so it gets a bar instead of the last line Docker happened to say."""
+        if not self.pull_progress.feed(raw_line):
+            self.emit_progress(label, raw_line)
+            return
+
+        summary = self.pull_progress.summary()
+        if summary == self.last_progress_text:
+            return
+        self.last_progress_text = summary
+        self.last_progress_label = label
+        self.append_console(f"[{label}] {summary}")
+        if terminal_detached():
+            # No terminal to repaint: the coarse summary keeps the log readable.
+            print(f"   [{label}] {summary}", flush=True)
+            return
+        print(f"\r\033[2K   [{label}] {self.pull_progress.bar()}", end="", flush=True)

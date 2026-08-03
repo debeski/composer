@@ -1,6 +1,7 @@
 from typing import List
 
 from .constants import (
+    ANSI_ESCAPE_RE,
     ERROR,
     IDLE,
     OK,
@@ -9,8 +10,10 @@ from .constants import (
     SERVICE_HEALTHY,
     SERVICE_NOT_SEEN,
     SERVICE_STARTING,
+    SERVICE_UPDATING,
 )
 from .service_selection import scoped_service_list
+from .session import terminal_detached
 
 
 RULE = "━" * 49
@@ -100,6 +103,14 @@ class RenderingMixin:
             else:
                 lines.append("")
 
+        if terminal_detached():
+            # No terminal to repaint: append a plain frame to the log instead.
+            self.last_render_line_count = 0
+            for line in lines:
+                print(ANSI_ESCAPE_RE.sub("", line))
+            print("", end="", flush=True)
+            return
+
         total_lines = max(self.last_render_line_count, len(lines))
 
         if self.last_render_line_count > 1:
@@ -118,6 +129,7 @@ class RenderingMixin:
     def service_icon(self, svc: str) -> str:
         return {
             SERVICE_NOT_SEEN: "⚪",
+            SERVICE_UPDATING: "🔵",
             SERVICE_STARTING: "🟡",
             SERVICE_HEALTHY: "🟢",
             SERVICE_FAILED: "🔴",

@@ -24,6 +24,9 @@ autorun.ini
 # Ignore Celery-related files
 celerybeat-*
 
+# Ignore console output left by a detached run
+composer-detached.log
+
 # Ignore sensetive files and secrets
 .env
 .key

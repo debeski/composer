@@ -629,6 +629,68 @@ def enable_executor(
     )
 
 
+# First dlux that ships the packaged runtime (dlux.updater.supervisor + the
+# dlux_reconcile command) — the migration must only be applied to an image at or
+# above this, or the compose would point at modules the image lacks.
+DLUX_PACKAGED_RUNTIME_MIN = (1, 6, 2)
+
+
+def parse_dlux_version(text):
+    """(major, minor, patch) parsed from a `dlux --version` line, or None."""
+    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", str(text or ""))
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+
+
+def _migrate_dlux_updater_command(contents: str, project_slug: str) -> str:
+    """Point an existing dlux-updater block at the packaged runtime (idempotent).
+
+    Two surgical edits, scoped to the dlux-owned block: the supervisor moved into
+    the dlux package, and a pre-migration ``dlux_reconcile`` guard was added so a
+    stale pinned release can't wedge the boot chain behind a maintenance screen.
+    """
+    if "  dlux-updater:\n" not in contents:
+        return contents
+    migrated = contents.replace("tools.dlux_runtime_supervisor", "dlux.updater.supervisor")
+    if "dlux_reconcile" not in migrated:
+        migrated = migrated.replace(
+            "python manage.py migrator && exec python manage.py dlux_update_worker",
+            "python manage.py dlux_reconcile; python manage.py migrator "
+            "&& exec python manage.py dlux_update_worker",
+        )
+    return migrated
+
+
+def migrate_dlux_updater(
+    project_dir: str = ".",
+    *,
+    compose_file: str = "",
+    apply: bool = False,
+    allow_unverified_dlux: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    """Migrate a deployed project's dlux-updater command to the packaged runtime.
+
+    Pure, deployment-safe file transform (marker-scoped, idempotent) plus the
+    shared validate/backup/write. It is the CALLER's job to confirm the project
+    image actually ships the packaged runtime before applying — the compose on a
+    pulled deployment has no requirements.txt to read, so the image itself (via
+    ``dlux --version``) is the only authoritative signal.
+    """
+    return _apply_stack_migration(
+        project_dir,
+        compose_file=compose_file,
+        transform=_migrate_dlux_updater_command,
+        redeploy_command="docker compose up -d --force-recreate dlux-updater",
+        apply=apply,
+        allow_unverified_dlux=allow_unverified_dlux,
+        include_diff=include_diff,
+        command_runner=command_runner,
+    )
+
+
 def run_enable_agent(args) -> int:
     try:
         result = enable_agent(

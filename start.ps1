@@ -3,9 +3,12 @@ $composerSelfImage = if ($env:COMPOSER_SELF_IMAGE) { $env:COMPOSER_SELF_IMAGE } 
 
 # `update-self` replaces the legacy one-argument `--update` route.
 if ($args.Count -eq 1 -and $args[0] -in @("update-self", "--update")) {
+    # `docker image inspect` first: `docker run` on a missing image pulls it,
+    # silently, since the progress goes to the stderr this used to discard.
     Write-Host "=== Current Composer Version ==="
-    $currentVersion = docker run --rm --entrypoint cat $composerSelfImage /app/VERSION 2>$null
-    if ($currentVersion) {
+    docker image inspect $composerSelfImage 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $currentVersion = docker run --rm --entrypoint cat $composerSelfImage /app/VERSION
         Write-Host "  $currentVersion"
     } else {
         Write-Host "  (not present locally)"
@@ -57,6 +60,16 @@ foreach ($candidate in @(".env", "secrets/.env", ".secrets/.env")) {
     "-e", "COMPOSER_INHERITED_SECRET_KEYS=$($secretKeys -join ',')"
   )
   break
+}
+
+# Announce the first-run download instead of letting `docker run` pull an
+# unnamed image while the command appears to hang.
+docker image inspect $composerSelfImage 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "Composer image not installed locally — fetching $composerSelfImage..."
+  docker pull $composerSelfImage
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  Write-Host ""
 }
 
 $dockerArgs = @("run", "-it", "--rm") + $secretArgs + @(

@@ -9,6 +9,9 @@ SERVICE_NOT_SEEN = "not_seen"
 SERVICE_STARTING = "starting"
 SERVICE_HEALTHY = "healthy"
 SERVICE_FAILED = "failed"
+# In flight: the container is being replaced, so the health it reported before
+# the update says nothing about the deployment being applied.
+SERVICE_UPDATING = "updating"
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 ERROR_KEYWORDS = (

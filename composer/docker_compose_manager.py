@@ -14,6 +14,7 @@ from .constants import (
     SERVICE_HEALTHY,
     SERVICE_NOT_SEEN,
     SERVICE_STARTING,
+    SERVICE_UPDATING,
 )
 from .output_utils import OutputUtilsMixin
 from .service_selection import scoped_service_list
@@ -301,6 +302,19 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         self.last_runtime_diagnostic = ""
         return True
 
+    def mark_services_updating(self, scope=None):
+        """Flag the services an operation is about to replace.
+
+        Their last known health was measured on the container being replaced, so
+        leaving them green through the pull and recreate reports a state that is
+        no longer being observed. Health monitoring resolves each one back.
+        """
+        targets = scoped_service_list(scope) or self.services
+        excluded = set(getattr(self, "exclude_services", []) or [])
+        for service in targets:
+            if service not in excluded:
+                self.service_state[service] = SERVICE_UPDATING
+
     def update_service_states(self) -> bool:
         ok, services, detail = self.get_compose_ps_entries()
         if not ok:
@@ -351,6 +365,8 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
 
         self.last_progress_text = ""
         self.last_progress_label = ""
+        # `up` pulls whatever is missing, so it gets the same bar.
+        self.pull_progress.reset()
         up_args = ["up", "-d"]
         if self.build_images:
             up_args.append("--build")
@@ -368,7 +384,7 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             up_args.extend(self.services)
         return self.run_docker_compose_streaming(
             up_args,
-            progress_callback=lambda line: self.emit_progress("Compose", line),
+            progress_callback=lambda line: self.emit_pull_progress("Compose", line),
         )
 
     def restart_containers(self) -> Tuple[bool, str, str]:
@@ -459,7 +475,8 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             pull_args.extend(self.services)
         self.last_progress_text = ""
         self.last_progress_label = ""
+        self.pull_progress.reset()
         return self.run_docker_compose_streaming(
             pull_args,
-            progress_callback=lambda line: self.emit_progress("Pull", line),
+            progress_callback=lambda line: self.emit_pull_progress("Pull", line),
         )

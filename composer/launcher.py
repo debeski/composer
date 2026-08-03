@@ -30,9 +30,11 @@ from .constants import ERROR, EXECUTOR_SERVICE, IDLE, OK, RUNNING
 from .docker_compose_manager import DockerComposeMixin
 from .health_monitor import HealthMonitorMixin
 from .post_start_hooks import PostStartHooksMixin
+from .progress import PullProgress
 from .rendering import RenderingMixin
 from .secrets_manager import SecretsMixin
 from .service_selection import parse_service_list
+from .session import install_hangup_guard
 from .status_writer import StatusWriterMixin
 from .version import read_composer_version
 from .version_gate import VersionGateMixin
@@ -40,6 +42,11 @@ from .version_gate import VersionGateMixin
 
 AGENT_SERVICE = "composer-agent"
 DEFAULT_SELF_IMAGE = "debeski/composer:latest"
+
+# Commands whose whole point is the terminal they were typed in: they end with
+# it. Everything else (deploys, updates, restarts, the resident roles) keeps
+# running when the terminal closes and only stops on Ctrl+C.
+TERMINAL_BOUND_COMMANDS = {"run", "log", "logs"}
 
 
 class DockerComposeLauncher(
@@ -80,6 +87,7 @@ class DockerComposeLauncher(
         self.assume_yes = False
         self.last_progress_text = ""
         self.last_progress_label = ""
+        self.pull_progress = PullProgress()
         self.last_runtime_diagnostic = ""
         self.last_render_line_count = 0
         self.compose_runtime_override: Optional[Path] = None
@@ -190,9 +198,16 @@ class DockerComposeLauncher(
         image = os.environ.get("COMPOSER_SELF_IMAGE") or DEFAULT_SELF_IMAGE
         print(f"Current Composer version: {self.composer_version}")
         print(f"Pulling {image}...")
-        code = self.run_command_interactive(["docker", "pull", image])
-        if code != 0:
-            sys.exit(code)
+        self.pull_progress.reset()
+        self.last_progress_text = ""
+        ok, out, err = self.run_command_streaming(
+            ["docker", "pull", image],
+            progress_callback=lambda line: self.emit_pull_progress("Pull", line),
+        )
+        self.finish_progress_line()
+        if not ok:
+            print(f"✖ Failed to pull {image}\n{self.summarize_output(out)}", file=sys.stderr)
+            sys.exit(1)
         ok, out, err = self.run_command(
             ["docker", "run", "--rm", "--entrypoint", "cat", image, "/app/VERSION"],
             timeout=30,
@@ -380,6 +395,8 @@ class DockerComposeLauncher(
     def run(self):
         try:
             argv = sys.argv[1:]
+            if not argv or argv[0] not in TERMINAL_BOUND_COMMANDS:
+                install_hangup_guard()
             if any(
                 token == "-uo" or token.startswith("--update-only")
                 for token in argv
@@ -526,6 +543,9 @@ class DockerComposeLauncher(
                 self.sections["secrets"] = OK
 
                 self.sections["compose"] = RUNNING
+                self.mark_services_updating(
+                    self.restart_service or self.restart_services or None
+                )
                 self.render()
                 ok, out, err = self.restart_containers()
                 if not ok:
@@ -570,6 +590,7 @@ class DockerComposeLauncher(
 
             if self.update_images:
                 self.sections["pull"] = RUNNING
+                self.mark_services_updating(self.pull_service)
                 self.write_status("pulling")
                 self.render()
                 ok, out, err = self.pull_images()
@@ -598,6 +619,7 @@ class DockerComposeLauncher(
                     sys.exit(1)
 
             self.sections["compose"] = RUNNING
+            self.mark_services_updating(self.up_service)
             self.write_status("recreating")
             self.render()
             if not self.discover_services():

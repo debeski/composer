@@ -253,5 +253,57 @@ class AgentInstallerTests(unittest.TestCase):
         self.assertEqual(json.loads(output.call_args.args[0]), result)
 
 
+DLUX_UPDATER_LEGACY = '''name: demo_project
+
+services:
+  web:
+    image: ${WEB_IMAGE:-demo:latest}
+    command: ["python", "-m", "tools.dlux_runtime_supervisor", "--", "gunicorn"]
+  dlux-updater:
+    image: ${WEB_IMAGE:-demo:latest}
+    command: ["python", "-m", "tools.dlux_runtime_supervisor", "--no-watch", "--", "bash", "-c", "python manage.py migrator && exec python manage.py dlux_update_worker"]
+
+volumes:
+  dlux_runtime:
+'''
+
+
+class DluxUpdaterMigrationTests(unittest.TestCase):
+    def test_parse_dlux_version(self):
+        from composer.agent_installer import parse_dlux_version
+
+        self.assertEqual(parse_dlux_version("1.6.2"), (1, 6, 2))
+        self.assertEqual(parse_dlux_version("dlux 1.7\n"), (1, 7, 0))
+        self.assertIsNone(parse_dlux_version("nope"))
+
+    def test_transform_is_surgical_and_idempotent(self):
+        from composer.agent_installer import _migrate_dlux_updater_command
+
+        migrated = _migrate_dlux_updater_command(DLUX_UPDATER_LEGACY, "demo_project")
+        self.assertNotIn("tools.dlux_runtime_supervisor", migrated)
+        self.assertIn('"python", "-m", "dlux.updater.supervisor"', migrated)
+        self.assertIn("python manage.py dlux_reconcile; python manage.py migrator", migrated)
+        # Idempotent — no double reconcile, no re-rename.
+        self.assertEqual(_migrate_dlux_updater_command(migrated, "demo_project"), migrated)
+        self.assertEqual(migrated.count("dlux_reconcile"), 1)
+
+    def test_migration_reports_legacy_command_as_a_change(self):
+        from composer.agent_installer import migrate_dlux_updater
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "compose.yml").write_text(DLUX_UPDATER_LEGACY, encoding="utf-8")
+            self.assertEqual(migrate_dlux_updater(str(root), apply=False)["files"], ["compose.yml"])
+
+    def test_already_current_compose_is_a_noop(self):
+        from composer.agent_installer import migrate_dlux_updater, _migrate_dlux_updater_command
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = _migrate_dlux_updater_command(DLUX_UPDATER_LEGACY, "demo_project")
+            (root / "compose.yml").write_text(current, encoding="utf-8")
+            self.assertEqual(migrate_dlux_updater(str(root), apply=False)["files"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

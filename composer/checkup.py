@@ -250,6 +250,20 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
         return _result(OK, "proxy-routes", "No legacy pgAdmin proxy routes detected.")
 
+    def _dlux_runtime_version(self):
+        """(major, minor, patch) of the dlux baked into the project image, read
+        from the image via `dlux --version`. Uses `run --no-deps` (a fresh
+        container) so it works even when dlux-updater is crash-looping, and never
+        starts db/redis. Returns None when it can't be determined."""
+        from .agent_installer import parse_dlux_version
+
+        ok, out, _err = self.run_docker_compose(
+            ["run", "--rm", "--no-deps", "--entrypoint", "python", "-T",
+             "dlux-updater", "-m", "dlux", "--version"],
+            timeout=60,
+        )
+        return parse_dlux_version(out) if ok else None
+
     def _resident_agent_version(self) -> Optional[str]:
         if "composer-agent" not in set(self.services):
             return None
@@ -340,6 +354,36 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 )
             except Exception:
                 needs_secret_cap = False
+        # The dlux-owned updater block may carry the legacy runtime wiring (the
+        # retired tools supervisor path / no pre-migration reconcile). Detect it
+        # from the compose (a dry-run reports a file change), then gate on the
+        # dlux version the IMAGE actually ships — the only authoritative signal on
+        # a pulled deployment, which has no requirements.txt.
+        needs_updater_migration = False
+        updater_migration_blocked = ""
+        if "dlux-updater" in set(self.services):
+            from .agent_installer import DLUX_PACKAGED_RUNTIME_MIN, migrate_dlux_updater
+
+            try:
+                legacy_present = bool(
+                    migrate_dlux_updater(".", compose_file=args.file or "", apply=False).get("files")
+                )
+            except Exception:
+                legacy_present = False
+            if legacy_present:
+                runtime = self._dlux_runtime_version()
+                if runtime is not None and runtime >= DLUX_PACKAGED_RUNTIME_MIN:
+                    needs_updater_migration = True
+                else:
+                    got = ".".join(map(str, runtime)) if runtime else "unknown"
+                    minimum = ".".join(map(str, DLUX_PACKAGED_RUNTIME_MIN))
+                    updater_migration_blocked = (
+                        f"dlux-updater uses the legacy runtime, but the project image ships dlux "
+                        f"{got} (needs >= {minimum} for the packaged runtime). Update the project "
+                        "image, then re-run 'composer check --fix'."
+                    )
+        if updater_migration_blocked:
+            fixes.append(_result(WARN, "dlux-updater-runtime", updater_migration_blocked))
         obsolete = sorted(OBSOLETE_SERVICES.intersection(self.services))
         proxy_inspection = inspect_legacy_proxy_routes(".")
         if proxy_inspection["unsupported"]:
@@ -353,7 +397,8 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
             return fixes
         proxy_routes = proxy_inspection["recognized"]
-        if not legacy and not obsolete and not proxy_routes and not needs_hardening and not needs_secret_cap:
+        if (not legacy and not obsolete and not proxy_routes and not needs_hardening
+                and not needs_secret_cap and not needs_updater_migration):
             return fixes
         consequences = []
         if obsolete:
@@ -396,6 +441,12 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 "Add cap_add: DAC_READ_SEARCH to composer-executor so it can read the "
                 "project's 0600 .secrets/.env to deploy (read-only override; fixes inline "
                 "updates failing the secrets guard)."
+            )
+        if needs_updater_migration:
+            consequences.append(
+                "Migrate the dlux-updater command to the packaged runtime "
+                "(python -m dlux.updater.supervisor) and add the pre-migration dlux_reconcile "
+                "guard, so a stale runtime release can't wedge the site in maintenance."
             )
         consequences.extend(
             [
@@ -506,6 +557,21 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:secrets-read-cap", f"Capability repair failed: {exc}"))
+        if needs_updater_migration:
+            from .agent_installer import AgentInstallError, migrate_dlux_updater
+
+            try:
+                outcome = migrate_dlux_updater(".", compose_file=args.file or "", apply=True)
+                fixes.append(
+                    _result(
+                        OK,
+                        "fix:dlux-updater-runtime",
+                        "Migrated dlux-updater to the packaged runtime + reconcile guard. "
+                        "Recreate it to apply. Backup: " + (outcome.get("backup_root") or "n/a"),
+                    )
+                )
+            except AgentInstallError as exc:
+                fixes.append(_result(FAIL, "fix:dlux-updater-runtime", f"Updater migration failed: {exc}"))
         return fixes
 
     @staticmethod

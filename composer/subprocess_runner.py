@@ -1,7 +1,11 @@
+import os
+import signal
 import subprocess
 import sys
 import time
 from typing import Dict, List, Optional, Tuple
+
+from .session import restore_default_signals
 
 
 class SubprocessRunnerMixin:
@@ -10,6 +14,35 @@ class SubprocessRunnerMixin:
             return subprocess.list2cmdline(cmd)
         return cmd
 
+    def _detached_child_kwargs(self) -> Dict[str, bool]:
+        """Run Compose in its own session so a terminal hangup can't kill it.
+
+        Ctrl+C no longer reaches the child through the terminal, so an explicit
+        interrupt is relayed by `_interrupt_child` instead.
+        """
+        if sys.platform == "win32":
+            return {}
+        return {"start_new_session": True}
+
+    def _interrupt_child(self, process) -> None:
+        if process.poll() is not None:
+            return
+        if sys.platform != "win32":
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGINT)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=2)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
     def run_command(
         self,
         cmd: List[str],
@@ -17,21 +50,32 @@ class SubprocessRunnerMixin:
         env: Optional[Dict[str, str]] = None,
     ) -> Tuple[bool, str, str]:
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 self._prepare_command(cmd),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
                 shell=sys.platform == "win32",
                 env=env,
+                **self._detached_child_kwargs(),
             )
-            return result.returncode == 0, result.stdout, result.stderr
-        except KeyboardInterrupt:
-            raise
-        except subprocess.TimeoutExpired as e:
-            return False, e.stdout or "", f"Command timed out after {timeout} seconds"
         except Exception as e:
             return False, "", str(e)
+
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, _ = process.communicate()
+            return False, stdout or "", f"Command timed out after {timeout} seconds"
+        except KeyboardInterrupt:
+            self._interrupt_child(process)
+            raise
+        except Exception as e:
+            self._interrupt_child(process)
+            return False, "", str(e)
+
+        return process.returncode == 0, stdout, stderr
 
     def run_command_interactive(
         self,
@@ -43,12 +87,17 @@ class SubprocessRunnerMixin:
         Used by the `run` subcommand so the user can drive interactive programs
         (shells, REPLs, prompts). Returns the child's exit code (127 if the
         executable is missing).
+
+        These commands stay bound to the terminal: they keep the foreground
+        process group and get default hangup handling back, so closing the
+        terminal ends them like any other interactive program.
         """
         try:
             result = subprocess.run(
                 self._prepare_command(cmd),
                 shell=sys.platform == "win32",
                 env=env,
+                preexec_fn=None if sys.platform == "win32" else restore_default_signals,
             )
             return result.returncode
         except KeyboardInterrupt:
@@ -77,6 +126,7 @@ class SubprocessRunnerMixin:
                 shell=sys.platform == "win32",
                 env=env,
                 bufsize=1,
+                **self._detached_child_kwargs(),
             )
         except Exception as e:
             return False, "", str(e)
@@ -101,12 +151,7 @@ class SubprocessRunnerMixin:
 
                 time.sleep(0.1)
         except KeyboardInterrupt:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+            self._interrupt_child(process)
             raise
         finally:
             remainder = process.stdout.read() if process.stdout else ""

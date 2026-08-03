@@ -131,7 +131,9 @@ class UpdateSelfCommandTests(unittest.TestCase):
     def test_update_self_pulls_and_reports_the_deployer_image(self):
         launcher = DockerComposeLauncher()
         with (
-            patch.object(launcher, "run_command_interactive", return_value=0) as pull,
+            patch.object(
+                launcher, "run_command_streaming", return_value=(True, "", "")
+            ) as pull,
             patch.object(
                 launcher,
                 "run_command",
@@ -141,7 +143,10 @@ class UpdateSelfCommandTests(unittest.TestCase):
         ):
             launcher.handle_update_self([])
 
-        pull.assert_called_once_with(["docker", "pull", "debeski/composer:latest"])
+        self.assertEqual(
+            pull.call_args.args[0], ["docker", "pull", "debeski/composer:latest"]
+        )
+        self.assertIsNotNone(pull.call_args.kwargs["progress_callback"])
         self.assertEqual(
             version.call_args.args[0],
             [
@@ -154,6 +159,33 @@ class UpdateSelfCommandTests(unittest.TestCase):
                 "/app/VERSION",
             ],
         )
+
+    def test_update_self_shows_the_pull_bar_and_stops_on_failure(self):
+        launcher = DockerComposeLauncher()
+        drawn = io.StringIO()
+
+        def stream(cmd, **kwargs):
+            for line in (
+                "latest: Pulling from debeski/composer",
+                "9824c27679d3: Pulling fs layer",
+                "9824c27679d3: Pull complete",
+            ):
+                kwargs["progress_callback"](line)
+            return False, "no space left on device", ""
+
+        with (
+            patch.object(launcher, "run_command_streaming", side_effect=stream),
+            patch.object(launcher, "run_command") as version,
+            patch("sys.stdout", new=drawn),
+            patch("sys.stderr", new_callable=io.StringIO) as errors,
+            self.assertRaises(SystemExit) as exit_code,
+        ):
+            launcher.handle_update_self([])
+
+        self.assertEqual(exit_code.exception.code, 1)
+        self.assertIn("█", drawn.getvalue())
+        self.assertIn("no space left on device", errors.getvalue())
+        version.assert_not_called()
 
     def test_update_self_and_legacy_alias_dispatch_before_flat_update(self):
         for argv in (["composer", "update-self"], ["composer", "--update"]):

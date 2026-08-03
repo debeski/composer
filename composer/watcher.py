@@ -35,6 +35,9 @@ from .service_selection import join_service_list, parse_service_list
 
 
 DEFAULT_RELEASE_MANIFEST_LABEL = "org.dlux.project.release-manifest"
+# How often the watched images' local digests are polled between scheduled
+# registry checks, so an update deployed elsewhere clears promptly.
+LOCAL_DIGEST_PROBE_SECONDS = 30.0
 _MAX_MANIFEST_LABEL_BYTES = 16384
 _MAX_ENCODED_MANIFEST_LABEL_BYTES = 24576
 
@@ -190,12 +193,13 @@ def _write_availability_payload(path: str, payload: dict):
     os.replace(tmp, target)
 
 
-def write_availability(path: str, images: List[str]):
+def write_availability(path: str, images: List[str]) -> dict:
     payload = availability_payload(images)
     try:
         _write_availability_payload(path, payload)
     except OSError:
         pass
+    return payload
 
 
 _COMPOSE_INTERPOLATION = re.compile(
@@ -467,14 +471,52 @@ class WatchRuntime:
         )
         self.availability_enabled = bool(self.check_images and self.availability_file)
         self.next_check = 0.0
+        self.local_digests: dict = {}
+        self.local_probe_interval = LOCAL_DIGEST_PROBE_SECONDS
+        self.next_local_probe = 0.0
         self.last_token = _read_ack_token(self.ack)
 
     def maybe_check_availability(self, force=False):
         if not self.availability_enabled:
             return
-        if force or time.monotonic() >= self.next_check:
-            write_availability(self.availability_file, self.check_images)
+        due = force or time.monotonic() >= self.next_check
+        if not due:
+            due = self.local_image_changed()
+        if due:
+            payload = write_availability(self.availability_file, self.check_images)
+            self.record_local_digests(payload)
             self.next_check = time.monotonic() + self.check_interval
+
+    def record_local_digests(self, payload: Optional[dict]):
+        for entry in (payload or {}).get("images") or []:
+            image = entry.get("image")
+            digest = entry.get("local_digest")
+            if image and digest:
+                self.local_digests[image] = digest
+
+    def local_image_changed(self) -> bool:
+        """Did a watched image move under us since the last availability check?
+
+        An update deployed by anything other than this loop — the deployer CLI
+        (`composer update` from the project root), the executor in the hardened
+        topology, a manual `docker compose pull` — leaves the published document
+        advertising an update that is already installed until the next scheduled
+        check (an hour by default). Polling the local digest turns that into a
+        few seconds. An unreadable digest is *unknown*, never a change: a
+        transient Docker error must not trigger a re-publish.
+        """
+        now = time.monotonic()
+        if now < self.next_local_probe:
+            return False
+        self.next_local_probe = now + self.local_probe_interval
+        for image in self.check_images:
+            known = self.local_digests.get(image)
+            if not known:
+                continue
+            current = _local_repo_digest(image)
+            if current and current != known:
+                return True
+        return False
 
     def pending_request(self):
         token = _read_request_token(self.trigger)

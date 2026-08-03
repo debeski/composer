@@ -275,6 +275,57 @@ class CheckupRunTests(unittest.TestCase):
             any(f["name"] == "fix:secrets-read-cap" and f["level"] == OK for f in fixes)
         )
 
+    def test_fix_migrates_legacy_dlux_updater_command(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "dlux-updater", "composer-agent", "composer-executor", "docker-socket-proxy"]
+        launcher.active_compose_files = ["compose.yml"]
+        calls = []
+
+        def fake_migrate(path, compose_file="", apply=False, **kw):
+            calls.append(apply)
+            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xpose/upd"}
+
+        with (
+            patch("composer.agent_installer.migrate_dlux_updater", side_effect=fake_migrate),
+            patch("composer.agent_installer.enable_executor", return_value={"files": []}),
+            patch.object(launcher, "_dlux_runtime_version", return_value=(1, 6, 2)),
+            patch(
+                "composer.checkup.inspect_legacy_proxy_routes",
+                return_value={"unsupported": [], "recognized": []},
+            ),
+            patch("composer.checkup.confirm", return_value=True),
+        ):
+            fixes = launcher._maybe_fix(_args(fix=True), [])
+
+        self.assertIn(True, calls)  # applied
+        self.assertTrue(
+            any(f["name"] == "fix:dlux-updater-runtime" and f["level"] == OK for f in fixes)
+        )
+
+    def test_fix_defers_updater_migration_when_image_is_too_old(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "dlux-updater", "composer-agent", "composer-executor", "docker-socket-proxy"]
+        launcher.active_compose_files = ["compose.yml"]
+
+        with (
+            patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": ["compose.yml"]}),
+            patch("composer.agent_installer.enable_executor", return_value={"files": []}),
+            patch.object(launcher, "_dlux_runtime_version", return_value=(1, 5, 11)),
+            patch(
+                "composer.checkup.inspect_legacy_proxy_routes",
+                return_value={"unsupported": [], "recognized": []},
+            ),
+            patch("composer.checkup.confirm", return_value=True),
+        ):
+            fixes = launcher._maybe_fix(_args(fix=True), [])
+
+        # Blocked: surfaced as a WARN, never applied (no fix:dlux-updater-runtime OK).
+        self.assertTrue(any(
+            f["name"] == "dlux-updater-runtime" and f["level"] == WARN
+            and "update the project image" in f["message"].lower() for f in fixes
+        ))
+        self.assertFalse(any(f["name"] == "fix:dlux-updater-runtime" for f in fixes))
+
     def test_fix_removes_obsolete_services(self):
         launcher = DockerComposeLauncher()
         launcher.services = ["web", "composer-agent", "docker-socket-proxy", "pgadmin", "db_backup"]
