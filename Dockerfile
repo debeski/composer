@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY composer /app/composer
 COPY VERSION /app/VERSION
+# Reference wrappers for `composer check`: a deployment compares its start.sh /
+# start.ps1 against the composer it is actually running, with no registry call.
+COPY start.sh start.ps1 wrappers-history.json /app/wrappers/
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

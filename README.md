@@ -35,7 +35,7 @@ New deployments run the hardened resident pair: `composer agent` plus
 
 ## the surface
 
-`composer run [-m] [-s] [-F] [-f FILE] [-d] <service> <command...>` runs a command inside a service instead of typing `docker exec`/`docker run` by hand. Defaults to `docker compose exec <service> …`; `-m`/`--manage` prepends `python manage.py` (e.g. `./start.sh run -m web migrate --noinput`), `-s`/`--shell` runs the command via `sh -c` so pipes/`&&` work, and `-F`/`--fresh` uses a one-off `docker compose run --rm`. TTY is auto-detected. See `composer run --help`.
+`composer run [-m] [-s] [-F] [-f FILE] [-d] <service> <command...>` runs a command inside a service instead of typing `docker exec`/`docker run` by hand. Defaults to `docker compose exec <service> …`; `-m`/`--manage` prepends `python manage.py` (e.g. `./start.sh run -m web migrate --noinput`), `-s`/`--shell` runs the command via `sh -c` so pipes/`&&` work, and `-F`/`--fresh` uses a one-off `docker compose run --rm`. TTY is auto-detected: a terminal gets an interactive session, a pipe gets `-T` and reads your piped stdin (`echo yes | ./start.sh run -m web collectstatic`). Note the wrapper nests two ptys, so type-ahead into an interactive prompt is dropped until the inner container attaches — prefer `--noinput` in scripts. See `composer run --help`.
 
 `composer restart [-f FILE] [-d] [--status-file PATH] [service]` restarts running containers through `docker compose restart`, then waits for their health checks. Containers are preserved and post-start tasks are skipped. Pass a service to restart only that service. `composer -r ...` and `composer --restart ...` remain short leading aliases. See `composer restart --help`.
 
@@ -155,6 +155,54 @@ terminal — they are the terminal — and end with it.
 ./start.sh update            # close the terminal: the update finishes anyway
 tail -f composer-detached.log
 ```
+
+## wrapper versioning
+
+Composer owns `start.sh` and `start.ps1`. Every line in them is composer's own
+invocation contract — the self image, `-i`/`-t`, the `--env-file` secrets
+handoff, the `update-self` route — and composer is the only component still
+running in a project after it is created: the DLUX scaffold writes the wrappers
+once and then refuses to overwrite them. DLUX's `scaffold_templates/project/`
+copies are mirrors of the files here, not the source.
+
+Both carry a marker on line 2:
+
+```bash
+# composer-wrapper: 1
+```
+
+It is a plain integer, bumped only when the wrapper bytes change — deliberately
+**not** composer's release version. Composer ships far more often than the
+wrapper does, and a marker that tracked it would report every project stale
+after every release until nobody read the warning.
+
+`composer check` compares the project's wrappers against the copies baked into
+`/app/wrappers/` in the image it is running, so verification needs no registry
+and works air-gapped. `wrappers-history.json` records the sha256 of every
+published version, which is what separates *old but pristine* from *edited
+locally*:
+
+| Reported | Meaning |
+| --- | --- |
+| `is at wrapper version N` | matches the image byte for byte |
+| `is wrapper version N, this composer ships M` | stale; `check --fix` updates it |
+| `predates wrapper versioning` | older than the marker itself; `check --fix` updates it |
+| `contents do not match what that version shipped` | local edits — diff before replacing |
+| `newer than the M this composer ships` | the **image** is behind; run `update-self`, not `--fix` |
+
+`check --fix` archives the current file under `.xpose/composer-check/<stamp>/`
+and then swaps it via `os.replace`, so a `start.sh` that is executing the very
+check that replaces it keeps reading the file it was launched from.
+
+```bash
+./start.sh check          # report drift
+./start.sh check --fix    # update, archiving the old copy first
+```
+
+To publish a new wrapper version: edit both files, bump the marker in both, run
+the test suite (it prints the sha256 to record), add those to
+`wrappers-history.json`, and re-copy both into DLUX's
+`scaffold_templates/project/`.
 
 ## deploy status
 

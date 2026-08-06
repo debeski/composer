@@ -1,4 +1,5 @@
 #!/bin/bash
+# composer-wrapper: 1
 set -euo pipefail
 
 # Closing the terminal must not abort a run in flight. The ignored disposition
@@ -40,9 +41,12 @@ if ! docker image inspect "${composer_self_image}" >/dev/null 2>&1; then
   echo ""
 fi
 
-docker_flags=(--rm)
+# Attach stdin unconditionally, so a pipe (`echo yes | ./start.sh run -m web
+# migrate`) reaches the container instead of the container getting no stdin at
+# all. Allocate a TTY only when there is one; `-t` on a redirected stream fails.
+docker_flags=(-i --rm)
 if [[ -t 0 && -t 1 ]]; then
-  docker_flags=(-it "${docker_flags[@]}")
+  docker_flags+=(-t)
 fi
 
 secret_flags=()
@@ -70,8 +74,10 @@ for candidate in .env secrets/.env .secrets/.env; do
   break
 done
 
+# macOS ships bash 3.2, where `set -u` rejects an empty array expansion, so a
+# project with no secrets file cannot use the plain "${secret_flags[@]}" form.
 docker run "${docker_flags[@]}" \
-  "${secret_flags[@]}" \
+  ${secret_flags[@]+"${secret_flags[@]}"} \
   -v "${script_dir}:${script_dir}" \
   -w "${script_dir}" \
   -v /var/run/docker.sock:/var/run/docker.sock \

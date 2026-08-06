@@ -23,8 +23,14 @@ Add two repository secrets (Settings → Secrets and variables → Actions):
    changes. The release notes are extracted from this exact section.
 2. Bump `VERSION` to the same `X.Y.Z` (no `v` prefix). The workflow **fails** if
    the tag and `VERSION` disagree.
-3. Commit both on `main`.
-4. Tag and push:
+3. **If `start.sh` or `start.ps1` changed in this release**, bump the
+   `# composer-wrapper: N` marker in *both* (they share one version), record the
+   new sha256s in `wrappers-history.json` — the test suite prints them on
+   failure — and re-copy both files into `dlux/scaffold_templates/project/` in
+   the django-lux repo, updating the expected version in its scaffold test.
+   Without the bump, deployments cannot tell a stale wrapper from an edited one.
+4. Commit both on `main`.
+5. Tag and push:
 
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z

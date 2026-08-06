@@ -1,6 +1,7 @@
 import os
 from typing import Any, Dict, List, Optional
 
+from . import wrappers
 from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
@@ -292,6 +293,73 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             fix="Update the resident agent's image so both match, if that matters for the change you're shipping.",
         )
 
+    def _check_wrappers(self) -> List[Dict[str, Any]]:
+        """Report drift between the project's launcher wrappers and this image.
+
+        Composer owns start.sh/start.ps1 (see `composer/wrappers.py`), and the
+        image it runs from carries the reference copies, so this is the one
+        check that needs neither the stack up nor a network.
+        """
+        results: List[Dict[str, Any]] = []
+        for entry in wrappers.inspect_wrappers("."):
+            name = entry["name"]
+            baked = entry["baked_version"]
+            found = entry["version"]
+            status = entry["status"]
+            if status == wrappers.CURRENT:
+                results.append(_result(OK, f"wrapper:{name}", f"{name} is at wrapper version {baked}."))
+            elif status == wrappers.MISSING:
+                results.append(
+                    _result(
+                        WARN,
+                        f"wrapper:{name}",
+                        f"{name} is absent; this project cannot be launched the way the others are.",
+                        fix="Run 'composer check --fix' to write the copy baked into this image.",
+                    )
+                )
+            elif status == wrappers.UNVERSIONED:
+                results.append(
+                    _result(
+                        WARN,
+                        f"wrapper:{name}",
+                        f"{name} predates wrapper versioning and differs from version {baked}.",
+                        fix="Run 'composer check --fix'; the current file is archived under .xpose/ first.",
+                    )
+                )
+            elif status == wrappers.STALE:
+                results.append(
+                    _result(
+                        WARN,
+                        f"wrapper:{name}",
+                        f"{name} is wrapper version {found}, this composer ships {baked}.",
+                        fix="Run 'composer check --fix' to update it.",
+                    )
+                )
+            elif status == wrappers.MODIFIED:
+                results.append(
+                    _result(
+                        WARN,
+                        f"wrapper:{name}",
+                        f"{name} declares wrapper version {found} but its contents do not match "
+                        "what that version shipped — it has local edits.",
+                        fix=(
+                            "Diff it against /app/wrappers/ inside the composer image. "
+                            "'composer check --fix' replaces it, archiving your copy under .xpose/."
+                        ),
+                    )
+                )
+            elif status == wrappers.AHEAD:
+                results.append(
+                    _result(
+                        WARN,
+                        f"wrapper:{name}",
+                        f"{name} is wrapper version {found}, newer than the {baked} this composer "
+                        "ships — the image is behind, not the wrapper.",
+                        fix="Run './start.sh update-self'. Do not 'check --fix' this; it would downgrade the wrapper.",
+                    )
+                )
+        return results
+
     def _run_deep(self, service: str, command: str) -> Dict[str, Any]:
         argv = command.split()
         ok, out, err = self.run_docker_compose(["exec", "-T", service] + argv, timeout=120)
@@ -315,6 +383,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         results.append(self._check_compose_files())
         results.append(self._check_compose_parses())
         results.append(self._check_secrets())
+        results.extend(self._check_wrappers())
         if self.services:
             results.append(self._check_required_vars())
             results.append(self._check_topology())
@@ -384,6 +453,11 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     )
         if updater_migration_blocked:
             fixes.append(_result(WARN, "dlux-updater-runtime", updater_migration_blocked))
+        # An AHEAD wrapper is deliberately not fixable: the image is the stale
+        # side there, and writing the baked copy would downgrade the project.
+        stale_wrappers = [
+            entry for entry in wrappers.inspect_wrappers(".") if entry["status"] in wrappers.FIXABLE
+        ]
         obsolete = sorted(OBSOLETE_SERVICES.intersection(self.services))
         proxy_inspection = inspect_legacy_proxy_routes(".")
         if proxy_inspection["unsupported"]:
@@ -398,9 +472,21 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             return fixes
         proxy_routes = proxy_inspection["recognized"]
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
-                and not needs_secret_cap and not needs_updater_migration):
+                and not needs_secret_cap and not needs_updater_migration
+                and not stale_wrappers):
             return fixes
         consequences = []
+        if stale_wrappers:
+            consequences.append(
+                "Replace launcher wrappers with the copies baked into this composer image: "
+                + ", ".join(f"{entry['name']} ({entry['status']})" for entry in stale_wrappers)
+                + "."
+            )
+            if any(entry["status"] == wrappers.MODIFIED for entry in stale_wrappers):
+                consequences.append(
+                    "One or more of those wrappers carries local edits; the current file is "
+                    "archived under .xpose/ before it is replaced."
+                )
         if obsolete:
             consequences.append(
                 "Remove Compose service definitions: "
@@ -461,6 +547,28 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         ):
             fixes.append(_result(WARN, "fix", "Changes declined."))
             return fixes
+
+        if stale_wrappers:
+            from pathlib import Path
+
+            from .stack_cleanup import _archive_root
+
+            root = wrappers.baked_root()
+            try:
+                archive = _archive_root(Path("."))
+                for entry in stale_wrappers:
+                    wrappers.install_wrapper(Path("."), entry["name"], root, archive)
+                fixes.append(
+                    _result(
+                        OK,
+                        "fix:wrappers",
+                        "Updated "
+                        + ", ".join(entry["name"] for entry in stale_wrappers)
+                        + f" to wrapper version {stale_wrappers[0]['baked_version']}. Backup: {archive}",
+                    )
+                )
+            except OSError as exc:
+                fixes.append(_result(FAIL, "fix:wrappers", f"Could not update the wrappers: {exc}"))
 
         if obsolete or proxy_routes:
             from .stack_cleanup import StackCleanupError, remove_obsolete_services

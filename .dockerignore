@@ -46,8 +46,6 @@ celerybeat-*
 .env
 .key
 secrets.enc
-start.sh
-start.ps1
 tracker.md
 .secrets/
 .xpose/
