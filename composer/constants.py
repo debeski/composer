@@ -51,4 +51,7 @@ DEFAULT_RESIDENT_SERVICE = "composer-updater"
 # The privileged Docker-authority role; the network-facing agent holds none.
 EXECUTOR_SERVICE = "composer-executor"
 INHERITED_SECRET_KEYS_ENV = "COMPOSER_INHERITED_SECRET_KEYS"
+# Service label naming a command composer runs once the stack is healthy. Compose
+# ignores it, unlike a native post_start hook, so there is exactly one runner.
+POST_START_LABEL = "org.dlux.post-start"
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

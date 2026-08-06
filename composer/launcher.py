@@ -65,7 +65,11 @@ class DockerComposeLauncher(
         self.composer_version = read_composer_version()
         self.loaded_secrets: List[str] = []
         self.debug_mode = False
+        # `-nm`: the hook still runs, the migrator just skips schema work and
+        # still collects static. Distinct from skip_post_start, which suppresses
+        # the hook entirely for runs that do not target the application service.
         self.no_migrate = False
+        self.skip_post_start = False
         self.force_makemigrations = False
         self.secrets_source = None
         self.compose_file = None
@@ -300,7 +304,10 @@ class DockerComposeLauncher(
     def configure_agent_update(self, argv):
         args = parse_agent_update_args(argv)
         self.configure_update(self._agent_target_argv(args, status_file=True))
-        self.no_migrate = True
+        # This run replaces the resident pair, never the application service, so
+        # there is nothing to migrate or collect — suppress the hook itself
+        # rather than asking the migrator to skip part of its work.
+        self.skip_post_start = True
         self.active_version_file = None
         self.active_version_key = None
         pair = self._resident_pair_scope()

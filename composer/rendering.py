@@ -34,7 +34,7 @@ class RenderingMixin:
         if self.secrets_source:
             active_flags.append(f"\033[93m🔓 PLAINTEXT {self.secrets_source}\033[0m")
         if self.no_migrate:
-            active_flags.append("\033[93m⏭️  SKIP MIGRATIONS\033[0m")
+            active_flags.append("\033[93m⏭️  SKIP MIGRATIONS (STATIC STILL COLLECTED)\033[0m")
         if self.force_makemigrations:
             active_flags.append("\033[93m🔄 FORCE MIGRATIONS\033[0m")
         if self.target_app:

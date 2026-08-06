@@ -278,6 +278,24 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             pass
         self.compose_runtime_override = None
 
+    def compose_config_json(self) -> Optional[dict]:
+        """Resolved compose config, or None if it cannot be read or parsed.
+
+        Interpolated and merged across every active file, so callers see one
+        view of a service instead of reconciling overrides themselves.
+        """
+        ok, out, err = self.run_docker_compose(
+            ["config", "--format", "json"], timeout=20
+        )
+        if not ok:
+            self.last_runtime_diagnostic = self.build_failure_detail(out, err)
+            return None
+        try:
+            parsed = json.loads(out)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     def discover_services(self, silent: bool = False) -> bool:
         ok, out, err = self.run_docker_compose(["config", "--services"], timeout=10)
         if not ok:

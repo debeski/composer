@@ -2,11 +2,12 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.3 is tagged/published — in-progress work is v1.3.4 (VERSION bumped). NEVER append to a tagged version — check `git tag` first.
+- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.4 is tagged/published — in-progress work is v1.3.5 (VERSION bumped). NEVER append to a tagged version — check `git tag` first.
 - Code lives under `composer/`; entrypoints are `python -m composer`, `python composer/main.py`, and `start.sh`/`start.ps1`.
 - Update surface: `update`, `pull`, `update-self`, `agent-check`, `agent-update`, `agent-restart`, and `agent-off`; `-u` remains compact.
 - `COMPOSER_VERSION` is the last deployer version; `agent-status.json` reports the resident `composer_version` separately.
 - Runs are hangup-proof: `composer/session.py` guards SIGHUP (log redirect), Compose children use `start_new_session`, only Ctrl+C cancels; `run`/`log`/`logs` stay terminal-bound.
+- Post-start tasks come from the `org.dlux.post-start` service label (read via `compose config --format json`), NOT Compose's native `post_start` — Compose runs that itself, unflagged, racing composer's flagged run. Legacy blocks still execute with a `check --fix` hint.
 - Composer OWNS `start.sh`/`start.ps1` (`# composer-wrapper: N`, integer, NOT the release version); dlux `scaffold_templates` are mirrors. Bump both files + `wrappers-history.json` + the dlux mirror together — see docs/RELEASING.md step 3.
 
 ### Current Project Adopted Standards:
@@ -45,8 +46,9 @@
       - CLI `composer enable-executor` (dry-run default) + launcher dispatch.
       - `check --fix` runs `enable-executor` (`_maybe_fix`); agent-without-executor topology is now WARN (non-blocking) so the hint prints. +15 tests (5 gen + 9 migration + 1 check-fix), suite 218.
     - [x] Slice 5 (DONE, in dlux repo): scaffold generates the hardened topology (executor + read-only proxy + agent delegates), stack_contract + topology tests updated, generated compose passes real `docker compose config`, dlux suite 1040 GREEN. Executor hardening now COMPLETE end-to-end (composer + scaffold). Release-coordinated: dlux scaffold ships AFTER composer v1.3.0.
-  - [ ] Run `./start.sh update-self` from each deployment root once v1.3.4 is tagged.
-  - [ ] After v1.3.4 is tagged and pulled, run `./start.sh check` in each deployment to confirm the wrapper contract reports `current` from the real image.
+  - [ ] Live verify the migrator contract on a real project: `./start.sh -d` (one run, no -mm), `-d -mm` (one run, forced), `-d -nm` (no migrations, static still collected); confirm the migrator banner appears ONCE in `docker compose logs web`.
+  - [ ] Run `./start.sh check --fix` on a pre-label deployment and confirm post_start becomes the label (backup under .xpose/).
+  - [ ] Run `./start.sh update-self` from each deployment root once v1.3.5 is tagged.
   - [ ] Live verify on a real deployment: after `./start.sh update`, DLUX's image-update indicator clears within ~30s (agent must see the new local digest through the read-only proxy).
   - [ ] Live verify detach: close the terminal mid-`update` (native + `start.sh`), confirm the deploy finishes and `composer-detached.log` fills; Ctrl+C still exits 130.
   - [ ] Live verify `stop -v` TTY/non-TTY behavior and `log -F`.
@@ -58,6 +60,7 @@
   - [ ] Add shared `check` drift checks for raw Docker socket mounts and the `dlux_runtime` rw/ro split.
   - [ ] Run pending dependency/container CVE scanners and image smoke tests when tools/images are available.
 - **Completed Recently:**
+  - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (agent-update). `-mm`/`-nm` mutually exclusive. +21 tests.
   - [x] v1.3.4: wrapper version contract — `# composer-wrapper: N` marker, `composer/wrappers.py`, reference copies + `wrappers-history.json` baked at `/app/wrappers/`, `_check_wrappers` in `check`, atomic self-replacing `--fix`. Composer owns the wrappers; dlux templates are pinned mirrors.
   - [x] v1.3.4: wrappers attach `-i` unconditionally (`-t` only with a terminal) so piped stdin reaches the container, plus a bash 3.2 empty-array guard on `secret_flags`.
   - [x] v1.3.3: pull bar names only in-flight images (+cached layer count) and 🔵 marks services being replaced.
@@ -65,21 +68,19 @@
   - [x] v1.3.3: availability self-corrects after an out-of-band deploy (30s local-digest probe + forced re-check on executor ack).
   - [x] v1.3.3: terminal-hangup survival (`session.py` guard + detach log, detached Compose children, relayed Ctrl+C, `start.sh` `trap '' HUP`).
   - [x] v1.3.1: `agent-check` falls back to compose-file image discovery (agent block `--check-image`/`WEB_IMAGE`, `${VAR:-default}` resolution, `-f` scoping).
-  - [x] v1.2.9: normalize update/pull/self/agent commands and add typed `agent-check` image availability.
-  - [x] v1.2.8: coalesce pending snapshots to the latest state and collapse existing snapshot backlogs during store initialization.
   - [x] v1.2.7: pin control origin, reject redirects, harden typed/redacted relay data, block mixed topologies, and safely reconcile legacy proxy routes.
   - [x] v1.2.6: targeted obsolete-service cleanup with candidate validation, original archive, and named-volume postflight.
 
 ### One-line info about last verified Tests:
+- Verified 2026-08-06: 324/324 tests. v1.3.5 post-start: `tests/test_post_start_hooks.py` (21) — label discovery (mapping + list form), legacy fallback flagged, `-d` override de-dup, flag matrix, `skip_post_start` vs `-nm`, and the migration transform (body survives, idempotent, multi-command refused, backup/validate/atomic). LIVE: real `dlux` scaffold passes `docker compose config` with no `post_start:`, and its `config --format json` (with the dev overlay) yields exactly one discovered command via the label path.
 - Verified 2026-08-04: 303/303 tests. v1.3.4 wrapper contract: `tests/test_wrappers.py` (17) — marker/history/shared-version manifest guards plus current/stale/modified/unversioned/ahead/missing classification and atomic install (inode swap, mode repair, no staging leftovers). LIVE through the built image: a pre-marker project reported unversioned, `./start.sh check --fix -y` replaced start.sh *while executing it* (inode 9438997→9439015, exit 0, mode 755 kept), re-check GREEN, backup kept.
 - Verified 2026-08-04: 286/286 tests. v1.3.4 wrapper stdin: `test_wrapper_secrets.py` +2 (no-tty argv has `-i` and no `-t`; pty argv has both) — the pty case first exposed the bash 3.2 `set -u` empty-array abort on a secretless project. Live-verified against archive: piped `yes` now arrives (`ISATTY=False GOT='yes\n'`) and the pty path still reads interactively.
 - Verified 2026-08-03: 284/284 tests. v1.3.3 pull UX: `test_progress.py` scope tests (names in-flight images only, abbreviates >2, cached count, monotonic/no early 100%) + `test_service_icons.py` (6: distinct 🔵 updating icon, scoped/excluded marking, health resolves it).
-- Verified 2026-08-03: 272/272 tests. v1.3.3 progress: `tests/test_progress.py` (16) — docker/compose pull parsing, monotonic fraction, byte totals, service-only pulls, non-pull lines ignored, in-place vs detached rendering; `update-self` streaming + failure exit re-covered in `test_agent_commands.py`.
 - Dependency/container CVE scanning remains pending because the scanners are unavailable locally.
 ### One-line info about last time edited Docs:
+- 2026-08-06 README new "Post-start tasks and the migrator contract" section (label declaration, why not native post_start, -mm/-nm/-a table).
 - 2026-08-04 README "wrapper versioning" (ownership, marker, status table, `--fix` semantics) + docs/RELEASING.md step 3 (bump marker, history, dlux mirror together).
 - 2026-08-04 README "the surface": `composer run` TTY auto-detection now documents the piped-stdin path and the nested-pty type-ahead caveat (prefer `--noinput`).
-- 2026-08-02 README: new "surviving the terminal" section (detach behavior, `COMPOSER_DETACH_LOG`, Ctrl+C, terminal-bound commands).
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

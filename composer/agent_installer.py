@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
+from .constants import POST_START_LABEL
+
 
 COMPOSER_UPDATER_START = "  # Composer-as-updater start"
 COMPOSER_UPDATER_END = "  # Composer-as-updater end"
@@ -451,6 +453,65 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
     return updated
 
 
+def _post_start_blocks(contents: str) -> Dict[str, tuple[str, str]]:
+    """Map service -> (raw post_start block, single command) for native hooks.
+
+    Services whose hook holds anything other than exactly one ``- command:``
+    entry are left out; those are not the generated shape and are not safe to
+    fold into a single label.
+    """
+    match = re.search(r"(?ms)^services:\s*\n(.*?)(?=^volumes:\s*$|^networks:\s*$|\Z)", contents)
+    if not match:
+        return {}
+    found: Dict[str, tuple[str, str]] = {}
+    for service, body in _block_bodies(match.group(1)).items():
+        # MULTILINE only: DOTALL here would let `.*` run past the end of the
+        # hook and swallow the rest of the service body.
+        block = re.search(r"(?m)^    post_start:[ \t]*\n(?:^(?:      .*)?\n)*", body)
+        if not block:
+            continue
+        entries = re.findall(r"(?m)^      -\s+command:\s+(.+?)\s*$", block.group(0))
+        if len(entries) != 1:
+            continue
+        found[service] = (block.group(0), entries[0])
+    return found
+
+
+def _transform_post_start_to_label(contents: str, project_slug: str) -> str:
+    """Replace native Compose ``post_start`` hooks with the composer label.
+
+    Compose runs a native hook itself, on container start, without composer's
+    flags — while composer separately execs the same command after health with
+    them. Two migrators overlap, one clearing staticfiles under the other. The
+    label removes Compose as a runner and leaves composer the only one.
+    """
+    blocks = _post_start_blocks(contents)
+    if not blocks:
+        return contents
+    updated = contents
+    for service, (block, command) in blocks.items():
+        if f"{POST_START_LABEL}:" in block:
+            continue
+        label_line = f'      {POST_START_LABEL}: "{command}"\n'
+        body_match = re.search(
+            rf"(?ms)^  {re.escape(service)}:[ \t]*\n.*?(?=^  [A-Za-z0-9_-]+:[ \t]*$|\Z)", updated
+        )
+        if not body_match:
+            continue
+        body = body_match.group(0)
+        if POST_START_LABEL in body:
+            continue
+        stripped = body.replace(block, "", 1)
+        if "    labels:\n" in stripped:
+            stripped = stripped.replace("    labels:\n", "    labels:\n" + label_line, 1)
+        else:
+            stripped = stripped.replace(
+                f"  {service}:\n", f"  {service}:\n    labels:\n" + label_line, 1
+            )
+        updated = updated[: body_match.start()] + stripped + updated[body_match.end() :]
+    return updated
+
+
 def _dlux_readiness_warning(project_root: Path) -> tuple[str, bool]:
     declarations = []
     for path in (project_root / "requirements.txt", project_root / "pyproject.toml"):
@@ -622,6 +683,27 @@ def enable_executor(
             "docker compose up -d --force-recreate "
             "docker-socket-proxy composer-executor composer-agent"
         ),
+        apply=apply,
+        allow_unverified_dlux=allow_unverified_dlux,
+        include_diff=include_diff,
+        command_runner=command_runner,
+    )
+
+
+def enable_post_start_label(
+    project_dir: str = ".",
+    *,
+    compose_file: str = "",
+    apply: bool = False,
+    allow_unverified_dlux: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    return _apply_stack_migration(
+        project_dir,
+        compose_file=compose_file,
+        transform=_transform_post_start_to_label,
+        redeploy_command="docker compose up -d --force-recreate web",
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,

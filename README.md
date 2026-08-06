@@ -41,6 +41,28 @@ New deployments run the hardened resident pair: `composer agent` plus
 
 `composer update [-b] [--force] [-nm] [-mm] [-a APP] [--status-file PATH] [-f FILE] [-d] [service...]` pulls the latest application image(s), recreates the affected containers, waits for health checks, and runs post-start tasks. Name services to scope both the pull and recreate; the resident agent/executor and the watcher use this same subcommand internally. `-u [service]` remains the compact argument form. See `composer update --help`.
 
+### Post-start tasks and the migrator contract
+
+A service opts into a post-start task with an `org.dlux.post-start` label naming the command:
+
+```yaml
+  web:
+    labels:
+      org.dlux.post-start: "python -m dlux.updater.supervisor --no-watch -- python manage.py migrator"
+```
+
+Composer runs it once, after the stack is healthy, appending whichever flags the run was given. A label is used rather than Compose's native `post_start` hook because Compose runs that hook itself, on container start, without composer's flags — which meant two migrators running at the same time. Deployments still carrying a native `post_start` block keep working (composer execs it and says so); `composer check --fix` folds it into the label.
+
+When the command is DjangoLux's `migrator`, `-a APP`, `-mm`, and `-nm` are forwarded and mean:
+
+| flags | makemigrations | migrate | collectstatic |
+| --- | --- | --- | --- |
+| *(none)* | only apps with no `migrations/0001_*.py` | yes | yes |
+| `-mm` | **all** target apps, forced | yes | yes |
+| `-nm` | no | no | **yes** |
+
+`-mm` and `-nm` are mutually exclusive. `-a APP` scopes which apps are considered; without it the migrator auto-discovers local apps. `-mm` writes migrations into the container filesystem, so they are lost on recreate unless the app source is bind-mounted — it is a development affordance.
+
 `composer pull [--status-file PATH] [-f FILE] [-d] [service...]` only downloads images. It never recreates containers, runs health checks, or executes post-start tasks. This replaces the retired `-uo` and `update -o` forms.
 
 `composer update-self` pulls `debeski/composer:latest`, the Composer deployer used by `start.sh`. `./start.sh --update` remains a legacy forwarding alias for one migration cycle. Set `COMPOSER_SELF_IMAGE` only when using a compatible Composer image mirror.

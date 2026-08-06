@@ -25,7 +25,10 @@ class AgentLifecycleCommandTests(unittest.TestCase):
 
         self.assertEqual(launcher.pull_service, ["composer-agent"])
         self.assertEqual(launcher.up_service, ["composer-agent"])
-        self.assertTrue(launcher.no_migrate)
+        # The resident pair has no application service to migrate, so the hook is
+        # suppressed outright rather than run with -nm (which still collects static).
+        self.assertTrue(launcher.skip_post_start)
+        self.assertFalse(launcher.no_migrate)
         self.assertIsNone(launcher.active_version_file)
         self.assertEqual(launcher.monitored_services, ["composer-agent"])
         self.assertEqual(launcher.exclude_services, ["db"])

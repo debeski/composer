@@ -451,6 +451,19 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                         f"{got} (needs >= {minimum} for the packaged runtime). Update the project "
                         "image, then re-run 'composer check --fix'."
                     )
+        # A native Compose post_start hook is run by Compose itself, unflagged,
+        # while composer separately execs the same command after health with its
+        # flags — two overlapping migrators. Folding it into the label composer
+        # reads leaves exactly one runner.
+        needs_post_start_migration = False
+        try:
+            from .agent_installer import enable_post_start_label
+
+            needs_post_start_migration = bool(
+                enable_post_start_label(".", compose_file=args.file or "", apply=False).get("files")
+            )
+        except Exception:
+            needs_post_start_migration = False
         if updater_migration_blocked:
             fixes.append(_result(WARN, "dlux-updater-runtime", updater_migration_blocked))
         # An AHEAD wrapper is deliberately not fixable: the image is the stale
@@ -473,7 +486,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         proxy_routes = proxy_inspection["recognized"]
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_secret_cap and not needs_updater_migration
-                and not stale_wrappers):
+                and not needs_post_start_migration and not stale_wrappers):
             return fixes
         consequences = []
         if stale_wrappers:
@@ -533,6 +546,12 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 "Migrate the dlux-updater command to the packaged runtime "
                 "(python -m dlux.updater.supervisor) and add the pre-migration dlux_reconcile "
                 "guard, so a stale runtime release can't wedge the site in maintenance."
+            )
+        if needs_post_start_migration:
+            consequences.append(
+                "Replace the native Compose post_start hook with the org.dlux.post-start "
+                "label composer reads, so Compose stops running an unflagged second copy "
+                "alongside composer's own flagged run."
             )
         consequences.extend(
             [
@@ -680,6 +699,22 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:dlux-updater-runtime", f"Updater migration failed: {exc}"))
+        if needs_post_start_migration:
+            from .agent_installer import AgentInstallError, enable_post_start_label
+
+            try:
+                outcome = enable_post_start_label(".", compose_file=args.file or "", apply=True)
+                fixes.append(
+                    _result(
+                        OK,
+                        "fix:post-start-label",
+                        "Moved the post_start hook onto the org.dlux.post-start label "
+                        "(one migrator run per start). Recreate the service to apply. Backup: "
+                        + (outcome.get("backup_root") or "n/a"),
+                    )
+                )
+            except AgentInstallError as exc:
+                fixes.append(_result(FAIL, "fix:post-start-label", f"post_start migration failed: {exc}"))
         return fixes
 
     @staticmethod

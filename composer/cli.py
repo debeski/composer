@@ -60,17 +60,18 @@ def parse_args():
         action="store_true",
         help="Development mode: also load the compose.dev.yml override (two compose files)",
     )
-    parser.add_argument(
+    migrations = parser.add_mutually_exclusive_group()
+    migrations.add_argument(
         "-nm",
         "--no-migrate",
         action="store_true",
-        help="Bypass post-start migration tasks",
+        help="Skip makemigrations and migrate; static files are still collected",
     )
-    parser.add_argument(
+    migrations.add_argument(
         "-mm",
         "--make-migrations",
         action="store_true",
-        help="Force making migrations during post-start tasks",
+        help="Force makemigrations for every app, then migrate (mutually exclusive with -nm)",
     )
     parser.add_argument(
         "-a",
@@ -161,17 +162,18 @@ def parse_update_args(argv):
         action="store_true",
         help="Bypass the preflight version gate (allow updating onto an older image version)",
     )
-    parser.add_argument(
+    migrations = parser.add_mutually_exclusive_group()
+    migrations.add_argument(
         "-nm",
         "--no-migrate",
         action="store_true",
-        help="Bypass post-start migration tasks",
+        help="Skip makemigrations and migrate; static files are still collected",
     )
-    parser.add_argument(
+    migrations.add_argument(
         "-mm",
         "--make-migrations",
         action="store_true",
-        help="Force making migrations during post-start tasks",
+        help="Force makemigrations for every app, then migrate (mutually exclusive with -nm)",
     )
     parser.add_argument(
         "-a",
