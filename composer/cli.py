@@ -12,6 +12,9 @@ def parse_args():
             "      -m/--manage prepends 'python manage.py'; -s/--shell runs via 'sh -c';\n"
             "      -F/--fresh starts a one-off container (docker compose run --rm).\n"
             "      Run 'composer run --help' for details.\n"
+            "  migrate [-s SERVICE] [-f FILE] [-d] [MIGRATOR_ARGS...]\n"
+            "      Run the DLUX migrator in web (or --service SERVICE), forwarding\n"
+            "      every remaining argument. Run 'composer migrate --help'.\n"
             "  restart [-f FILE] [-d] [--status-file PATH] [service]\n"
             "      Restart running containers (short alias: composer -r).\n"
             "      Run 'composer restart --help' for details.\n"
@@ -503,6 +506,38 @@ def parse_run_args(argv):
         help="Command (and its arguments) to run inside the service",
     )
     return parser.parse_args(argv)
+
+
+def parse_migrate_args(argv):
+    """Parse Composer's options and leave all other options for migrator."""
+    parser = argparse.ArgumentParser(
+        prog="composer migrate",
+        description=(
+            "Run the DLUX migrator in a running Compose service. Composer uses "
+            "the service's org.dlux.post-start command when declared, otherwise "
+            "the existing dlux-updater supervisor (with the packaged supervisor "
+            "as the default). Unrecognized arguments are "
+            "forwarded unchanged to 'python manage.py migrator'."
+        ),
+    )
+    parser.add_argument(
+        "-s",
+        "--service",
+        default="web",
+        help="Compose service in which to run migrator (default: web)",
+    )
+    parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument(
+        "-d",
+        "--dev",
+        action="store_true",
+        help="Target the dev compose files (adds compose.dev.yml override)",
+    )
+    args, migrator_args = parser.parse_known_args(argv)
+    if migrator_args[:1] == ["--"]:
+        migrator_args = migrator_args[1:]
+    args.migrator_args = migrator_args
+    return args
 
 
 def parse_restart_args(argv):

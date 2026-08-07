@@ -15,6 +15,7 @@ from .cli import (
     parse_enable_executor_args,
     parse_executor_args,
     parse_log_args,
+    parse_migrate_args,
     parse_pull_args,
     parse_restart_args,
     parse_run_args,
@@ -26,7 +27,13 @@ from .cli import (
 from .checkup import CheckupMixin
 from .config import ConfigMixin
 from .confirmation import confirm
-from .constants import ERROR, EXECUTOR_SERVICE, IDLE, OK, RUNNING
+from .constants import (
+    ERROR,
+    EXECUTOR_SERVICE,
+    IDLE,
+    OK,
+    RUNNING,
+)
 from .docker_compose_manager import DockerComposeMixin
 from .health_monitor import HealthMonitorMixin
 from .post_start_hooks import PostStartHooksMixin
@@ -46,7 +53,7 @@ DEFAULT_SELF_IMAGE = "debeski/composer:latest"
 # Commands whose whole point is the terminal they were typed in: they end with
 # it. Everything else (deploys, updates, restarts, the resident roles) keeps
 # running when the terminal closes and only stops on Ctrl+C.
-TERMINAL_BOUND_COMMANDS = {"run", "log", "logs"}
+TERMINAL_BOUND_COMMANDS = {"run", "migrate", "log", "logs"}
 
 
 class DockerComposeLauncher(
@@ -167,6 +174,17 @@ class DockerComposeLauncher(
             shell=run_args.shell,
             fresh=run_args.fresh,
         )
+        sys.exit(code)
+
+    def handle_migrate(self, argv):
+        """`composer migrate`: run DLUX's migrator with visible, attached output."""
+        args = parse_migrate_args(argv)
+        self.compose_file = args.file
+        self.dev_mode = args.dev
+        self.resolve_active_compose_files()
+
+        command = self.migrator_command_for_service(args.service)
+        code = self.exec_in_service(args.service, command + args.migrator_args)
         sys.exit(code)
 
     def handle_log(self, argv):
@@ -419,6 +437,9 @@ class DockerComposeLauncher(
             if argv and argv[0] == "run":
                 self.handle_run(argv[1:])
                 return
+            if argv and argv[0] == "migrate":
+                self.handle_migrate(argv[1:])
+                return
             if argv and argv[0] == "watch":
                 from .watcher import run_watch
 
@@ -665,6 +686,7 @@ class DockerComposeLauncher(
                 self.sections["post_start"] = ERROR
                 self.write_status("failed", error=hooks_detail)
                 self.render(f"Failed to execute post_start commands\n\n{hooks_detail}")
+                sys.exit(1)
             else:
                 self.sections["post_start"] = OK
                 self.write_status("ready")

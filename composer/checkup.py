@@ -451,10 +451,9 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                         f"{got} (needs >= {minimum} for the packaged runtime). Update the project "
                         "image, then re-run 'composer check --fix'."
                     )
-        # A native Compose post_start hook is run by Compose itself, unflagged,
-        # while composer separately execs the same command after health with its
-        # flags — two overlapping migrators. Folding it into the label composer
-        # reads leaves exactly one runner.
+        # A native Compose post_start hook creates two runners. Existing DLUX
+        # updater projects can also be missing both the native hook and label,
+        # which creates zero runners. The guarded transform repairs either form.
         needs_post_start_migration = False
         try:
             from .agent_installer import enable_post_start_label
@@ -708,7 +707,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     _result(
                         OK,
                         "fix:post-start-label",
-                        "Moved the post_start hook onto the org.dlux.post-start label "
+                        "Installed the org.dlux.post-start label "
                         "(one migrator run per start). Recreate the service to apply. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )

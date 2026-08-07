@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.6
+- **Missing Migrator Declaration No Longer Means No-Op**: DLUX stacks containing `dlux-updater` + `web` but neither `org.dlux.post-start` nor native `post_start` now run the standard supervised migrator compatibility command; `check --fix` installs the missing label with its existing validation, backup, and atomic-write path.
+- **Post-Start Failures Are Fatal And Visible**: Hook execution uses non-interactive `docker compose exec -T` with streamed progress; unhealthy targets and nonzero migrators now make Composer exit nonzero instead of printing a false “Environment ready.”
+- **Direct Migrator Subcommand**: Added `composer migrate [-s SERVICE] [-f FILE] [-d] [MIGRATOR_ARGS...]`, defaulting to `web`, preferring its configured post-start migrator, and forwarding options such as `-mm`, `-nm`, and `-a APP` with attached output and exit status.
+
 ## v1.3.5
 - **The Migrator Ran Twice, Concurrently**: The generated `compose.yml` declared the migrator as a native Compose `post_start` hook, which Compose runs itself the moment `web` starts — unflagged — while composer separately scraped the same block out of the YAML and re-exec'd it after health, with `-mm`. Two overlapping runs, one `collectstatic --clear` wiping `STATIC_ROOT` while the other collected into it. The declaration moved to an `org.dlux.post-start` service label that Compose ignores and composer reads, leaving exactly one runner.
 - **Post-Start Discovery Reads Resolved Compose Config**: `parse_post_start_labels()` uses the new `compose_config_json()` (`config --format json`) instead of regex-scraping each active compose file, so overrides merge once — under `-d` a dev file repeating the block used to queue the command twice. Native `post_start` blocks still run as a legacy fallback, announced with a `check --fix` hint so `-mm` keeps working on un-migrated deployments.

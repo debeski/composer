@@ -4,7 +4,12 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
-from .constants import POST_START_LABEL, SERVICE_HEALTHY
+from .constants import (
+    DEFAULT_MIGRATOR_COMMAND,
+    DEFAULT_MIGRATOR_SERVICE,
+    POST_START_LABEL,
+    SERVICE_HEALTHY,
+)
 
 
 class PostStartHooksMixin:
@@ -20,13 +25,35 @@ class PostStartHooksMixin:
         too means two copies; they are returned with legacy=True so the caller
         can say so, because dropping them would break ``-mm`` on those projects.
         """
-        commands = self.parse_post_start_labels()
+        self._post_start_compatibility_fallback = False
+        config = self.compose_config_json()
+        commands = self.parse_post_start_labels(config)
         if commands:
             return commands, False
-        return self.parse_legacy_post_start_blocks(), True
+        legacy = self.parse_legacy_post_start_blocks()
+        if legacy:
+            return legacy, True
 
-    def parse_post_start_labels(self) -> List[Tuple[str, str]]:
-        config = self.compose_config_json()
+        # DjangoLux's existing-project updater path historically upgraded the
+        # dlux-updater service but did not add the new web label. Recognize that
+        # topology narrowly so established DLUX projects do not silently skip
+        # migrations/static collection until `composer check --fix` repairs it.
+        services = config.get("services") if isinstance(config, dict) else None
+        if (
+            isinstance(services, dict)
+            and "dlux-updater" in services
+            and DEFAULT_MIGRATOR_SERVICE in services
+        ):
+            self._post_start_compatibility_fallback = True
+            return [(
+                DEFAULT_MIGRATOR_SERVICE,
+                self.default_migrator_command(config),
+            )], False
+        return [], False
+
+    def parse_post_start_labels(self, config=None) -> List[Tuple[str, str]]:
+        if config is None:
+            config = self.compose_config_json()
         if not config:
             return []
 
@@ -113,6 +140,46 @@ class PostStartHooksMixin:
             flags.append("-nm")
         return flags
 
+    def default_migrator_command(self, config=None) -> str:
+        """DLUX migrator command matching an existing updater's supervisor."""
+        if config is None:
+            config = self.compose_config_json()
+        services = config.get("services") if isinstance(config, dict) else None
+        updater = services.get("dlux-updater") if isinstance(services, dict) else None
+        command = updater.get("command") if isinstance(updater, dict) else None
+        if isinstance(command, str):
+            try:
+                argv = shlex.split(command, posix=sys.platform != "win32")
+            except ValueError:
+                argv = []
+        elif isinstance(command, list) and all(isinstance(item, str) for item in command):
+            argv = list(command)
+        else:
+            argv = []
+        if "--" in argv:
+            boundary = argv.index("--")
+            prefix = argv[: boundary + 1]
+            if any("supervisor" in token for token in prefix):
+                return " ".join(prefix + ["python", "manage.py", "migrator"])
+        return DEFAULT_MIGRATOR_COMMAND
+
+    def migrator_command_for_service(self, service: str) -> List[str]:
+        """Configured migrator argv for a service, or the DLUX default."""
+        config = self.compose_config_json()
+        for configured_service, command in self.parse_post_start_labels(config):
+            if configured_service != service:
+                continue
+            try:
+                argv = shlex.split(command, posix=sys.platform != "win32")
+            except ValueError:
+                break
+            if "migrator" in argv:
+                return argv
+        return shlex.split(
+            self.default_migrator_command(config),
+            posix=sys.platform != "win32",
+        )
+
     def run_post_start_hooks(self) -> Tuple[bool, str]:
         if self.skip_post_start:
             self.emit_status("Skip", "Post-start tasks (Bypass requested)")
@@ -124,11 +191,15 @@ class PostStartHooksMixin:
                 "Note",
                 "legacy post_start hook — Compose also runs it; `composer check --fix` migrates it",
             )
+        elif commands and getattr(self, "_post_start_compatibility_fallback", False):
+            self.emit_status(
+                "Note",
+                "missing org.dlux.post-start label — using DLUX compatibility migrator; run `composer check --fix`",
+            )
 
         for service, cmd in commands:
             if self.service_state.get(service) != SERVICE_HEALTHY:
-                self.emit_status("Skip", f"unhealthy service: {service}")
-                continue
+                return False, f"{service}: post-start task cannot run because the service is not healthy"
 
             try:
                 argv = shlex.split(cmd, posix=sys.platform != "win32")
@@ -140,7 +211,11 @@ class PostStartHooksMixin:
 
             display = " ".join(argv)
             self.emit_status("Exec", f"{service}: {display}")
-            ok, out, err = self.run_docker_compose(["exec", service] + argv)
+            ok, out, err = self.run_docker_compose_streaming(
+                ["exec", "-T", service] + argv,
+                progress_callback=lambda line: self.emit_status("Post-start", line),
+            )
+            self.finish_progress_line()
             if not ok:
                 detail = self.build_failure_detail(out, err)
                 return False, f"{service}: post_start command failed\nCommand: {display}\n\n{detail}"

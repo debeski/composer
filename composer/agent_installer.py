@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-from .constants import POST_START_LABEL
+from .constants import DEFAULT_MIGRATOR_COMMAND, POST_START_LABEL
 
 
 COMPOSER_UPDATER_START = "  # Composer-as-updater start"
@@ -487,7 +487,36 @@ def _transform_post_start_to_label(contents: str, project_slug: str) -> str:
     """
     blocks = _post_start_blocks(contents)
     if not blocks:
-        return contents
+        # Existing DLUX updater projects can have neither declaration: the
+        # updater was enabled before the label contract existed, and its
+        # surgical upgrade path never revisited the web service. This topology
+        # is specific enough to install the standard DLUX migrator safely.
+        if (
+            "  dlux-updater:\n" not in contents
+            or "  web:\n" not in contents
+            or POST_START_LABEL in contents
+        ):
+            return contents
+        body_match = re.search(
+            r"(?ms)^  web:[ \t]*\n.*?(?=^  [A-Za-z0-9_-]+:[ \t]*$|^volumes:[ \t]*$|^networks:[ \t]*$|\Z)",
+            contents,
+        )
+        if not body_match:
+            return contents
+        body = body_match.group(0)
+        command = DEFAULT_MIGRATOR_COMMAND
+        updater_module = re.search(
+            r"\b(?:tools\.dlux_runtime_supervisor|dlux\.updater\.supervisor)\b",
+            contents,
+        )
+        if updater_module:
+            command = command.replace("dlux.updater.supervisor", updater_module.group(0))
+        label_line = f'      {POST_START_LABEL}: "{command}"\n'
+        if "    labels:\n" in body:
+            updated_body = body.replace("    labels:\n", "    labels:\n" + label_line, 1)
+        else:
+            updated_body = body.replace("  web:\n", "  web:\n    labels:\n" + label_line, 1)
+        return contents[: body_match.start()] + updated_body + contents[body_match.end() :]
     updated = contents
     for service, (block, command) in blocks.items():
         if f"{POST_START_LABEL}:" in block:

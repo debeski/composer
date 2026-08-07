@@ -7,7 +7,7 @@ from composer.agent_installer import (
     _transform_post_start_to_label,
     enable_post_start_label,
 )
-from composer.constants import SERVICE_HEALTHY
+from composer.constants import DEFAULT_MIGRATOR_COMMAND, SERVICE_HEALTHY
 from composer.post_start_hooks import PostStartHooksMixin
 
 MIGRATOR = "python -m dlux.updater.supervisor --no-watch -- python manage.py migrator"
@@ -82,6 +82,13 @@ class FakeLauncher(PostStartHooksMixin):
         self.executed.append(args)
         return True, "", ""
 
+    def run_docker_compose_streaming(self, args, **kwargs):
+        self.executed.append(args)
+        return True, "", ""
+
+    def finish_progress_line(self):
+        pass
+
 
 def _config(labels):
     return {"services": {"web": {"image": "demo:latest", "labels": labels}}}
@@ -101,7 +108,33 @@ class PostStartDiscoveryTests(unittest.TestCase):
 
     def test_services_without_the_label_contribute_nothing(self):
         launcher = FakeLauncher(_config({"org.dlux.restart": "safe"}))
-        self.assertEqual(launcher.parse_post_start_commands(), ([], True))
+        self.assertEqual(launcher.parse_post_start_commands(), ([], False))
+
+    def test_existing_dlux_updater_stack_gets_compatibility_migrator(self):
+        config = {
+            "services": {
+                "web": {"image": "demo:latest"},
+                "dlux-updater": {
+                    "image": "demo:latest",
+                    "command": [
+                        "python", "-m", "tools.dlux_runtime_supervisor", "--no-watch", "--",
+                        "python", "manage.py", "migrator",
+                    ],
+                },
+            }
+        }
+        launcher = FakeLauncher(config)
+        commands, legacy = launcher.parse_post_start_commands()
+        self.assertEqual(
+            commands,
+            [(
+                "web",
+                "python -m tools.dlux_runtime_supervisor --no-watch -- python manage.py migrator",
+            )],
+        )
+        self.assertFalse(legacy)
+        launcher.run_post_start_hooks()
+        self.assertTrue(any("compatibility migrator" in msg for _, msg in launcher.status))
 
     def test_legacy_post_start_block_is_a_flagged_fallback(self):
         with TemporaryDirectory() as tmp:
@@ -151,7 +184,7 @@ class RunPostStartHooksTests(unittest.TestCase):
         self.assertEqual(
             launcher.executed,
             [[
-                "exec", "web",
+                "exec", "-T", "web",
                 "python", "-m", "dlux.updater.supervisor", "--no-watch", "--",
                 "python", "manage.py", "migrator", "-mm",
             ]],
@@ -178,7 +211,15 @@ class RunPostStartHooksTests(unittest.TestCase):
             force_makemigrations=True,
         )
         launcher.run_post_start_hooks()
-        self.assertEqual(launcher.executed, [["exec", "web", "python", "manage.py", "warm_cache"]])
+        self.assertEqual(launcher.executed, [["exec", "-T", "web", "python", "manage.py", "warm_cache"]])
+
+    def test_unhealthy_hook_service_is_a_failure_not_a_silent_skip(self):
+        launcher = FakeLauncher(_config({"org.dlux.post-start": MIGRATOR}))
+        launcher.service_state["web"] = "failed"
+        ok, detail = launcher.run_post_start_hooks()
+        self.assertFalse(ok)
+        self.assertIn("not healthy", detail)
+        self.assertEqual(launcher.executed, [])
 
     def test_a_legacy_block_is_run_but_announced(self):
         with TemporaryDirectory() as tmp:
@@ -204,6 +245,32 @@ class PostStartLabelMigrationTests(unittest.TestCase):
         self.assertEqual(
             _transform_post_start_to_label(LABELLED_COMPOSE, "demo"), LABELLED_COMPOSE
         )
+
+    def test_existing_dlux_updater_without_any_hook_gets_default_label(self):
+        missing = LEGACY_COMPOSE.replace(
+            "    post_start:\n      # keep collectstatic on the runtime-active release\n"
+            f"      - command: {MIGRATOR}\n",
+            "",
+        ).replace("  db:\n", "  dlux-updater:\n    image: demo:latest\n  db:\n", 1)
+        updated = _transform_post_start_to_label(missing, "demo")
+        self.assertIn(f'org.dlux.post-start: "{DEFAULT_MIGRATOR_COMMAND}"', updated)
+        self.assertEqual(_transform_post_start_to_label(updated, "demo"), updated)
+
+    def test_missing_hook_preserves_legacy_supervisor_module(self):
+        missing = LEGACY_COMPOSE.replace(
+            "    post_start:\n      # keep collectstatic on the runtime-active release\n"
+            f"      - command: {MIGRATOR}\n",
+            "",
+        ).replace(
+            "  db:\n",
+            "  dlux-updater:\n"
+            "    image: demo:latest\n"
+            "    command: [\"python\", \"-m\", \"tools.dlux_runtime_supervisor\", \"--no-watch\", \"--\", \"python\", \"manage.py\", \"migrator\"]\n"
+            "  db:\n",
+            1,
+        )
+        updated = _transform_post_start_to_label(missing, "demo")
+        self.assertIn("python -m tools.dlux_runtime_supervisor --no-watch", updated)
 
     def test_transform_is_idempotent(self):
         once = _transform_post_start_to_label(LEGACY_COMPOSE, "demo")

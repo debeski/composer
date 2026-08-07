@@ -107,7 +107,7 @@ class HangupGuardTests(unittest.TestCase):
             self.assertEqual(session.resolve_detach_log(), "run.log")
 
     def test_terminal_bound_commands_are_not_guarded(self):
-        self.assertEqual(TERMINAL_BOUND_COMMANDS, {"run", "log", "logs"})
+        self.assertEqual(TERMINAL_BOUND_COMMANDS, {"run", "migrate", "log", "logs"})
 
     @POSIX_ONLY
     def test_deploy_installs_the_guard_but_log_does_not(self):
