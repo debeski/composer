@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any, Dict, List, Optional
 
@@ -7,6 +8,9 @@ from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
 from .stack_cleanup import OBSOLETE_SERVICES
+
+# First DjangoLux whose inline updates Composer can drive end to end.
+DLUX_COMPOSER_UPDATER_MIN = (1, 8, 0)
 
 OK = "ok"
 WARN = "warn"
@@ -54,14 +58,14 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             return results
         ok, out, _ = self.run_command(["docker", "compose", "version", "--short"], timeout=10)
         if ok:
-            results.append(_result(OK, "compose", f"Docker Compose v2 present ({out.strip() or 'unknown'})."))
+            results.append(self._compose_version_result(out))
         else:
             results.append(
                 _result(
                     WARN,
                     "compose",
-                    "Docker Compose v2 plugin not detected; falling back to legacy docker-compose.",
-                    fix="Install the Docker Compose v2 plugin.",
+                    "Docker Compose plugin not detected; falling back to legacy docker-compose.",
+                    fix="Install the Docker Compose plugin.",
                 )
             )
         return results
@@ -144,6 +148,49 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
         return _result(OK, "env-vars", f"All {len(required)} required compose variable(s) are supplied.")
 
+    # DjangoLux projects generated from the 1.8.0 scaffold run their runtime
+    # reconcile and migrations as Compose init containers (`pre_start`), which
+    # landed in Compose 5.3.0. An older plugin silently ignores the key, so the
+    # stack would start with no migrations applied and every gated service
+    # waiting forever — a check is the only way that surfaces before deploy.
+    COMPOSE_INIT_CONTAINER_MIN = (5, 3, 0)
+
+    @staticmethod
+    def _parse_compose_version(raw):
+        cleaned = str(raw or "").strip().lstrip("vV").split("-")[0].split("+")[0]
+        parts = cleaned.split(".")[:3]
+        if not parts or not parts[0]:
+            return None
+        try:
+            numbers = [int(part) for part in parts]
+        except ValueError:
+            return None
+        # Pad to three components: "5.3" means 5.3.0, but the bare tuple (5, 3)
+        # compares as LESS than (5, 3, 0) and would be refused.
+        return tuple(numbers + [0] * (3 - len(numbers)))
+
+    def _compose_version_result(self, raw) -> Dict[str, Any]:
+        version = self._parse_compose_version(raw)
+        minimum = ".".join(map(str, self.COMPOSE_INIT_CONTAINER_MIN))
+        if version is None:
+            return _result(
+                WARN, "compose",
+                f"Docker Compose present but its version could not be read "
+                f"({str(raw).strip() or 'no output'}); {minimum}+ is required for "
+                "DjangoLux init containers.",
+            )
+        shown = ".".join(map(str, version))
+        if version < self.COMPOSE_INIT_CONTAINER_MIN:
+            return _result(
+                FAIL, "compose",
+                f"Docker Compose {shown} predates init containers (pre_start), which "
+                f"DjangoLux projects use to run migrations before the stack starts. "
+                f"On this version those steps are ignored and gated services never "
+                f"start.",
+                fix=f"Upgrade the Docker Compose plugin to {minimum} or newer.",
+            )
+        return _result(OK, "compose", f"Docker Compose {shown} present (init containers supported).")
+
     def _check_topology(self) -> Dict[str, Any]:
         services = set(self.services)
         has_agent = "composer-agent" in services
@@ -207,9 +254,15 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 fix="Migrate with 'composer check --fix' (runs enable-agent) or 'composer enable-agent --apply'.",
             )
         return _result(
-            WARN,
+            FAIL,
             "topology",
-            "No composer-agent or composer-updater service found; this stack is not composer-managed.",
+            "No Composer service found. Since DjangoLux 1.8.0 the updater hands inline "
+            "updates to Composer, so a Composer service is part of the deployment — not "
+            "only the deploying machine. This stack has no update path.",
+            fix=(
+                "Run 'composer check --fix' to install docker-socket-proxy, "
+                "composer-executor and composer-agent."
+            ),
         )
 
     def _check_removed_services(self) -> Dict[str, Any]:
@@ -224,6 +277,101 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 "Run 'composer check --fix' to remove their Compose service definitions; "
                 "named volumes and stored data are preserved."
             ),
+        )
+
+    # The composer-side loops that can process a DjangoLux package request.
+    PACKAGE_LOOP_SERVICES = ("composer-executor", "composer-agent", "composer-updater")
+
+    def _package_loop_service(self) -> Optional[str]:
+        services = set(self.services)
+        for name in self.PACKAGE_LOOP_SERVICES:
+            if name in services:
+                return name
+        return None
+
+    def _mounts_dlux_runtime(self, service: str) -> Optional[bool]:
+        """Does `service` mount the runtime volume? None when it can't be read.
+
+        The package trigger, its ack and the availability report all live on that
+        volume; a loop that cannot see it cannot execute an update.
+        """
+        ok, out, _err = self.run_docker_compose(["config", "--format", "json"], timeout=20)
+        if not ok:
+            return None
+        try:
+            model = json.loads(out)
+        except ValueError:
+            return None
+        definition = (model.get("services") or {}).get(service)
+        if not isinstance(definition, dict):
+            return None
+        for mount in definition.get("volumes") or []:
+            source = mount.get("source") if isinstance(mount, dict) else str(mount).split(":")[0]
+            if str(source or "").endswith("dlux_runtime"):
+                return True
+        return False
+
+    def _check_dlux_updater_executor(self) -> Dict[str, Any]:
+        """Is this stack ready for DjangoLux to hand its updates to Composer?
+
+        DjangoLux 1.8.0 stops performing inline updates in-container: it writes an
+        intent file on the runtime volume and Composer stages, verifies, activates
+        and health-gates the release from outside the container being swapped —
+        which an in-container updater cannot do for a release that stops it from
+        starting. 1.9.0 deletes the in-container executor code.
+
+        The `dlux-updater` SERVICE is not retired by any of this, and this check
+        never proposes removing it. It also runs `dlux_reconcile` and `migrator`,
+        and `web` gates its own start on its health; it is the queue worker that
+        writes the hand-off. What 1.9.0 removes lives inside it, not around it.
+        """
+        if "dlux-updater" not in set(self.services):
+            return _result(OK, "dlux-updater-executor",
+                           "No in-container DjangoLux update executor.")
+        runtime = self._dlux_runtime_version()
+        minimum = ".".join(map(str, DLUX_COMPOSER_UPDATER_MIN))
+        if runtime is None:
+            return _result(
+                WARN, "dlux-updater-executor",
+                "A 'dlux-updater' service is present but its DjangoLux version could "
+                "not be read, so its update path cannot be classified.",
+                fix="Check the service starts, then re-run 'composer check'.",
+            )
+
+        loop = self._package_loop_service()
+        if loop is None:
+            return _result(
+                FAIL, "dlux-updater-executor",
+                f"No composer service is running an update loop, so a DjangoLux "
+                f"{minimum} package request would never be executed. Composer is a "
+                "required service for DjangoLux updates, not an optional companion.",
+                fix="Run 'composer check --fix' to install the Composer services.",
+            )
+        mounted = self._mounts_dlux_runtime(loop)
+        if mounted is False:
+            return _result(
+                FAIL, "dlux-updater-executor",
+                f"'{loop}' does not mount the dlux_runtime volume, so it cannot see "
+                "DjangoLux's update requests or publish what is available.",
+                fix=(
+                    "Add 'dlux_runtime:/opt/dlux-runtime:rw' to that service's volumes, "
+                    "then recreate it."
+                ),
+            )
+
+        if runtime < DLUX_COMPOSER_UPDATER_MIN:
+            got = ".".join(map(str, runtime))
+            return _result(
+                OK, "dlux-updater-executor",
+                f"DjangoLux {got} still updates itself in-container; '{loop}' is ready "
+                f"to take over the moment the image ships {minimum} or newer. Nothing "
+                "to change now.",
+            )
+        return _result(
+            OK, "dlux-updater-executor",
+            f"DjangoLux {'.'.join(map(str, runtime))} hands inline updates to '{loop}'. "
+            "The 'dlux-updater' service stays — it also runs dlux_reconcile and "
+            "migrator, and web gates its start on it.",
         )
 
     def _check_proxy_routes(self) -> Dict[str, Any]:
@@ -388,6 +536,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             results.append(self._check_required_vars())
             results.append(self._check_topology())
             results.append(self._check_removed_services())
+            results.append(self._check_dlux_updater_executor())
             results.append(self._check_proxy_routes())
             results.append(self._check_versions())
             if args.deep:
@@ -451,6 +600,54 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                         f"{got} (needs >= {minimum} for the packaged runtime). Update the project "
                         "image, then re-run 'composer check --fix'."
                     )
+        # DjangoLux 1.8.0 hands inline updates to Composer, so a Composer service
+        # is part of a DjangoLux deployment, not just the deploying machine. A
+        # stack with none gets the hardened trio installed.
+        needs_install = False
+        if not (set(self.services) & {"composer-agent", "composer-executor", "composer-updater"}):
+            try:
+                from .agent_installer import install_composer_stack
+
+                needs_install = bool(
+                    install_composer_stack(".", compose_file=args.file or "", apply=False).get("files")
+                )
+            except Exception:
+                needs_install = False
+        # Retire dlux-updater into Compose init containers on celery. Gated on
+        # the dlux the IMAGE ships: on an older release that service still owns
+        # the update path, and on Compose older than 5.3.0 `pre_start` is
+        # silently ignored, which would leave the stack unmigrated on boot.
+        needs_init_containers = False
+        init_containers_blocked = ""
+        if "dlux-updater" in set(self.services):
+            from .agent_installer import migrate_dlux_init_containers
+
+            compose_ok, compose_out, _ = self.run_command(
+                ["docker", "compose", "version", "--short"], timeout=10)
+            compose_version = self._parse_compose_version(compose_out) if compose_ok else None
+            runtime = self._dlux_runtime_version()
+            minimum = ".".join(map(str, DLUX_COMPOSER_UPDATER_MIN))
+            if compose_version is None or compose_version < self.COMPOSE_INIT_CONTAINER_MIN:
+                init_containers_blocked = (
+                    "'dlux-updater' can be retired into Compose init containers, but this "
+                    f"host's Docker Compose is older than "
+                    f"{'.'.join(map(str, self.COMPOSE_INIT_CONTAINER_MIN))} (it would ignore "
+                    "the pre_start steps and boot unmigrated). Upgrade the Compose plugin, "
+                    "then re-run 'composer check --fix'."
+                )
+            elif runtime is None or runtime < DLUX_COMPOSER_UPDATER_MIN:
+                got = ".".join(map(str, runtime)) if runtime else "unknown"
+                init_containers_blocked = (
+                    f"'dlux-updater' still owns the update path for DjangoLux {got}; it is "
+                    f"retired once the image ships {minimum} or newer."
+                )
+            else:
+                try:
+                    needs_init_containers = bool(
+                        migrate_dlux_init_containers(
+                            ".", compose_file=args.file or "", apply=False).get("files"))
+                except Exception as exc:
+                    init_containers_blocked = f"Cannot retire 'dlux-updater': {exc}"
         # A native Compose post_start hook creates two runners. Existing DLUX
         # updater projects can also be missing both the native hook and label,
         # which creates zero runners. The guarded transform repairs either form.
@@ -465,6 +662,8 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             needs_post_start_migration = False
         if updater_migration_blocked:
             fixes.append(_result(WARN, "dlux-updater-runtime", updater_migration_blocked))
+        if init_containers_blocked:
+            fixes.append(_result(WARN, "dlux-init-containers", init_containers_blocked))
         # An AHEAD wrapper is deliberately not fixable: the image is the stale
         # side there, and writing the baked copy would downgrade the project.
         stale_wrappers = [
@@ -485,7 +684,8 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         proxy_routes = proxy_inspection["recognized"]
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_secret_cap and not needs_updater_migration
-                and not needs_post_start_migration and not stale_wrappers):
+                and not needs_post_start_migration and not stale_wrappers
+                and not needs_install and not needs_init_containers):
             return fixes
         consequences = []
         if stale_wrappers:
@@ -524,6 +724,22 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     "Migrate composer-updater to composer-agent.",
                     "Create or refresh docker-socket-proxy and composer-agent.",
                 ]
+            )
+        if needs_init_containers:
+            consequences.append(
+                "Retire the dlux-updater service: its runtime reconcile and migrations "
+                "become Compose init containers (pre_start) on celery, its depends_on "
+                "edges are removed, celery gains write access to the runtime volume and "
+                "staticfiles, and web's org.dlux.post-start migrator hook is dropped "
+                "(it would now be a second, redundant run). The dlux_runtime volume and "
+                "its releases are kept."
+            )
+        if needs_install:
+            consequences.append(
+                "Install the Composer services this stack is missing (docker-socket-proxy, "
+                "composer-executor, composer-agent) plus their volumes and the docker_proxy "
+                "network. DjangoLux 1.8.0 hands inline updates to Composer, so without them "
+                "this deployment has no update path."
             )
         if needs_hardening:
             consequences.extend(
@@ -643,6 +859,34 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 fixes.append(_result(FAIL, "fix:obsolete-stack", f"Cleanup failed: {exc}"))
                 return fixes
 
+        if needs_init_containers:
+            from .agent_installer import AgentInstallError, migrate_dlux_init_containers
+
+            try:
+                outcome = migrate_dlux_init_containers(
+                    ".", compose_file=args.file or "", apply=True)
+                fixes.append(_result(
+                    OK, "fix:dlux-init-containers",
+                    "Retired dlux-updater into Compose init containers on celery. "
+                    f"Apply with '{outcome.get('command')}'. Backup: "
+                    + (outcome.get("backup_root") or "n/a"),
+                ))
+            except AgentInstallError as exc:
+                fixes.append(_result(
+                    FAIL, "fix:dlux-init-containers", f"Retirement failed: {exc}"))
+        if needs_install:
+            from .agent_installer import AgentInstallError, install_composer_stack
+
+            try:
+                outcome = install_composer_stack(".", compose_file=args.file or "", apply=True)
+                fixes.append(_result(
+                    OK, "fix:install-composer",
+                    "Installed docker-socket-proxy, composer-executor and composer-agent. "
+                    f"Start them with '{outcome.get('command')}'. Backup: "
+                    + (outcome.get("backup_root") or "n/a"),
+                ))
+            except AgentInstallError as exc:
+                fixes.append(_result(FAIL, "fix:install-composer", f"Install failed: {exc}"))
         if legacy:
             from .agent_installer import AgentInstallError, enable_agent
 

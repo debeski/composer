@@ -54,6 +54,10 @@ INHERITED_SECRET_KEYS_ENV = "COMPOSER_INHERITED_SECRET_KEYS"
 # Service label naming a command composer runs once the stack is healthy. Compose
 # ignores it, unlike a native post_start hook, so there is exactly one runner.
 POST_START_LABEL = "org.dlux.post-start"
+# Compose interpolates this into the generated project's native `pre_start`
+# migrator step, which is how a deploy's -mm / -nm / -a reach a hook that is
+# otherwise static in the compose file.
+MIGRATOR_FLAGS_ENV = "DLUX_MIGRATOR_FLAGS"
 DEFAULT_MIGRATOR_SERVICE = "web"
 DEFAULT_MIGRATOR_COMMAND = (
     "python -m dlux.updater.supervisor --no-watch -- python manage.py migrator"

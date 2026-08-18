@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import unittest
@@ -176,6 +177,266 @@ class CheckupCheckTests(unittest.TestCase):
         with patch.object(self.launcher, "run_docker_compose", return_value=(False, "", "no container")):
             result = self.launcher._check_versions()
         self.assertEqual(result["level"], OK)
+
+
+class DluxUpdaterExecutorCheckTests(unittest.TestCase):
+    """Is the stack ready for DjangoLux to hand its updates to Composer?
+
+    The `dlux-updater` SERVICE is never proposed for removal. It also runs
+    `dlux_reconcile` and `migrator`, `web` gates its start on its health, and it
+    is the queue worker that writes the hand-off. What 1.9.0 deletes is the
+    executor code inside it.
+    """
+
+    def setUp(self):
+        self.launcher = DockerComposeLauncher()
+        self.launcher.active_compose_files = ["compose.yml"]
+
+    def _check(self, services, runtime, mounted=True):
+        self.launcher.services = services
+        with patch.object(self.launcher, "_dlux_runtime_version", return_value=runtime), \
+             patch.object(self.launcher, "_mounts_dlux_runtime", return_value=mounted):
+            return self.launcher._check_dlux_updater_executor()
+
+    def test_ok_when_the_service_is_absent(self):
+        result = self._check(["web", "celery"], (1, 8, 0))
+        self.assertEqual(result["level"], OK)
+
+    def test_a_ready_stack_is_ok_and_never_proposes_removing_the_service(self):
+        result = self._check(["web", "dlux-updater", "composer-executor"], (1, 8, 0))
+
+        self.assertEqual(result["level"], OK)
+        self.assertIn("composer-executor", result["message"])
+        self.assertNotIn("fix", result)
+
+    def test_no_composer_loop_means_a_request_would_never_be_executed(self):
+        """Composer is required for DjangoLux updates, not an optional companion."""
+        result = self._check(["web", "dlux-updater"], (1, 8, 0))
+
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("never be executed", result["message"])
+        self.assertIn("--fix", result["fix"])
+
+    def test_a_loop_without_the_runtime_volume_fails(self):
+        """It cannot read the request or publish availability — silently."""
+        result = self._check(
+            ["web", "dlux-updater", "composer-agent"], (1, 8, 0), mounted=False)
+
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("dlux_runtime", result["message"])
+
+    def test_an_older_runtime_is_ok_and_told_nothing_needs_changing(self):
+        """Running --fix before the 1.8.0 upgrade must be a no-op, not a warning."""
+        result = self._check(["web", "dlux-updater", "composer-executor"], (1, 7, 1))
+
+        self.assertEqual(result["level"], OK)
+        self.assertIn("Nothing to change now", result["message"])
+
+    def test_warns_when_the_runtime_cannot_be_determined(self):
+        result = self._check(["web", "dlux-updater"], None)
+
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("could not be read", result["message"])
+
+    def test_the_executor_is_preferred_over_the_agent_as_the_loop(self):
+        self.launcher.services = ["dlux-updater", "composer-agent", "composer-executor"]
+        self.assertEqual(self.launcher._package_loop_service(), "composer-executor")
+
+
+class InitContainerFixGatingTests(unittest.TestCase):
+    """When --fix may retire dlux-updater, and when it must refuse.
+
+    Applying this on a host whose Compose ignores `pre_start` would remove the
+    service that runs migrations and replace it with steps that never execute —
+    the stack would boot unmigrated. Applying it on an image whose DjangoLux
+    still performs its own updates would remove its only update path.
+    """
+
+    def _fixes(self, *, services, compose="5.3.1", dlux=(1, 8, 0), migration_files=("compose.yml",)):
+        launcher = DockerComposeLauncher()
+        launcher.services = list(services)
+        launcher.active_compose_files = ["compose.yml"]
+        args = _args(fix=True, yes=True)
+        with (
+            patch.object(launcher, "run_command", return_value=(True, compose, "")),
+            patch.object(launcher, "_dlux_runtime_version", return_value=dlux),
+            patch("composer.agent_installer.migrate_dlux_init_containers",
+                  return_value={"files": list(migration_files), "command": "docker compose up -d"}),
+            patch.object(launcher, "build_compose_env", return_value={}),
+            patch.object(launcher, "plaintext_env_candidates", return_value=[]),
+            patch("composer.wrappers.inspect_wrappers", return_value=[]),
+            patch("composer.checkup.inspect_legacy_proxy_routes",
+                  return_value={"recognized": [], "unsupported": []}),
+            patch("composer.agent_installer.enable_post_start_label", return_value={"files": []}),
+            patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": []}),
+            patch("composer.agent_installer.enable_executor", return_value={"files": []}),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            return launcher._maybe_fix(args, [])
+
+    def _names(self, fixes):
+        return {entry["name"] for entry in fixes}
+
+    def test_a_ready_stack_is_migrated(self):
+        fixes = self._fixes(services=["web", "celery", "dlux-updater", "composer-agent",
+                                      "composer-executor"])
+        self.assertIn("fix:dlux-init-containers", self._names(fixes))
+
+    def test_an_old_compose_plugin_blocks_it(self):
+        """It would ignore pre_start and boot the stack unmigrated."""
+        fixes = self._fixes(
+            services=["web", "celery", "dlux-updater", "composer-agent", "composer-executor"],
+            compose="2.29.7")
+
+        self.assertNotIn("fix:dlux-init-containers", self._names(fixes))
+        blocked = [f for f in fixes if f["name"] == "dlux-init-containers"]
+        self.assertTrue(blocked)
+        self.assertIn("unmigrated", blocked[0]["message"])
+
+    def test_an_older_dlux_image_blocks_it(self):
+        """That service is still the deployment's only update path."""
+        fixes = self._fixes(
+            services=["web", "celery", "dlux-updater", "composer-agent", "composer-executor"],
+            dlux=(1, 7, 1))
+
+        self.assertNotIn("fix:dlux-init-containers", self._names(fixes))
+        blocked = [f for f in fixes if f["name"] == "dlux-init-containers"]
+        self.assertIn("still owns the update path", blocked[0]["message"])
+
+    def test_an_unreadable_dlux_version_blocks_it(self):
+        fixes = self._fixes(
+            services=["web", "celery", "dlux-updater", "composer-agent", "composer-executor"],
+            dlux=None)
+
+        self.assertNotIn("fix:dlux-init-containers", self._names(fixes))
+
+    def test_a_stack_without_the_service_is_left_alone(self):
+        fixes = self._fixes(services=["web", "celery", "composer-agent", "composer-executor"])
+
+        self.assertNotIn("fix:dlux-init-containers", self._names(fixes))
+        self.assertNotIn("dlux-init-containers", self._names(fixes))
+
+    def test_an_already_migrated_stack_reports_no_change(self):
+        """The transform is a no-op, so it must not be offered."""
+        fixes = self._fixes(
+            services=["web", "celery", "dlux-updater", "composer-agent", "composer-executor"],
+            migration_files=())
+
+        self.assertNotIn("fix:dlux-init-containers", self._names(fixes))
+
+
+class ComposeVersionFloorTests(unittest.TestCase):
+    """Init containers landed in Compose 5.3.0.
+
+    An older plugin ignores the `pre_start` key rather than rejecting it, so the
+    stack would come up with no migrations applied and every gated service
+    waiting forever. Nothing else surfaces that before a deploy.
+    """
+
+    def setUp(self):
+        self.launcher = DockerComposeLauncher()
+
+    def _result(self, raw):
+        return self.launcher._compose_version_result(raw)
+
+    def test_a_supported_version_is_ok(self):
+        result = self._result("5.3.1")
+
+        self.assertEqual(result["level"], OK)
+        self.assertIn("5.3.1", result["message"])
+
+    def test_the_v_prefix_is_tolerated(self):
+        self.assertEqual(self._result("v5.3.1")["level"], OK)
+
+    def test_a_prerelease_suffix_is_tolerated(self):
+        self.assertEqual(self._result("5.3.0-rc.2")["level"], OK)
+
+    def test_an_older_plugin_fails(self):
+        result = self._result("2.29.7")
+
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("never start", result["message"])
+        self.assertIn("5.3.0", result["fix"])
+
+    def test_the_boundary_version_is_accepted(self):
+        self.assertEqual(self._result("5.3.0")["level"], OK)
+
+    def test_the_version_just_below_is_refused(self):
+        self.assertEqual(self._result("5.2.9")["level"], FAIL)
+
+    def test_unreadable_output_warns_rather_than_guessing(self):
+        for raw in ("", "   ", "not-a-version"):
+            with self.subTest(raw=raw):
+                self.assertEqual(self._result(raw)["level"], WARN)
+
+    def test_a_two_part_version_means_dot_zero(self):
+        """(5, 3) compares as LESS than (5, 3, 0), so it must be padded."""
+        self.assertEqual(self.launcher._parse_compose_version("5.3"), (5, 3, 0))
+        self.assertEqual(self._result("5.3")["level"], OK)
+
+    def test_a_single_component_version_is_padded_too(self):
+        self.assertEqual(self.launcher._parse_compose_version("6"), (6, 0, 0))
+        self.assertEqual(self._result("6")["level"], OK)
+
+
+class UnmanagedStackTopologyTests(unittest.TestCase):
+    """A DjangoLux stack with no Composer service has no update path at all."""
+
+    def _topology(self, services):
+        launcher = DockerComposeLauncher()
+        launcher.services = services
+        return launcher._check_topology()
+
+    def test_a_stack_with_no_composer_service_fails(self):
+        result = self._topology(["web", "celery", "db", "dlux-updater"])
+
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("no update path", result["message"])
+        self.assertIn("--fix", result["fix"])
+
+    def test_the_hardened_trio_is_still_ok(self):
+        result = self._topology(
+            ["web", "composer-agent", "composer-executor", "docker-socket-proxy"])
+        self.assertEqual(result["level"], OK)
+
+
+class DluxRuntimeMountTests(unittest.TestCase):
+    def setUp(self):
+        self.launcher = DockerComposeLauncher()
+
+    def _mounts(self, definition):
+        model = json.dumps({"services": {"composer-executor": definition}})
+        with patch.object(self.launcher, "run_docker_compose", return_value=(True, model, "")):
+            return self.launcher._mounts_dlux_runtime("composer-executor")
+
+    def test_a_named_volume_mount_is_recognized(self):
+        self.assertTrue(self._mounts(
+            {"volumes": [{"type": "volume", "source": "dlux_runtime",
+                          "target": "/opt/dlux-runtime"}]}))
+
+    def test_a_project_prefixed_volume_name_is_recognized(self):
+        """`docker compose config` reports the volume with the project prefix."""
+        self.assertTrue(self._mounts(
+            {"volumes": [{"type": "volume", "source": "myproject_dlux_runtime",
+                          "target": "/opt/dlux-runtime"}]}))
+
+    def test_short_syntax_is_recognized(self):
+        self.assertTrue(self._mounts({"volumes": ["dlux_runtime:/opt/dlux-runtime:rw"]}))
+
+    def test_an_unrelated_mount_is_not_a_match(self):
+        self.assertFalse(self._mounts({"volumes": ["static:/app/staticfiles:rw"]}))
+
+    def test_no_volumes_at_all_is_not_a_match(self):
+        self.assertFalse(self._mounts({}))
+
+    def test_an_unreadable_model_is_unknown_rather_than_a_failure(self):
+        with patch.object(self.launcher, "run_docker_compose", return_value=(False, "", "boom")):
+            self.assertIsNone(self.launcher._mounts_dlux_runtime("composer-executor"))
+
+    def test_a_service_the_model_does_not_define_is_unknown(self):
+        model = json.dumps({"services": {"web": {}}})
+        with patch.object(self.launcher, "run_docker_compose", return_value=(True, model, "")):
+            self.assertIsNone(self.launcher._mounts_dlux_runtime("composer-executor"))
 
 
 class CheckupRunTests(unittest.TestCase):

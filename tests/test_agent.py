@@ -65,6 +65,52 @@ class AgentProtocolTests(unittest.TestCase):
                 "action": "composer.purge",
             })
 
+    def test_package_update_is_typed_and_bounded(self):
+        """Inline dlux update: composer stages it, so the payload is validated here.
+
+        `target_version` becomes a directory name under releases/, so it is
+        pattern-checked rather than trusted.
+        """
+        value = command("dlux.package_update",
+                        {"mode": "apply", "target_version": "1.8.0", "backup_mode": "full"})
+        self.assertEqual(
+            value["payload"],
+            {"mode": "apply", "target_version": "1.8.0", "backup_mode": "full"},
+        )
+        # empty target means "latest eligible release"
+        latest = command("dlux.package_update",
+                         {"mode": "apply", "target_version": "", "backup_mode": "data"})
+        self.assertEqual(latest["payload"]["target_version"], "")
+        self.assertEqual(
+            command("dlux.package_update",
+                    {"mode": "rollback", "target_version": "", "backup_mode": "skip"})["payload"]["mode"],
+            "rollback",
+        )
+
+    def test_package_update_rejects_bad_payloads(self):
+        for payload in (
+            {"mode": "delete", "target_version": "", "backup_mode": "data"},
+            {"mode": "apply", "target_version": "../../etc/passwd", "backup_mode": "data"},
+            {"mode": "apply", "target_version": "1.8.0/../..", "backup_mode": "data"},
+            {"mode": "apply", "target_version": "1.8.0", "backup_mode": "nuke"},
+            {"mode": "apply", "target_version": "1.8.0", "backup_mode": "data", "command": "id"},
+            {"target_version": "1.8.0", "backup_mode": "data"},   # mode has no safe default
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ProtocolError):
+                    command("dlux.package_update", payload)
+
+    def test_package_update_omissions_fall_back_to_documented_defaults(self):
+        """Omitting an optional field mirrors dlux.image_update: it defaults.
+
+        `mode` is deliberately not in that set — there is no safe default between
+        applying and rolling back, so an absent mode is rejected above.
+        """
+        value = command("dlux.package_update", {"mode": "apply"})
+
+        self.assertEqual(value["payload"],
+                         {"mode": "apply", "target_version": "", "backup_mode": "data"})
+
     def test_backup_create_is_typed_and_restore_is_rejected(self):
         value = command("dlux.backup.create", {"backup_mode": "full"})
         self.assertEqual(value["payload"], {"backup_mode": "full"})
@@ -545,3 +591,58 @@ class AgentPairingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentOnlyPackageUpdateTests(unittest.TestCase):
+    """No composer-executor in the stack, so this loop owns the package trigger.
+
+    Without it a DjangoLux 1.8.0 request on an agent-only stack would never be
+    acknowledged, and DjangoLux refuses to queue a second update while one is
+    still pending — a permanent wedge, not a slow update.
+    """
+
+    def _agent(self, root):
+        with patch("composer.agent.ComposerAgent._build_client", return_value=None):
+            return ComposerAgent(agent_args(root))
+
+    def _request(self, agent, **payload):
+        base = {"mode": "apply", "target_version": "1.8.0", "backup_mode": "data"}
+        base.update(payload)
+        agent.watch.package_trigger.write_text(
+            json.dumps({"token": "pkg-1", "payload": base}), encoding="utf-8")
+
+    def test_a_package_request_is_processed_when_no_executor_is_configured(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = self._agent(Path(temp_dir))
+            self._request(agent)
+            with patch("composer.executor_client.executor_configured", return_value=False), \
+                 patch.object(agent.watch, "process_package", return_value=0) as processed:
+                agent.process_local_update()
+
+            self.assertEqual(processed.call_count, 1)
+            self.assertEqual(processed.call_args[0][0]["token"], "pkg-1")
+
+    def test_an_image_request_still_takes_precedence(self):
+        """One operation per tick; the image deploy has the wider blast radius."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = self._agent(Path(temp_dir))
+            agent.watch.trigger.write_text(json.dumps({"token": "img-1"}), encoding="utf-8")
+            self._request(agent)
+            with patch("composer.executor_client.executor_configured", return_value=False), \
+                 patch.object(agent.watch, "process", return_value=0) as image, \
+                 patch.object(agent.watch, "process_package", return_value=0) as package:
+                agent.process_local_update()
+
+            self.assertEqual(image.call_count, 1)
+            self.assertEqual(package.call_count, 0)
+
+    def test_with_an_executor_the_agent_only_observes(self):
+        """The agent holds no Docker authority in the hardened topology."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = self._agent(Path(temp_dir))
+            self._request(agent)
+            with patch("composer.executor_client.executor_configured", return_value=True), \
+                 patch.object(agent.watch, "process_package", return_value=0) as package:
+                agent.process_local_update()
+
+            self.assertEqual(package.call_count, 0)

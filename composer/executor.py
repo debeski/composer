@@ -208,7 +208,7 @@ def _expected_peer_uid_from_env() -> Optional[int]:
 
 
 def _run_watch_loop(watch, op_lease, stop_event) -> None:
-    """The executor's trigger-watched image-update loop.
+    """The executor's trigger-watched update loop (image and inline package).
 
     Serializes with socket ops on the shared ``op_lease``. Availability checks are
     NOT run here — those are a Docker read the agent performs via the read-only
@@ -221,6 +221,10 @@ def _run_watch_loop(watch, op_lease, stop_event) -> None:
             if request:
                 with op_lease:
                     watch.process(request)
+            package_request = watch.pending_package_request()
+            if package_request:
+                with op_lease:
+                    watch.process_package(package_request)
         except Exception:
             pass
         stop_event.wait(interval)
@@ -238,6 +242,7 @@ def _build_watch_runtime(args):
 
     watch_args = SimpleNamespace(
         trigger_file=trigger,
+        package_trigger_file=getattr(args, "package_trigger_file", None),
         status_file=getattr(args, "status_file", None),
         log_file=getattr(args, "log_file", None),
         interval=getattr(args, "interval", 2) or 2,

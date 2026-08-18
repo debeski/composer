@@ -10,6 +10,7 @@ from .constants import (
     DEFAULT_RESIDENT_SERVICE,
     ENV_NAME_RE,
     INHERITED_SECRET_KEYS_ENV,
+    MIGRATOR_FLAGS_ENV,
     SERVICE_FAILED,
     SERVICE_HEALTHY,
     SERVICE_NOT_SEEN,
@@ -53,6 +54,12 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             env["DEBUG"] = "True"
             env["DEBUG_STATUS"] = "True"
         env["COMPOSER_VERSION"] = self.composer_version
+        # The generated project runs the migrator as a native Compose `pre_start`
+        # step, which is static in the compose file. Compose interpolates this
+        # variable into it, so a deploy's -mm / -nm / -a still reach it. Always
+        # set, never left to leak in from the ambient environment: an empty value
+        # is the correct default and a stale export must not become a flag.
+        env[MIGRATOR_FLAGS_ENV] = " ".join(self.migrator_flags())
         env.setdefault("BUILDKIT_PROGRESS", "plain")
         return env
 

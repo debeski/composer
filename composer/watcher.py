@@ -438,6 +438,14 @@ class WatchRuntime:
         self.args = args
         self.trigger = Path(args.trigger_file)
         self.ack = Path(f"{self.trigger}.ack")
+        # Inline DjangoLux package updates use their own trigger beside the image
+        # one, so an image deploy and a package swap can never be confused for
+        # each other — they have different blast radii.
+        package_trigger = getattr(args, "package_trigger_file", None)
+        self.package_trigger = Path(
+            package_trigger or self.trigger.with_name("package-update-request.json")
+        )
+        self.package_ack = Path(f"{self.package_trigger}.ack")
         self.interval = max(2.0, float(args.interval))
         self.child = [sys.executable, "-m", "composer", "update"]
         if args.dev:
@@ -475,6 +483,14 @@ class WatchRuntime:
         self.local_probe_interval = LOCAL_DIGEST_PROBE_SECONDS
         self.next_local_probe = 0.0
         self.last_token = _read_ack_token(self.ack)
+        self.last_package_token = _read_ack_token(self.package_ack)
+        # DjangoLux 1.8.0 stopped reaching PyPI from inside the container and
+        # reads what we publish instead. Without this, its update tile would sit
+        # at "unknown" forever. Same cadence as the image check.
+        self.package_availability_file = self.package_trigger.with_name(
+            "package-available.json"
+        )
+        self.next_package_check = 0.0
 
     def maybe_check_availability(self, force=False):
         if not self.availability_enabled:
@@ -486,6 +502,27 @@ class WatchRuntime:
             payload = write_availability(self.availability_file, self.check_images)
             self.record_local_digests(payload)
             self.next_check = time.monotonic() + self.check_interval
+
+    def maybe_check_package_availability(self, force=False):
+        """Publish what DjangoLux release is installable, on the check cadence.
+
+        Failures are published as reports (see `build_availability_payload`), so
+        the only reason to skip is a volume that is not there — a stack whose
+        DjangoLux does not use the runtime volume at all.
+        """
+        if not self.package_trigger.parent.is_dir():
+            return
+        if not force and time.monotonic() < self.next_package_check:
+            return
+        self.next_package_check = time.monotonic() + self.check_interval
+        try:
+            from .dlux_package_cli import build_availability_payload, write_availability
+
+            write_availability(None, build_availability_payload(),
+                               self.package_availability_file)
+        except Exception as exc:
+            # Publication is best-effort; it must never take the watch loop down.
+            print(f"⚠ package availability check failed: {redact_text(exc)}", flush=True)
 
     def record_local_digests(self, payload: Optional[dict]):
         for entry in (payload or {}).get("images") or []:
@@ -525,6 +562,82 @@ class WatchRuntime:
         value = read_request(self.trigger)
         value["token"] = token
         return value
+
+    def pending_package_request(self):
+        token = _read_request_token(self.package_trigger)
+        if not token or token == self.last_package_token:
+            return None
+        value = read_request(self.package_trigger)
+        value["token"] = token
+        return value
+
+    def process_package(self, request: dict) -> int:
+        """Run an inline DjangoLux update for a request DjangoLux wrote.
+
+        Mirrors `process()`: run a child, ack the token whatever happens, and
+        never let an unreadable request wedge the loop. The child owns the
+        rollback decision — see composer/dlux_package_update.py.
+        """
+        token = str(request["token"])
+        operation_id = str(request.get("operation_id") or "").strip()
+        payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+        mode = str(payload.get("mode") or request.get("mode") or "apply").strip().lower()
+        if mode not in {"apply", "rollback"}:
+            mode = "apply"
+        version = str(payload.get("target_version") or request.get("target_version") or "").strip()
+
+        child = [sys.executable, "-m", "composer", "dlux-update", mode]
+        if version:
+            child.extend(["--version", version])
+        if self.args.dev:
+            child.append("-d")
+        if self.args.file:
+            child.extend(["-f", self.args.file])
+        if self.args.status_file:
+            child.extend(["--status-file", self.args.status_file])
+
+        label = f"{mode} {version}".strip()
+        print(f"⟳ dlux package update {token} — {label}", flush=True)
+        child_env = self.env.copy()
+        child_env["COMPOSER_REQUEST_TOKEN"] = token
+        if operation_id:
+            child_env["COMPOSER_OPERATION_ID"] = operation_id
+        launch_error = ""
+        try:
+            exit_code = subprocess.run(child, env=child_env).returncode
+        except (OSError, subprocess.SubprocessError) as exc:
+            exit_code = 127
+            launch_error = f"Composer dlux-update process could not start: {exc}"
+        if exit_code != 0:
+            fallback = launch_error or (
+                f"Composer dlux-update exited with status {exit_code}."
+            )
+            if self.args.status_file:
+                _publish_terminal_failure(
+                    self.args.status_file, token, exit_code,
+                    error=launch_error, operation_id=operation_id,
+                )
+            _append_terminal_failure(self.log_file, fallback)
+        _write_ack(self.package_ack, token, exit_code, operation_id=operation_id)
+        self.last_package_token = token
+        # exit 3 is the orchestrator's "needs a human" signal; keep it distinct
+        # in the log so an operator is not told a broken deployment is "failed".
+        state = "ready" if exit_code == 0 else (
+            "NEEDS ATTENTION (rollback unhealthy)" if exit_code == 3 else f"failed (exit {exit_code})"
+        )
+        print(f"✔ dlux package update {token} → {state}", flush=True)
+        # Re-publish immediately: after a successful swap the previous report
+        # still advertises the version just installed.
+        self.maybe_check_package_availability(force=True)
+        return exit_code
+
+    def read_package_ack(self) -> dict:
+        """The inline package update's completion ack, or {}. Reads only."""
+        try:
+            value = json.loads(self.package_ack.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError):
+            return {}
 
     def read_ack(self) -> dict:
         """Return the last completion ack ({token, exit_code, operation_id}) or {}.
@@ -592,9 +705,15 @@ def run_watch(args) -> int:
 
     while True:
         runtime.maybe_check_availability()
+        runtime.maybe_check_package_availability()
         request = runtime.pending_request()
         if request:
             exit_code = runtime.process(request)
+            if args.once:
+                return exit_code
+        package_request = runtime.pending_package_request()
+        if package_request:
+            exit_code = runtime.process_package(package_request)
             if args.once:
                 return exit_code
         elif args.once:

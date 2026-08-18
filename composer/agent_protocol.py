@@ -11,6 +11,7 @@ MAX_COMMAND_BYTES = 65536
 MAX_EVENT_TEXT = 32768
 REMOTE_ACTIONS = frozenset({
     "dlux.image_update",
+    "dlux.package_update",
     "dlux.backup.create",
     "composer.restart",
     "composer.recovery_deploy",
@@ -24,6 +25,9 @@ _SENSITIVE_RE = re.compile(
     r"(?i)(authorization|password|passwd|secret|token|api[_-]?key)"
     r"(\s*[:=]\s*)([^\s,;]+)"
 )
+# A target version becomes a directory name under releases/, so it is validated
+# here rather than trusted: digits, dots and the usual PEP 440 suffix characters.
+_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)*(?:[.-]?(?:a|b|rc|post|dev)[0-9]+)?")
 _AUTHORIZATION_RE = re.compile(
     r"(?i)(authorization\s*[:=]\s*)[^\r\n,;]+"
 )
@@ -92,6 +96,22 @@ def validate_command(value: Any) -> Dict[str, Any]:
         if mode not in {"data", "full", "skip"}:
             raise ProtocolError("backup_mode must be data, full, or skip.")
         payload = {"backup_mode": mode}
+    elif action == "dlux.package_update":
+        # Inline DjangoLux package update: composer stages the release into the
+        # runtime volume and flips active.json. Whether a release may be applied
+        # inline at all is the release manifest's call (`inline_safe`), not this
+        # protocol's — composer refuses at execution time, not at validation time.
+        _require_payload_fields(payload, {"mode", "target_version", "backup_mode"})
+        mode = str(payload.get("mode") or "").strip().lower()
+        if mode not in {"apply", "rollback"}:
+            raise ProtocolError("package_update mode must be apply or rollback.")
+        target = str(payload.get("target_version") or "").strip()
+        if target and not _VERSION_RE.fullmatch(target):
+            raise ProtocolError("target_version must be a release version or empty.")
+        backup = str(payload.get("backup_mode") or "data").strip().lower()
+        if backup not in {"data", "full", "skip"}:
+            raise ProtocolError("backup_mode must be data, full, or skip.")
+        payload = {"mode": mode, "target_version": target, "backup_mode": backup}
     elif action == "dlux.backup.create":
         _require_payload_fields(payload, {"backup_mode"})
         mode = str(payload.get("backup_mode") or "data").strip().lower()

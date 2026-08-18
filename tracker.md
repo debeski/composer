@@ -41,7 +41,8 @@
 - **Priority 2:**
   - [ ] Derive restart safety from DLUX `org.dlux.restart=safe|protected` labels instead of hardcoded names.
   - [ ] Add shared `check` drift checks for raw Docker socket mounts and the `dlux_runtime` rw/ro split.
-  - [ ] Run pending dependency/container CVE scanners and image smoke tests when tools/images are available.
+  - [ ] Drop pip/setuptools from the image (`pip uninstall -y pip`) - clears 3 fixable HIGH (msgpack, setuptools) from pip's vendor tree; composer is stdlib-only.
+  - [ ] Add `provenance: mode=max` + `sbom: true` to the release build-push step (Scout attestation policy).
 - **Completed Recently:**
   - [x] v1.3.6: missing-label DLUX compatibility migrator + guarded label repair; post-start uses `exec -T`, streams progress, and fails the run; direct `migrate` subcommand with service/arg passthrough. +9 tests.
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (agent-update). `-mm`/`-nm` mutually exclusive. +21 tests.
@@ -49,7 +50,8 @@
 ### One-line info about last verified Tests:
 - Verified 2026-08-07: 333/333 tests; live project-archive compatibility discovery + `composer migrate -d -nm` exited 0 and replaced 171 static files with 172.
 - Verified 2026-08-07: missing-label `check --fix` dry-run against project-archive produces only the `web` label insertion.
-- Dependency/container CVE scanning remains pending because the scanners are unavailable locally.
+- Verified 2026-08-18: Docker Scout on published v1.3.6 digest = 4C/22H (2C/16H fixable); plain rebuild -> 3C/17H; +pip removal -> 3C/14H (1C/8H fixable) and smoke-test passes.
+- Verified 2026-08-18: residual fixable C/H all live in Docker's own `docker-ce-cli` 29.7.2 binary (Go stdlib 1.26.5, x/mod 0.38.0, docker/docker 28.5.2); alpine base is worse (docker-cli 29.5.3 = 9C/16H fixable).
 ### One-line info about last time edited Docs:
 - 2026-08-07 README documents `migrate`, missing-label compatibility/repair, fatal post-start behavior, and terminal binding.
 

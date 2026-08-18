@@ -634,6 +634,14 @@ def parse_watch_args(argv):
         action="store_true",
         help="Process at most one pending request, then exit (for testing)",
     )
+    parser.add_argument(
+        "--package-trigger-file",
+        default=None,
+        help=(
+            "Local DLUX inline package-update trigger "
+            "(default: 'package-update-request.json' beside the image trigger)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -759,4 +767,12 @@ def parse_executor_args(argv):
     parser.add_argument("--interval", type=float, default=2.0, help="Watch poll interval seconds")
     parser.add_argument("-f", "--file", help="Alternate compose file")
     parser.add_argument("-d", "--dev", action="store_true", help="Target the dev compose files")
+    parser.add_argument(
+        "--package-trigger-file",
+        default=None,
+        help=(
+            "Local DLUX inline package-update trigger "
+            "(default: 'package-update-request.json' beside the image trigger)"
+        ),
+    )
     return parser.parse_args(argv)

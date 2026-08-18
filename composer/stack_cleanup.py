@@ -55,14 +55,23 @@ def _services_section(contents: str) -> tuple[list[str], int, int, int]:
     return lines, start, end, min(indents)
 
 
-def remove_obsolete_service_blocks(contents: str) -> tuple[str, set[str]]:
+def remove_obsolete_service_blocks(contents: str, services=None) -> tuple[str, set[str]]:
+    """Strip whole service blocks. ``services`` defaults to OBSOLETE_SERVICES.
+
+    Callers pass an explicit set for a removal that is conditional rather than
+    unconditional — retiring `dlux-updater` is only correct once the project
+    image ships a DjangoLux that hands its updates to Composer.
+    """
+    names = sorted(OBSOLETE_SERVICES if services is None else services)
+    if not names:
+        return contents, set()
     lines, section_start, section_end, service_indent = _services_section(contents)
     if not service_indent:
         return contents, set()
 
     targets: list[tuple[int, int, str]] = []
     header = re.compile(
-        rf"^ {{{service_indent}}}({'|'.join(re.escape(name) for name in sorted(OBSOLETE_SERVICES))}):(?:\s.*)?(?:\r?\n)?$"
+        rf"^ {{{service_indent}}}({'|'.join(re.escape(name) for name in names)}):(?:\s.*)?(?:\r?\n)?$"
     )
     for index in range(section_start + 1, section_end):
         match = header.match(lines[index])
@@ -444,6 +453,7 @@ def remove_obsolete_services(
     *,
     environment: Mapping[str, str] | None = None,
     command_runner=subprocess.run,
+    services=None,
 ) -> Dict[str, Any]:
     project_root = Path(project_dir).resolve()
     sources = [_project_file(project_root, value) for value in compose_files]
@@ -453,7 +463,7 @@ def remove_obsolete_services(
     for source in sources:
         contents = source.read_text(encoding="utf-8")
         originals[source] = contents
-        updated, file_removed = remove_obsolete_service_blocks(contents)
+        updated, file_removed = remove_obsolete_service_blocks(contents, services)
         if file_removed:
             compose_updates[source] = updated
             removed.update(file_removed)

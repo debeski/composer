@@ -325,7 +325,9 @@ class ComposerAgent:
 
     def process_bridge_results(self):
         for command in self.store.running_commands():
-            if command["action"] not in {"dlux.image_update", "dlux.backup.create"}:
+            if command["action"] not in {
+                "dlux.image_update", "dlux.package_update", "dlux.backup.create"
+            }:
                 continue
             operation_id = command["operation_id"]
             path = self.bridge_results / f"{operation_id}.json"
@@ -512,7 +514,9 @@ class ComposerAgent:
         if not command:
             return
         operation_id = command["operation_id"]
-        if command["action"] in {"dlux.image_update", "dlux.backup.create"}:
+        if command["action"] in {
+            "dlux.image_update", "dlux.package_update", "dlux.backup.create"
+        }:
             self._bridge_request(command)
             self.store.transition(operation_id, "running", {"phase": "awaiting_dlux"})
             return
@@ -636,25 +640,63 @@ class ComposerAgent:
         # deployment just installed.
         self.watch.maybe_check_availability(force=True)
 
+    def _observe_executor_package_update(self):
+        """Same contract as _observe_executor_update, for inline package updates.
+
+        Tracked under its own marker so an image deploy and a package swap cannot
+        mask each other's completion.
+        """
+        ack = self.watch.read_package_ack()
+        token = str(ack.get("token") or "").strip()
+        if not token:
+            return
+        last = self.store.get_meta("last_reported_package_ack_token")
+        if not last:
+            self.store.set_meta("last_reported_package_ack_token", token)
+            return
+        if token == last:
+            return
+        operation_id = str(ack.get("operation_id") or "").strip()
+        try:
+            exit_code = int(ack.get("exit_code", 0) or 0)
+        except (TypeError, ValueError):
+            exit_code = 1
+        self._report_local_update(token, operation_id, exit_code)
+        self.store.set_meta("last_reported_package_ack_token", token)
+
     def process_local_update(self):
         # Executor mode: the executor owns the trigger-watched update; the agent
         # holds no Docker authority and only observes the result.
         from . import executor_client
         if executor_client.executor_configured():
             self._observe_executor_update()
+            self._observe_executor_package_update()
             return
         request = self.watch.pending_request()
-        if not request:
+        if request:
+            operation_id = str(request.get("operation_id") or "").strip()
+            if operation_id and self.store.command_state(operation_id):
+                self.store.transition(operation_id, "running", {"phase": "composer_deploy"})
+            exit_code = self.watch.process(request)
+            token = str(request.get("token") or "")
+            self._report_local_update(token, operation_id, exit_code)
             return
-        operation_id = str(request.get("operation_id") or "").strip()
+        # No executor to defer to, so this loop also owns the package trigger.
+        # Without it a stack on the agent-only topology would leave a DjangoLux
+        # 1.8.0 update request unacknowledged forever — and DjangoLux refuses to
+        # queue a second one while the first is pending.
+        package = self.watch.pending_package_request()
+        if not package:
+            return
+        operation_id = str(package.get("operation_id") or "").strip()
         if operation_id and self.store.command_state(operation_id):
-            self.store.transition(operation_id, "running", {"phase": "composer_deploy"})
-        exit_code = self.watch.process(request)
-        token = str(request.get("token") or "")
-        self._report_local_update(token, operation_id, exit_code)
+            self.store.transition(operation_id, "running", {"phase": "dlux_package_update"})
+        exit_code = self.watch.process_package(package)
+        self._report_local_update(str(package.get("token") or ""), operation_id, exit_code)
 
     def run_once(self):
         self.watch.maybe_check_availability()
+        self.watch.maybe_check_package_availability()
         self.process_enroll_request()
         self.process_pending_rotation()
         self.process_local_update()
