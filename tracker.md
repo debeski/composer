@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.5 is tagged/published and v1.3.6 is in progress.
+- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.7 is tagged/published and v1.3.8 is in progress.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; legacy native hooks and recognized missing-label DLUX updater stacks remain compatible and `check --fix` normalizes them.
 - `migrate` is terminal-bound, defaults to `web`, prefers its label command, and forwards remaining migrator args.
@@ -38,6 +38,7 @@
   - [ ] Run `./start.sh update-self` from each deployment root once v1.3.6 is tagged.
   - [ ] Live verify on a real deployment: after `./start.sh update`, DLUX's image-update indicator clears within ~30s (agent must see the new local digest through the read-only proxy).
   - [ ] Live verify detach: close the terminal mid-`update` (native + `start.sh`), confirm the deploy finishes and `composer-detached.log` fills; Ctrl+C still exits 130.
+  - [ ] Push v1.3.8 and confirm CI/release test setup installs PyYAML before discovery.
 - **Priority 2:**
   - [ ] Derive restart safety from DLUX `org.dlux.restart=safe|protected` labels instead of hardcoded names.
   - [ ] Add shared `check` drift checks for raw Docker socket mounts and the `dlux_runtime` rw/ro split.
@@ -52,8 +53,9 @@
 - Verified 2026-08-07: missing-label `check --fix` dry-run against project-archive produces only the `web` label insertion.
 - Verified 2026-08-18: Docker Scout on published v1.3.6 digest = 4C/22H (2C/16H fixable); plain rebuild -> 3C/17H; +pip removal -> 3C/14H (1C/8H fixable) and smoke-test passes.
 - Verified 2026-08-18: residual fixable C/H all live in Docker's own `docker-ce-cli` 29.7.2 binary (Go stdlib 1.26.5, x/mod 0.38.0, docker/docker 28.5.2); alpine base is worse (docker-cli 29.5.3 = 9C/16H fixable).
+- Verified 2026-08-18: temporary Python 3.14 venv with PyYAML 6.0.3 passed 482 tests (6 expected skips); the two previously unimportable YAML transform modules now pass.
 ### One-line info about last time edited Docs:
-- 2026-08-07 README documents `migrate`, missing-label compatibility/repair, fatal post-start behavior, and terminal binding.
+- 2026-08-18 CHANGELOG v1.3.8 records the pinned PyYAML CI test dependency.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:
