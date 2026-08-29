@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.8
+- **DjangoLux Manifest Schema 2**: Inline package checks now understand schema-2 install, migration, and service requirements, reject unsupported deployment contracts, and enforce the manifest's minimum Composer version.
+- **Release Test Dependency**: CI and tag workflows install pinned PyYAML before full test discovery, so Compose transform tests run in clean release environments.
 
 ## v1.3.7
 - **`check --fix` Retires dlux-updater On Existing Stacks**: new guarded compose transform that removes the service, moves its runtime reconcile and migrations into Compose init containers (`pre_start`) on celery, strips the now-orphan `depends_on` edges, grants celery write access to the runtime volume and staticfiles, and drops web's `org.dlux.post-start` migrator hook — which would otherwise be a second, redundant run now that the same work happens before start. Named volumes and their releases are kept. Double-gated, because either mistake is destructive: it refuses when the host's Compose predates 5.3.0 (it would *ignore* `pre_start` and boot the stack unmigrated) and when the project image still ships DjangoLux below 1.8.0 (that service is then the deployment's only update path). Handles a project whose scaffold block markers were hand-edited away, and removes a `depends_on` mapping left with no children rather than emitting invalid YAML. Idempotent. 22 transform tests + 6 gating tests, all mutation-verified, with the migrated file validated by `docker compose config` itself rather than only parsed.

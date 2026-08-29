@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlparse
 
+from .version import read_composer_version
+
 # Mirrored from dlux/updater/manifest.py — keep in step.
 PYPI_SIMPLE_URL = "https://pypi.org/simple/django-lux/"
 PYPI_PROJECT_REPOSITORY = "https://github.com/debeski/django-lux"
@@ -35,6 +37,8 @@ ALLOWED_DOWNLOAD_HOSTS = frozenset({"pypi.org", "files.pythonhosted.org"})
 MAX_INDEX_BYTES = 4 * 1024 * 1024
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MANIFEST_PATH = "dlux/release-manifest.json"
+SAFE_INLINE_EFFECTS = frozenset({"none", "state_only", "additive"})
+KNOWN_REQUIREMENT_KEYS = frozenset({"baked_image", "updater_schema", "services"})
 
 _HREF_RE = re.compile(r'<a\s[^>]*href="([^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 _WHEEL_RE = re.compile(r"^django_lux-([0-9][^-]*)-py3-none-any\.whl$", re.IGNORECASE)
@@ -201,6 +205,89 @@ def read_wheel_manifest(wheel_path) -> dict:
     return manifest
 
 
+def _version_at_least(current, requirement) -> bool:
+    match = re.fullmatch(r">=\s*(\d+(?:\.\d+)*)", str(requirement or "").strip())
+    current_match = re.match(r"v?(\d+(?:\.\d+)*)", str(current or "").strip())
+    if not match or not current_match:
+        return False
+    required = tuple(int(part) for part in match.group(1).split("."))
+    installed = tuple(int(part) for part in current_match.group(1).split("."))
+    width = max(len(required), len(installed))
+    return installed + (0,) * (width - len(installed)) >= required + (0,) * (width - len(required))
+
+
+def normalize_manifest(manifest, expected_version) -> dict:
+    if not isinstance(manifest, dict):
+        raise ReleaseSourceError("The release manifest is not an object.")
+    if str(manifest.get("version") or "").strip() != expected_version:
+        raise ReleaseSourceError(
+            f"The wheel for {expected_version} declares version "
+            f"{manifest.get('version') or 'unknown'}."
+        )
+
+    schema = manifest.get("schema_version")
+    if schema == 1:
+        if not isinstance(manifest.get("inline_safe"), bool):
+            raise ReleaseSourceError("The release manifest does not declare inline_safe.")
+        return dict(manifest)
+    if schema != 2:
+        raise ReleaseSourceError("The release manifest schema is not supported.")
+
+    requires = manifest.get("requires")
+    if not isinstance(requires, dict):
+        raise ReleaseSourceError("The release manifest has invalid requirements.")
+    unknown = set(requires) - KNOWN_REQUIREMENT_KEYS
+    if unknown:
+        raise ReleaseSourceError(
+            "The release manifest declares unsupported requirements: "
+            + ", ".join(sorted(unknown))
+            + "."
+        )
+    services = requires.get("services") or {}
+    if not isinstance(services, dict) or any(
+        not isinstance(name, str) or not isinstance(spec, str)
+        for name, spec in services.items()
+    ):
+        raise ReleaseSourceError("The release manifest has invalid service requirements.")
+    unsupported_services = set(services) - {"composer"}
+    if unsupported_services:
+        raise ReleaseSourceError(
+            "Composer cannot verify required services: "
+            + ", ".join(sorted(unsupported_services))
+            + "."
+        )
+    composer_requirement = services.get("composer")
+    composer_version = read_composer_version()
+    if composer_requirement and not _version_at_least(composer_version, composer_requirement):
+        raise ReleaseSourceError(
+            f"DjangoLux {expected_version} requires Composer {composer_requirement}; "
+            f"this deployment is running {composer_version}."
+        )
+
+    migrations = manifest.get("migrations")
+    install = manifest.get("install")
+    if not isinstance(migrations, dict) or not isinstance(install, dict):
+        raise ReleaseSourceError("The release manifest has invalid install policy.")
+    effect = migrations.get("effect")
+    rollback_compatible = migrations.get("rollback_compatible")
+    inline = install.get("inline")
+    if effect not in {"none", "state_only", "additive", "altering", "destructive"}:
+        raise ReleaseSourceError("The release manifest has an invalid migration effect.")
+    if not isinstance(rollback_compatible, bool):
+        raise ReleaseSourceError("The release manifest must state rollback compatibility.")
+    if inline not in {"allowed", "forbidden"}:
+        raise ReleaseSourceError("The release manifest has an invalid inline install policy.")
+
+    normalized = dict(manifest)
+    normalized["inline_safe"] = bool(
+        inline == "allowed"
+        and effect in SAFE_INLINE_EFFECTS
+        and rollback_compatible
+    )
+    normalized["required_services"] = dict(services)
+    return normalized
+
+
 def assess(candidate: ReleaseCandidate, wheel_path) -> dict:
     """Decide whether this wheel may be applied inline.
 
@@ -208,14 +295,7 @@ def assess(candidate: ReleaseCandidate, wheel_path) -> dict:
     than second-guessing it. A release that requires an image rebuild is refused
     here, exactly as DjangoLux refuses it today.
     """
-    manifest = read_wheel_manifest(wheel_path)
-    declared = str(manifest.get("version") or "").strip()
-    if declared != candidate.version:
-        raise ReleaseSourceError(
-            f"The wheel for {candidate.version} declares version {declared or 'unknown'}."
-        )
-    if not isinstance(manifest.get("inline_safe"), bool):
-        raise ReleaseSourceError("The release manifest does not declare inline_safe.")
+    manifest = normalize_manifest(read_wheel_manifest(wheel_path), candidate.version)
     if not manifest["inline_safe"]:
         raise ReleaseSourceError(
             f"DjangoLux {candidate.version} requires a project image rebuild "
@@ -238,13 +318,8 @@ def describe(target_version="", *, workdir=None, opener=urllib.request.urlopen,
     workdir.mkdir(parents=True, exist_ok=True)
     verify_attestation(candidate, runner=runner)
     wheel = download_wheel(candidate, workdir / candidate.filename, opener=opener)
-    manifest = read_wheel_manifest(wheel)
-    declared = str(manifest.get("version") or "").strip()
-    if declared != candidate.version:
-        raise ReleaseSourceError(
-            f"The wheel for {candidate.version} declares version {declared or 'unknown'}."
-        )
-    inline_safe = bool(manifest.get("inline_safe"))
+    manifest = normalize_manifest(read_wheel_manifest(wheel), candidate.version)
+    inline_safe = manifest["inline_safe"]
     return {
         "version": candidate.version,
         "filename": candidate.filename,

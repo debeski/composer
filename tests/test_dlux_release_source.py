@@ -22,13 +22,15 @@ from composer import dlux_release_source as source
 from composer.dlux_release_source import ReleaseCandidate, ReleaseSourceError
 
 
-def _wheel_bytes(version="1.8.0", *, manifest_version=None, inline_safe=True, extra=None) -> bytes:
+def _wheel_bytes(
+    version="1.8.0", *, manifest_version=None, inline_safe=True, manifest=None, extra=None
+) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("dlux/__init__.py", "")
         archive.writestr(
             "dlux/release-manifest.json",
-            json.dumps({
+            json.dumps(manifest or {
                 "schema_version": 1,
                 "version": manifest_version or version,
                 "inline_safe": inline_safe,
@@ -214,6 +216,55 @@ class AssessAndUnpackTests(unittest.TestCase):
         with self.assertRaises(ReleaseSourceError) as ctx:
             source.assess(self._candidate(), wheel)
         self.assertIn("image rebuild", str(ctx.exception))
+
+    def test_accepts_a_compatible_schema_two_release(self):
+        wheel = self._write(_wheel_bytes(manifest={
+            "schema_version": 2,
+            "version": "1.8.0",
+            "requires": {"services": {"composer": ">=1.3.8"}},
+            "migrations": {
+                "effect": "additive",
+                "rollback_compatible": True,
+            },
+            "install": {"inline": "allowed"},
+        }))
+
+        manifest = source.assess(self._candidate(), wheel)
+
+        self.assertTrue(manifest["inline_safe"])
+        self.assertEqual(manifest["required_services"], {"composer": ">=1.3.8"})
+
+    def test_refuses_an_unsafe_schema_two_migration(self):
+        wheel = self._write(_wheel_bytes(manifest={
+            "schema_version": 2,
+            "version": "1.8.0",
+            "requires": {},
+            "migrations": {
+                "effect": "destructive",
+                "rollback_compatible": False,
+            },
+            "install": {"inline": "allowed"},
+        }))
+
+        with self.assertRaises(ReleaseSourceError) as ctx:
+            source.assess(self._candidate(), wheel)
+        self.assertIn("image rebuild", str(ctx.exception))
+
+    def test_refuses_a_schema_two_release_requiring_newer_composer(self):
+        wheel = self._write(_wheel_bytes(manifest={
+            "schema_version": 2,
+            "version": "1.8.0",
+            "requires": {"services": {"composer": ">=9.0.0"}},
+            "migrations": {
+                "effect": "none",
+                "rollback_compatible": True,
+            },
+            "install": {"inline": "allowed"},
+        }))
+
+        with self.assertRaises(ReleaseSourceError) as ctx:
+            source.assess(self._candidate(), wheel)
+        self.assertIn("requires Composer >=9.0.0", str(ctx.exception))
 
     def test_refuses_a_wheel_whose_manifest_names_another_version(self):
         wheel = self._write(_wheel_bytes(manifest_version="9.9.9"))
