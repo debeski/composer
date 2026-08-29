@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.7 is tagged/published and v1.3.8 is release-ready pending tag/push.
+- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.8 is tagged and published.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; legacy native hooks and recognized missing-label DLUX updater stacks remain compatible and `check --fix` normalizes them.
 - `migrate` is terminal-bound, defaults to `web`, prefers its label command, and forwards remaining migrator args.
@@ -38,19 +38,18 @@
   - [ ] Run `./start.sh update-self` from each deployment root once v1.3.6 is tagged.
   - [ ] Live verify on a real deployment: after `./start.sh update`, DLUX's image-update indicator clears within ~30s (agent must see the new local digest through the read-only proxy).
   - [ ] Live verify detach: close the terminal mid-`update` (native + `start.sh`), confirm the deploy finishes and `composer-detached.log` fills; Ctrl+C still exits 130.
-  - [ ] Tag/push v1.3.8 after schema-2 compatibility and the full suite pass.
 - **Priority 2:**
   - [ ] Derive restart safety from DLUX `org.dlux.restart=safe|protected` labels instead of hardcoded names.
   - [ ] Add shared `check` drift checks for raw Docker socket mounts and the `dlux_runtime` rw/ro split.
   - [ ] Drop pip/setuptools from the image (`pip uninstall -y pip`) - clears 3 fixable HIGH (msgpack, setuptools) from pip's vendor tree; composer is stdlib-only.
   - [ ] Add `provenance: mode=max` + `sbom: true` to the release build-push step (Scout attestation policy).
 - **Completed Recently:**
-  - [x] v1.3.8: schema-2 DjangoLux manifests enforce inline install safety, migration rollback compatibility, supported service requirements, and the Composer version floor.
+  - [x] v1.3.8 released: schema-2 DjangoLux manifests enforce inline install safety, migration rollback compatibility, supported service requirements, and the Composer version floor.
   - [x] v1.3.6: missing-label DLUX compatibility migrator + guarded label repair; post-start uses `exec -T`, streams progress, and fails the run; direct `migrate` subcommand with service/arg passthrough. +9 tests.
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (agent-update). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
-- Verified 2026-08-29: 485 tests passed with 6 expected skips; the 1.3.8 Docker image built and passed the full runtime smoke test.
+- Verified 2026-08-29: 485 tests passed with 6 expected skips; local image smoke and the v1.3.8 GitHub release workflow passed.
 - Verified 2026-08-07: 333/333 tests; live project-archive compatibility discovery + `composer migrate -d -nm` exited 0 and replaced 171 static files with 172.
 - Verified 2026-08-07: missing-label `check --fix` dry-run against project-archive produces only the `web` label insertion.
 - Verified 2026-08-18: Docker Scout on published v1.3.6 digest = 4C/22H (2C/16H fixable); plain rebuild -> 3C/17H; +pip removal -> 3C/14H (1C/8H fixable) and smoke-test passes.
