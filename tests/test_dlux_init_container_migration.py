@@ -134,6 +134,16 @@ class MigrationTests(unittest.TestCase):
         """It ran after health; the same work now runs before start."""
         self.assertNotIn("org.dlux.post-start", self.model["services"]["web"]["labels"])
 
+    def test_native_post_start_hook_is_dropped_too(self):
+        source = DEPLOYED.replace(
+            '    labels:\n      org.dlux.restart: "safe"\n      org.dlux.post-start: "python -m dlux.updater.supervisor --no-watch -- python manage.py migrator"\n',
+            '    labels:\n      org.dlux.restart: "safe"\n    post_start:\n      - command: python manage.py initialize\n',
+        )
+        model = yaml.safe_load(_migrate(source))
+
+        self.assertNotIn("post_start", model["services"]["web"])
+        self.assertNotIn("org.dlux.post-start", model["services"]["web"]["labels"])
+
     def test_unrelated_labels_survive(self):
         self.assertEqual(self.model["services"]["web"]["labels"]["org.dlux.restart"], "safe")
 

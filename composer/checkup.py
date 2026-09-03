@@ -399,16 +399,19 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
         return _result(OK, "proxy-routes", "No legacy pgAdmin proxy routes detected.")
 
-    def _dlux_runtime_version(self):
+    def _dlux_runtime_version(self, service: Optional[str] = None):
         """(major, minor, patch) of the dlux baked into the project image, read
         from the image via `dlux --version`. Uses `run --no-deps` (a fresh
         container) so it works even when dlux-updater is crash-looping, and never
         starts db/redis. Returns None when it can't be determined."""
         from .agent_installer import parse_dlux_version
 
+        service = service or (
+            "dlux-updater" if "dlux-updater" in set(self.services) else "web"
+        )
         ok, out, _err = self.run_docker_compose(
             ["run", "--rm", "--no-deps", "--entrypoint", "python", "-T",
-             "dlux-updater", "-m", "dlux", "--version"],
+             service, "-m", "dlux", "--version"],
             timeout=60,
         )
         return parse_dlux_version(out) if ok else None
@@ -572,15 +575,15 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 )
             except Exception:
                 needs_secret_cap = False
-        # The dlux-owned updater block may carry the legacy runtime wiring (the
-        # retired tools supervisor path / no pre-migration reconcile). Detect it
-        # from the compose (a dry-run reports a file change), then gate on the
-        # dlux version the IMAGE actually ships — the only authoritative signal on
-        # a pulled deployment, which has no requirements.txt.
+        # Older DjangoLux scaffolds may still import the local tools supervisor
+        # or bind-mount ./tools into /app/tools. Detect it from the compose (a
+        # dry-run reports a file change), then gate on the dlux version the IMAGE
+        # actually ships — the only authoritative signal on a pulled deployment,
+        # which has no requirements.txt.
         needs_updater_migration = False
         updater_migration_blocked = ""
-        if "dlux-updater" in set(self.services):
-            from .agent_installer import DLUX_PACKAGED_RUNTIME_MIN, migrate_dlux_updater
+        if self.services:
+            from .agent_installer import dlux_runtime_migration_floor, migrate_dlux_updater
 
             try:
                 legacy_present = bool(
@@ -589,17 +592,25 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             except Exception:
                 legacy_present = False
             if legacy_present:
-                runtime = self._dlux_runtime_version()
-                if runtime is not None and runtime >= DLUX_PACKAGED_RUNTIME_MIN:
-                    needs_updater_migration = True
-                else:
-                    got = ".".join(map(str, runtime)) if runtime else "unknown"
-                    minimum = ".".join(map(str, DLUX_PACKAGED_RUNTIME_MIN))
+                try:
+                    required = dlux_runtime_migration_floor(".", compose_file=args.file or "")
+                except Exception as exc:
                     updater_migration_blocked = (
-                        f"dlux-updater uses the legacy runtime, but the project image ships dlux "
-                        f"{got} (needs >= {minimum} for the packaged runtime). Update the project "
-                        "image, then re-run 'composer check --fix'."
+                        f"Compose still references the local tools runtime, but Composer could "
+                        f"not classify the required packaged module floor: {exc}"
                     )
+                else:
+                    runtime = self._dlux_runtime_version()
+                    if runtime is not None and runtime >= required:
+                        needs_updater_migration = True
+                    else:
+                        got = ".".join(map(str, runtime)) if runtime else "unknown"
+                        minimum = ".".join(map(str, required))
+                        updater_migration_blocked = (
+                            f"Compose still references the local tools runtime, but the project image ships dlux "
+                            f"{got} (needs >= {minimum} for the packaged runtime). Update the project "
+                            "image, then re-run 'composer check --fix'."
+                        )
         # DjangoLux 1.8.0 hands inline updates to Composer, so a Composer service
         # is part of a DjangoLux deployment, not just the deploying machine. A
         # stack with none gets the hardened trio installed.
@@ -648,6 +659,39 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                             ".", compose_file=args.file or "", apply=False).get("files"))
                 except Exception as exc:
                     init_containers_blocked = f"Cannot retire 'dlux-updater': {exc}"
+        needs_dev_override_migration = False
+        dev_override_blocked = ""
+        dev_override_file = ""
+        base_compose_file = ""
+        if getattr(args, "dev", False):
+            for file in self.active_compose_files:
+                if os.path.basename(file) == "compose.dev.yml":
+                    dev_override_file = file
+                elif not base_compose_file:
+                    base_compose_file = file
+            if dev_override_file:
+                try:
+                    from .agent_installer import migrate_dlux_dev_override
+
+                    dev_change = bool(
+                        migrate_dlux_dev_override(
+                            ".",
+                            compose_file=dev_override_file,
+                            base_file=base_compose_file or "compose.yml",
+                            apply=False,
+                        ).get("files")
+                    )
+                except Exception as exc:
+                    dev_override_blocked = f"Cannot normalize compose.dev.yml: {exc}"
+                else:
+                    if dev_change and init_containers_blocked:
+                        dev_override_blocked = (
+                            "compose.dev.yml still carries updater-era overrides, but "
+                            "the base dlux-updater retirement is blocked: "
+                            + init_containers_blocked
+                        )
+                    else:
+                        needs_dev_override_migration = dev_change
         # A native Compose post_start hook creates two runners. Existing DLUX
         # updater projects can also be missing both the native hook and label,
         # which creates zero runners. The guarded transform repairs either form.
@@ -660,10 +704,21 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
         except Exception:
             needs_post_start_migration = False
+        needs_restart_labels = False
+        try:
+            from .agent_installer import normalize_restart_labels
+
+            needs_restart_labels = bool(
+                normalize_restart_labels(".", compose_file=args.file or "", apply=False).get("files")
+            )
+        except Exception:
+            needs_restart_labels = False
         if updater_migration_blocked:
             fixes.append(_result(WARN, "dlux-updater-runtime", updater_migration_blocked))
         if init_containers_blocked:
             fixes.append(_result(WARN, "dlux-init-containers", init_containers_blocked))
+        if dev_override_blocked:
+            fixes.append(_result(WARN, "dev-compose", dev_override_blocked))
         # An AHEAD wrapper is deliberately not fixable: the image is the stale
         # side there, and writing the baked copy would downgrade the project.
         stale_wrappers = [
@@ -685,7 +740,8 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_secret_cap and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
-                and not needs_install and not needs_init_containers):
+                and not needs_install and not needs_init_containers
+                and not needs_restart_labels and not needs_dev_override_migration):
             return fixes
         consequences = []
         if stale_wrappers:
@@ -723,6 +779,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 [
                     "Migrate composer-updater to composer-agent.",
                     "Create or refresh docker-socket-proxy and composer-agent.",
+                    "Then harden that agent topology into composer-executor in the same run.",
                 ]
             )
         if needs_init_containers:
@@ -733,6 +790,12 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 "staticfiles, and web's org.dlux.post-start migrator hook is dropped "
                 "(it would now be a second, redundant run). The dlux_runtime volume and "
                 "its releases are kept."
+            )
+        if needs_dev_override_migration:
+            consequences.append(
+                "Normalize compose.dev.yml for the init-container topology: remove the "
+                "development dlux-updater override, keep celery's dlux_runtime mount "
+                "read-write, and disable inline updates in dev containers."
             )
         if needs_install:
             consequences.append(
@@ -758,15 +821,23 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             )
         if needs_updater_migration:
             consequences.append(
-                "Migrate the dlux-updater command to the packaged runtime "
-                "(python -m dlux.updater.supervisor) and add the pre-migration dlux_reconcile "
-                "guard, so a stale runtime release can't wedge the site in maintenance."
+                "Normalize DjangoLux runtime wiring: replace local tools.dlux_runtime_supervisor "
+                "commands with python -m dlux.updater.supervisor, replace local tools.smtp_relay "
+                "commands with python -m dlux.smtp_relay, remove generated local tools/ bind "
+                "mounts, and add the dlux-updater pre-migration dlux_reconcile guard when that "
+                "service still exists."
             )
         if needs_post_start_migration:
             consequences.append(
                 "Replace the native Compose post_start hook with the org.dlux.post-start "
                 "label composer reads, so Compose stops running an unflagged second copy "
                 "alongside composer's own flagged run."
+            )
+        if needs_restart_labels:
+            consequences.append(
+                "Add missing org.dlux.restart labels to generated DLUX stack services so "
+                "Composer can classify safe versus protected restart targets from the "
+                "Compose file."
             )
         consequences.extend(
             [
@@ -874,6 +945,32 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             except AgentInstallError as exc:
                 fixes.append(_result(
                     FAIL, "fix:dlux-init-containers", f"Retirement failed: {exc}"))
+        if needs_dev_override_migration:
+            from .agent_installer import AgentInstallError, migrate_dlux_dev_override
+
+            init_failed = any(
+                entry["name"] == "fix:dlux-init-containers" and entry["level"] == FAIL
+                for entry in fixes
+            )
+            if not init_failed:
+                try:
+                    outcome = migrate_dlux_dev_override(
+                        ".",
+                        compose_file=dev_override_file,
+                        base_file=base_compose_file or "compose.yml",
+                        apply=True,
+                    )
+                    if outcome.get("files"):
+                        fixes.append(
+                            _result(
+                                OK,
+                                "fix:dev-compose",
+                                "Normalized compose.dev.yml for the init-container topology. Backup: "
+                                + (outcome.get("backup_root") or "n/a"),
+                            )
+                        )
+                except AgentInstallError as exc:
+                    fixes.append(_result(FAIL, "fix:dev-compose", f"Dev override migration failed: {exc}"))
         if needs_install:
             from .agent_installer import AgentInstallError, install_composer_stack
 
@@ -897,6 +994,21 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:enable-agent", f"Migration failed: {exc}"))
+            else:
+                from .agent_installer import enable_executor
+
+                try:
+                    outcome = enable_executor(".", compose_file=args.file or "", apply=True)
+                    fixes.append(
+                        _result(
+                            OK,
+                            "fix:enable-executor",
+                            "Hardened migrated composer-agent into the executor topology. Backup: "
+                            + (outcome.get("backup_root") or "n/a"),
+                        )
+                    )
+                except AgentInstallError as exc:
+                    fixes.append(_result(FAIL, "fix:enable-executor", f"Hardening failed: {exc}"))
         if needs_hardening:
             from .agent_installer import AgentInstallError, enable_executor
 
@@ -936,8 +1048,9 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     _result(
                         OK,
                         "fix:dlux-updater-runtime",
-                        "Migrated dlux-updater to the packaged runtime + reconcile guard. "
-                        "Recreate it to apply. Backup: " + (outcome.get("backup_root") or "n/a"),
+                        "Normalized DjangoLux runtime commands and local tools mounts. "
+                        "Recreate affected services to apply. Backup: "
+                        + (outcome.get("backup_root") or "n/a"),
                     )
                 )
             except AgentInstallError as exc:
@@ -947,17 +1060,34 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
 
             try:
                 outcome = enable_post_start_label(".", compose_file=args.file or "", apply=True)
-                fixes.append(
-                    _result(
-                        OK,
-                        "fix:post-start-label",
-                        "Installed the org.dlux.post-start label "
-                        "(one migrator run per start). Recreate the service to apply. Backup: "
-                        + (outcome.get("backup_root") or "n/a"),
+                if outcome.get("files"):
+                    fixes.append(
+                        _result(
+                            OK,
+                            "fix:post-start-label",
+                            "Installed the org.dlux.post-start label "
+                            "(one migrator run per start). Recreate the service to apply. Backup: "
+                            + (outcome.get("backup_root") or "n/a"),
+                        )
                     )
-                )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:post-start-label", f"post_start migration failed: {exc}"))
+        if needs_restart_labels:
+            from .agent_installer import AgentInstallError, normalize_restart_labels
+
+            try:
+                outcome = normalize_restart_labels(".", compose_file=args.file or "", apply=True)
+                if outcome.get("files"):
+                    fixes.append(
+                        _result(
+                            OK,
+                            "fix:restart-labels",
+                            "Installed missing org.dlux.restart labels. Backup: "
+                            + (outcome.get("backup_root") or "n/a"),
+                        )
+                    )
+            except AgentInstallError as exc:
+                fixes.append(_result(FAIL, "fix:restart-labels", f"Restart-label repair failed: {exc}"))
         return fixes
 
     @staticmethod

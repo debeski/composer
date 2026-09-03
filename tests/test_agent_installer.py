@@ -253,15 +253,125 @@ class AgentInstallerTests(unittest.TestCase):
         self.assertEqual(json.loads(output.call_args.args[0]), result)
 
 
-DLUX_UPDATER_LEGACY = '''name: demo_project
+class RestartLabelMigrationTests(unittest.TestCase):
+    def test_missing_restart_labels_are_added_without_rewriting_services(self):
+        from composer.agent_installer import _ensure_restart_labels
+
+        source = """name: demo
+
+services:
+  db:
+    image: postgres:17
+  web:
+    image: demo:latest
+    labels:
+      existing: "kept"
+  custom:
+    image: sidecar:latest
+
+volumes:
+  data:
+"""
+        updated = _ensure_restart_labels(source, "demo")
+
+        self.assertIn('      org.dlux.restart: "protected"\n    image: postgres:17', updated)
+        self.assertIn('      org.dlux.restart: "safe"\n      existing: "kept"', updated)
+        self.assertNotIn("custom:\n    labels:", updated)
+        self.assertEqual(_ensure_restart_labels(updated, "demo"), updated)
+
+
+DEV_OVERRIDE_LEGACY = """name: demo
+
+services:
+  smtp-relay:
+    build: .
+    image: !reset null
+
+  dlux-updater:
+    build: .
+    image: !reset null
+    volumes: !override
+      - ./:/app:rw
+      - dlux_runtime:/opt/dlux-runtime:rw
+
+  web:
+    build: .
+    image: !reset null
+    environment:
+      BASE_URL: "http://localhost:90"
+
+  celery:
+    build: .
+    image: !reset null
+    command: ["python", "-m", "tools.dlux_runtime_supervisor", "--", "python", "-m", "celery"]
+    volumes: !override
+      - dlux_runtime:/opt/dlux-runtime:ro
+"""
+
+
+class DevOverrideMigrationTests(unittest.TestCase):
+    def test_dev_override_drops_updater_and_keeps_celery_runtime_writable(self):
+        from composer.agent_installer import _transform_dev_init_override
+
+        updated = _transform_dev_init_override(DEV_OVERRIDE_LEGACY, "demo")
+
+        self.assertNotIn("  dlux-updater:\n", updated)
+        self.assertNotIn("tools.dlux_runtime_supervisor", updated)
+        self.assertIn("dlux.updater.supervisor", updated)
+        self.assertIn("dlux_runtime:/opt/dlux-runtime:rw", updated)
+        self.assertIn('      DLUX_INLINE_UPDATES_ENABLED: "False"', updated)
+        self.assertEqual(_transform_dev_init_override(updated, "demo"), updated)
+
+    def test_dev_override_apply_validates_the_merged_compose_candidate(self):
+        from composer.agent_installer import migrate_dlux_dev_override
+
+        base = """name: demo
 
 services:
   web:
+    image: demo:latest
+  celery:
+    image: demo:latest
+volumes:
+  dlux_runtime:
+"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "compose.yml").write_text(base, encoding="utf-8")
+            (root / "compose.dev.yml").write_text(DEV_OVERRIDE_LEGACY, encoding="utf-8")
+            completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+            runner = Mock(return_value=completed)
+
+            with patch("composer.agent_installer.shutil.which", return_value="/usr/bin/docker"):
+                result = migrate_dlux_dev_override(str(root), apply=True, command_runner=runner)
+
+            self.assertTrue(result["applied"])
+            validation = runner.call_args_list[1]
+            self.assertEqual(validation.args[0][-5:], ["-f", str((root / "compose.yml").resolve()), "-f", "-", "config"])
+            self.assertIn('DLUX_INLINE_UPDATES_ENABLED: "False"', validation.kwargs["input"])
+
+
+DLUX_UPDATER_LEGACY = '''name: demo_project
+
+services:
+  smtp-relay:
+    image: ${WEB_IMAGE:-demo:latest}
+    command: ["python", "-m", "tools.smtp_relay"]
+    volumes:
+      - ./tools/smtp_relay:/app/tools/smtp_relay:ro
+  web:
     image: ${WEB_IMAGE:-demo:latest}
     command: ["python", "-m", "tools.dlux_runtime_supervisor", "--", "gunicorn"]
+    volumes:
+      - ./tools:/app/tools:ro
   dlux-updater:
     image: ${WEB_IMAGE:-demo:latest}
     command: ["python", "-m", "tools.dlux_runtime_supervisor", "--no-watch", "--", "bash", "-c", "python manage.py migrator && exec python manage.py dlux_update_worker"]
+    volumes:
+      - type: bind
+        source: ./tools
+        target: /app/tools
+        read_only: true
 
 volumes:
   dlux_runtime:
@@ -281,11 +391,29 @@ class DluxUpdaterMigrationTests(unittest.TestCase):
 
         migrated = _migrate_dlux_updater_command(DLUX_UPDATER_LEGACY, "demo_project")
         self.assertNotIn("tools.dlux_runtime_supervisor", migrated)
+        self.assertNotIn("tools.smtp_relay", migrated)
+        self.assertNotIn("./tools:/app/tools:ro", migrated)
+        self.assertNotIn("target: /app/tools", migrated)
+        self.assertNotIn("./tools/smtp_relay:/app/tools/smtp_relay:ro", migrated)
         self.assertIn('"python", "-m", "dlux.updater.supervisor"', migrated)
+        self.assertIn('"python", "-m", "dlux.smtp_relay"', migrated)
         self.assertIn("python manage.py dlux_reconcile; python manage.py migrator", migrated)
         # Idempotent — no double reconcile, no re-rename.
         self.assertEqual(_migrate_dlux_updater_command(migrated, "demo_project"), migrated)
         self.assertEqual(migrated.count("dlux_reconcile"), 1)
+
+    def test_floor_tracks_the_highest_retired_module(self):
+        from composer.agent_installer import (
+            DLUX_PACKAGED_RUNTIME_MIN,
+            DLUX_SMTP_RELAY_MIN,
+            _runtime_migration_floor,
+        )
+
+        self.assertEqual(
+            _runtime_migration_floor('command: ["python", "-m", "tools.dlux_runtime_supervisor"]'),
+            DLUX_PACKAGED_RUNTIME_MIN,
+        )
+        self.assertEqual(_runtime_migration_floor(DLUX_UPDATER_LEGACY), DLUX_SMTP_RELAY_MIN)
 
     def test_migration_reports_legacy_command_as_a_change(self):
         from composer.agent_installer import migrate_dlux_updater

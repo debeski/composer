@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.9
+- **`check --fix` Retires Local DLUX Tools Wiring**: The guarded Compose transform now rewrites retired `tools.dlux_runtime_supervisor` and `tools.smtp_relay` module commands to `dlux.updater.supervisor` and `dlux.smtp_relay`, removes generated local `tools/` bind mounts targeting `/app/tools` or the scoped SMTP relay path, and still adds the `dlux_reconcile` guard for surviving `dlux-updater` services. The fix is idempotent, uses the existing `docker compose config` validation plus `.xpose/` backup path, and gates the rewrite on the highest packaged DLUX module floor it needs (`1.6.2` for the supervisor, `1.7.0` for the SMTP relay).
+- **`check --fix` Covers Current Scaffold Drift**: Legacy `composer-updater` stacks now converge to the hardened `composer-executor` topology in one run, `dlux-updater` retirement strips native `web.post_start` hooks instead of converting them to stale labels, generated services gain missing `org.dlux.restart` labels, and `check -d --fix` normalizes `compose.dev.yml` so the dev override cannot reintroduce `dlux-updater`, force Celery's `dlux_runtime` mount read-only, or leave inline updates enabled in development.
+
 ## v1.3.8
 - **DjangoLux Manifest Schema 2**: Inline package checks now understand schema-2 install, migration, and service requirements, reject unsupported deployment contracts, and enforce the manifest's minimum Composer version.
 - **Release Test Dependency**: CI and tag workflows install pinned PyYAML before full test discovery, so Compose transform tests run in clean release environments.

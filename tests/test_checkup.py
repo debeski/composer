@@ -477,10 +477,12 @@ class CheckupRunTests(unittest.TestCase):
             patch("composer.checkup.os.path.exists", return_value=True),
             patch("composer.checkup.confirm", return_value=True),
             patch("composer.agent_installer.enable_agent", return_value={"backup_root": "/x/.xpose/b"}) as enable,
+            patch("composer.agent_installer.enable_executor", return_value={"backup_root": "/x/.xpose/h"}) as harden,
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             launcher.run_checkup(_args(fix=True))
         enable.assert_called_once()
+        harden.assert_called_once()
 
     def test_fix_hardens_agent_topology_through_enable_executor(self):
         launcher = DockerComposeLauncher()
@@ -536,6 +538,63 @@ class CheckupRunTests(unittest.TestCase):
             any(f["name"] == "fix:secrets-read-cap" and f["level"] == OK for f in fixes)
         )
 
+    def test_fix_adds_missing_restart_labels(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "celery", "composer-agent", "composer-executor"]
+        launcher.active_compose_files = ["compose.yml"]
+        calls = []
+
+        def fake_labels(path, compose_file="", apply=False, **kw):
+            calls.append(apply)
+            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xpose/labels", "files": ["compose.yml"]}
+
+        with (
+            patch("composer.agent_installer.normalize_restart_labels", side_effect=fake_labels),
+            patch("composer.agent_installer.enable_executor", return_value={"files": []}),
+            patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": []}),
+            patch(
+                "composer.checkup.inspect_legacy_proxy_routes",
+                return_value={"unsupported": [], "recognized": []},
+            ),
+            patch("composer.checkup.confirm", return_value=True),
+        ):
+            fixes = launcher._maybe_fix(_args(fix=True), [])
+
+        self.assertIn(True, calls)
+        self.assertTrue(any(f["name"] == "fix:restart-labels" for f in fixes))
+
+    def test_fix_normalizes_dev_override_when_dev_mode_is_active(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "celery", "dlux-updater", "composer-agent", "composer-executor"]
+        launcher.active_compose_files = ["compose.yml", "compose.dev.yml"]
+        calls = []
+
+        def fake_dev(path, compose_file="", base_file="", apply=False, **kw):
+            calls.append((compose_file, base_file, apply))
+            return {"files": ["compose.dev.yml"]} if not apply else {
+                "backup_root": "/x/.xpose/dev",
+                "files": ["compose.dev.yml"],
+            }
+
+        with (
+            patch("composer.agent_installer.migrate_dlux_dev_override", side_effect=fake_dev),
+            patch("composer.agent_installer.migrate_dlux_init_containers", return_value={"files": []}),
+            patch("composer.agent_installer.enable_executor", return_value={"files": []}),
+            patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": []}),
+            patch("composer.agent_installer.normalize_restart_labels", return_value={"files": []}),
+            patch.object(launcher, "run_command", return_value=(True, "5.5.0", "")),
+            patch.object(launcher, "_dlux_runtime_version", return_value=(1, 8, 0)),
+            patch(
+                "composer.checkup.inspect_legacy_proxy_routes",
+                return_value={"unsupported": [], "recognized": []},
+            ),
+            patch("composer.checkup.confirm", return_value=True),
+        ):
+            fixes = launcher._maybe_fix(_args(fix=True, dev=True), [])
+
+        self.assertIn(("compose.dev.yml", "compose.yml", True), calls)
+        self.assertTrue(any(f["name"] == "fix:dev-compose" for f in fixes))
+
     def test_fix_migrates_legacy_dlux_updater_command(self):
         launcher = DockerComposeLauncher()
         launcher.services = ["web", "dlux-updater", "composer-agent", "composer-executor", "docker-socket-proxy"]
@@ -548,6 +607,7 @@ class CheckupRunTests(unittest.TestCase):
 
         with (
             patch("composer.agent_installer.migrate_dlux_updater", side_effect=fake_migrate),
+            patch("composer.agent_installer.dlux_runtime_migration_floor", return_value=(1, 6, 2)),
             patch("composer.agent_installer.enable_executor", return_value={"files": []}),
             patch.object(launcher, "_dlux_runtime_version", return_value=(1, 6, 2)),
             patch(
@@ -570,6 +630,7 @@ class CheckupRunTests(unittest.TestCase):
 
         with (
             patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": ["compose.yml"]}),
+            patch("composer.agent_installer.dlux_runtime_migration_floor", return_value=(1, 6, 2)),
             patch("composer.agent_installer.enable_executor", return_value={"files": []}),
             patch.object(launcher, "_dlux_runtime_version", return_value=(1, 5, 11)),
             patch(
@@ -584,6 +645,30 @@ class CheckupRunTests(unittest.TestCase):
         self.assertTrue(any(
             f["name"] == "dlux-updater-runtime" and f["level"] == WARN
             and "update the project image" in f["message"].lower() for f in fixes
+        ))
+        self.assertFalse(any(f["name"] == "fix:dlux-updater-runtime" for f in fixes))
+
+    def test_fix_uses_smtp_relay_module_floor(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "smtp-relay", "composer-agent", "composer-executor"]
+        launcher.active_compose_files = ["compose.yml"]
+
+        with (
+            patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": ["compose.yml"]}),
+            patch("composer.agent_installer.dlux_runtime_migration_floor", return_value=(1, 7, 0)),
+            patch("composer.agent_installer.enable_executor", return_value={"files": []}),
+            patch.object(launcher, "_dlux_runtime_version", return_value=(1, 6, 2)),
+            patch(
+                "composer.checkup.inspect_legacy_proxy_routes",
+                return_value={"unsupported": [], "recognized": []},
+            ),
+            patch("composer.checkup.confirm", return_value=True),
+        ):
+            fixes = launcher._maybe_fix(_args(fix=True), [])
+
+        self.assertTrue(any(
+            f["name"] == "dlux-updater-runtime" and f["level"] == WARN
+            and "1.7.0" in f["message"] for f in fixes
         ))
         self.assertFalse(any(f["name"] == "fix:dlux-updater-runtime" for f in fixes))
 

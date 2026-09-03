@@ -23,6 +23,23 @@ COMPOSER_EXEC_SOCKET_PATH = "/run/composer-exec/composer-exec.sock"
 COMPOSER_EXEC_SOCKET_VOLUME = "composer_exec_sock"
 MINIMUM_DLUX_VERSION = (1, 5, 0)
 SAFE_RESTART_CANDIDATES = ("web", "celery", "smtp-relay", "caddy", "nginx")
+RESTART_LABELS = {
+    "web": "safe",
+    "celery": "safe",
+    "smtp-relay": "safe",
+    "caddy": "safe",
+    "nginx": "safe",
+    "db": "protected",
+    "database": "protected",
+    "postgres": "protected",
+    "postgresql": "protected",
+    "redis": "protected",
+    "docker-socket-proxy": "protected",
+    "composer-agent": "protected",
+    "composer-executor": "protected",
+    "composer-updater": "protected",
+    "dlux-updater": "protected",
+}
 PROTECTED_SERVICE_NAMES = (
     "db",
     "database",
@@ -133,6 +150,8 @@ def _agent_stack(project_slug: str, services: set[str], topology: Dict[str, Any]
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:latest
     restart: always
+    labels:
+      org.dlux.restart: "protected"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -154,6 +173,8 @@ def _agent_stack(project_slug: str, services: set[str], topology: Dict[str, Any]
   composer-agent:
     image: debeski/composer:latest
     restart: unless-stopped
+    labels:
+      org.dlux.restart: "protected"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -222,6 +243,8 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:latest
     restart: always
+    labels:
+      org.dlux.restart: "protected"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -243,6 +266,8 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
   composer-executor:
     image: debeski/composer:latest
     restart: unless-stopped
+    labels:
+      org.dlux.restart: "protected"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -282,6 +307,8 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
   composer-agent:
     image: debeski/composer:latest
     restart: unless-stopped
+    labels:
+      org.dlux.restart: "protected"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -607,6 +634,7 @@ def _transform_to_init_containers(contents: str, project_slug: str) -> str:
     if web is not None:
         block = updated[web[0]:web[1]]
         stripped = re.sub(rf'(?m)^      {re.escape(POST_START_LABEL)}:.*\n', "", block)
+        stripped = re.sub(r"(?m)^    post_start:[ \t]*\n(?:^(?:      .*)?\n)*", "", stripped)
         # Drop a `labels:` key left with no children.
         stripped = re.sub(r"(?m)^    labels:[ \t]*\n(?=(?:^    \S|^  \S|\Z))", "", stripped)
         updated = updated[:web[0]] + stripped + updated[web[1]:]
@@ -622,6 +650,42 @@ def _transform_to_init_containers(contents: str, project_slug: str) -> str:
     block = block.replace("dlux_runtime:/opt/dlux-runtime:ro", "dlux_runtime:/opt/dlux-runtime:rw")
     block = re.sub(r"(?m)^(      - static:/app/staticfiles):ro$", r"\1:rw", block)
     updated = updated[:span[0]] + block + updated[span[1]:]
+    return updated
+
+
+def _ensure_environment_value(block: str, key: str, value: str) -> str:
+    line = f'      {key}: "{value}"\n'
+    pattern = re.compile(rf"(?m)^      {re.escape(key)}:[ \t]*.*\n")
+    if pattern.search(block):
+        return pattern.sub(line, block, count=1)
+    if "    environment:\n" in block:
+        return block.replace("    environment:\n", "    environment:\n" + line, 1)
+    header = re.match(r"(?m)^  ([A-Za-z0-9_-]+):[ \t]*\n", block)
+    if not header:
+        return block
+    return block[:header.end()] + "    environment:\n" + line + block[header.end():]
+
+
+def _transform_dev_init_override(contents: str, project_slug: str) -> str:
+    """Normalize compose.dev.yml after dlux-updater moves to celery pre_start."""
+    updated = contents
+    if "  dlux-updater:\n" in updated:
+        from .stack_cleanup import remove_obsolete_service_blocks
+
+        updated, _removed = remove_obsolete_service_blocks(updated, {"dlux-updater"})
+    updated = _migrate_dlux_updater_command(updated, project_slug)
+    for service in ("web", "celery"):
+        span = _service_block_span(updated, service)
+        if span is None:
+            continue
+        block = updated[span[0]:span[1]]
+        if service == "celery":
+            block = block.replace(
+                "dlux_runtime:/opt/dlux-runtime:ro",
+                "dlux_runtime:/opt/dlux-runtime:rw",
+            )
+        block = _ensure_environment_value(block, "DLUX_INLINE_UPDATES_ENABLED", "False")
+        updated = updated[:span[0]] + block + updated[span[1]:]
     return updated
 
 
@@ -758,6 +822,147 @@ def _transform_post_start_to_label(contents: str, project_slug: str) -> str:
     return updated
 
 
+def _unquote(value: str) -> str:
+    value = str(value or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def _is_local_tools_mount(source: str, target: str) -> bool:
+    source = _unquote(source).rstrip("/")
+    target = _unquote(target).rstrip("/")
+    normalized_source = source.replace("\\", "/")
+    return target in {
+        "/app/tools",
+        "/app/tools/smtp-relay",
+        "/app/tools/smtp_relay",
+        "/app/smtp-relay",
+        "/app/smtp_relay",
+    } and (
+        normalized_source == "./tools"
+        or normalized_source == "../tools"
+        or normalized_source.endswith("/tools")
+        or normalized_source.endswith("/tools/smtp-relay")
+        or normalized_source.endswith("/tools/smtp_relay")
+    )
+
+
+def _volume_item_is_local_tools_mount(lines: list[str]) -> bool:
+    first = lines[0].strip()
+    if first.startswith("- "):
+        value = first[2:].split("#", 1)[0].strip()
+        short = _unquote(value)
+        if ":" in short:
+            parts = short.split(":")
+            for index in range(1, len(parts)):
+                if _is_local_tools_mount(":".join(parts[:index]), parts[index]):
+                    return True
+
+    source = target = kind = ""
+    for line in lines:
+        match = re.search(r"(?m)^\s+(source|target|type):\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        key, value = match.group(1), match.group(2).split("#", 1)[0].strip()
+        if key == "source":
+            source = value
+        elif key == "target":
+            target = value
+        elif key == "type":
+            kind = _unquote(value)
+    return bool(source and target and kind in {"", "bind"} and _is_local_tools_mount(source, target))
+
+
+def _drop_local_tools_mounts_from_service(block: str) -> str:
+    lines = block.splitlines(keepends=True)
+    output = []
+    index = 0
+    while index < len(lines):
+        if not re.match(r"^    volumes:[ \t]*$", lines[index]):
+            output.append(lines[index])
+            index += 1
+            continue
+
+        header = lines[index]
+        index += 1
+        kept = []
+        removed = False
+        while index < len(lines) and not re.match(r"^    [A-Za-z0-9_-]+:[ \t]*$", lines[index]):
+            if re.match(r"^      -", lines[index]):
+                item = [lines[index]]
+                index += 1
+                while (
+                    index < len(lines)
+                    and not re.match(r"^      -", lines[index])
+                    and not re.match(r"^    [A-Za-z0-9_-]+:[ \t]*$", lines[index])
+                ):
+                    item.append(lines[index])
+                    index += 1
+                if _volume_item_is_local_tools_mount(item):
+                    removed = True
+                else:
+                    kept.extend(item)
+            else:
+                kept.append(lines[index])
+                index += 1
+
+        if not removed or any(re.match(r"^      -", line) for line in kept):
+            output.append(header)
+            output.extend(kept)
+    return "".join(output)
+
+
+def _drop_local_tools_mounts(contents: str) -> str:
+    updated = contents
+    spans = []
+    for service in _service_names(contents):
+        span = _service_block_span(contents, service)
+        if span is not None:
+            spans.append(span)
+    for start, end in sorted(spans, reverse=True):
+        block = updated[start:end]
+        rewritten = _drop_local_tools_mounts_from_service(block)
+        if rewritten != block:
+            updated = updated[:start] + rewritten + updated[end:]
+    return updated
+
+
+def _ensure_restart_labels(contents: str, project_slug: str) -> str:
+    updated = contents
+    spans = []
+    for service in _service_names(contents):
+        if service not in RESTART_LABELS:
+            continue
+        span = _service_block_span(contents, service)
+        if span is not None:
+            spans.append((span[0], span[1], service))
+    for start, end, service in sorted(spans, reverse=True):
+        block = updated[start:end]
+        if "org.dlux.restart" in block:
+            continue
+        label_line = f'      org.dlux.restart: "{RESTART_LABELS[service]}"\n'
+        if "    labels:\n" in block:
+            rewritten = block.replace("    labels:\n", "    labels:\n" + label_line, 1)
+        else:
+            rewritten = block.replace(
+                f"  {service}:\n",
+                f"  {service}:\n    labels:\n{label_line}",
+                1,
+            )
+        updated = updated[:start] + rewritten + updated[end:]
+    return updated
+
+
+def _runtime_migration_floor(contents: str) -> tuple[int, int, int]:
+    floor = (0, 0, 0)
+    if "tools.dlux_runtime_supervisor" in contents or "/app/tools" in contents:
+        floor = max(floor, DLUX_PACKAGED_RUNTIME_MIN)
+    if "tools.smtp_relay" in contents or "/app/tools/smtp" in contents:
+        floor = max(floor, DLUX_SMTP_RELAY_MIN)
+    return floor
+
+
 def _dlux_readiness_warning(project_root: Path) -> tuple[str, bool]:
     declarations = []
     for path in (project_root / "requirements.txt", project_root / "pyproject.toml"):
@@ -809,6 +1014,22 @@ def _atomic_write(path: Path, contents: str):
     os.replace(temporary, path)
 
 
+def _selected_compose_path(project_dir: str, compose_file: str) -> tuple[Path, str, Path]:
+    project_root = Path(project_dir).resolve()
+    selected_file = compose_file or (
+        "compose.yml" if (project_root / "compose.yml").is_file() else "docker-compose.yml"
+    )
+    compose_path = (project_root / selected_file).resolve()
+    if not compose_path.is_relative_to(project_root) or not compose_path.is_file():
+        raise AgentInstallError("The selected Compose file must exist inside the project directory.")
+    return project_root, selected_file, compose_path
+
+
+def dlux_runtime_migration_floor(project_dir: str = ".", *, compose_file: str = ""):
+    _project_root, _selected_file, compose_path = _selected_compose_path(project_dir, compose_file)
+    return _runtime_migration_floor(compose_path.read_text(encoding="utf-8"))
+
+
 def _apply_stack_migration(
     project_dir: str,
     *,
@@ -823,13 +1044,7 @@ def _apply_stack_migration(
     """Shared dry-run-first stack migration: transform the Compose file, and on
     --apply validate with `docker compose config`, back up to .xpose/, and
     atomically write. Used by both enable-agent and enable-executor."""
-    project_root = Path(project_dir).resolve()
-    selected_file = compose_file or (
-        "compose.yml" if (project_root / "compose.yml").is_file() else "docker-compose.yml"
-    )
-    compose_path = (project_root / selected_file).resolve()
-    if not compose_path.is_relative_to(project_root) or not compose_path.is_file():
-        raise AgentInstallError("The selected Compose file must exist inside the project directory.")
+    project_root, selected_file, compose_path = _selected_compose_path(project_dir, compose_file)
     contents = compose_path.read_text(encoding="utf-8")
     name_match = re.search(r"(?m)^name:\s*([A-Za-z0-9_-]+)\s*$", contents)
     if not name_match:
@@ -891,6 +1106,80 @@ def _apply_stack_migration(
     return result
 
 
+def _apply_dev_override_migration(
+    project_dir: str,
+    *,
+    compose_file: str,
+    base_file: str,
+    apply: bool,
+    include_diff: bool,
+    command_runner,
+) -> Dict[str, Any]:
+    project_root, selected_file, compose_path = _selected_compose_path(project_dir, compose_file)
+    base_path = (project_root / base_file).resolve()
+    if not base_path.is_relative_to(project_root) or not base_path.is_file():
+        raise AgentInstallError("The base Compose file must exist inside the project directory.")
+    contents = compose_path.read_text(encoding="utf-8")
+    name_match = re.search(r"(?m)^name:\s*([A-Za-z0-9_-]+)\s*$", contents)
+    if not name_match:
+        raise AgentInstallError("Could not determine the generated Compose project name.")
+    updated = _transform_dev_init_override(contents, name_match.group(1))
+    changed = [str(compose_path.relative_to(project_root))] if updated != contents else []
+    result: Dict[str, Any] = {
+        "applied": False,
+        "files": changed,
+        "command": "docker compose -f compose.yml -f compose.dev.yml up -d" if changed else "",
+        "backup_root": "",
+        "warnings": [],
+    }
+    if include_diff and changed:
+        result["diff"] = "".join(
+            difflib.unified_diff(
+                contents.splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile=f"a/{selected_file}",
+                tofile=f"b/{selected_file}",
+            )
+        )
+    if not apply:
+        return result
+    if not shutil.which("docker"):
+        raise AgentInstallError("Docker is required to validate the generated Compose configuration.")
+    probe = command_runner(
+        ["docker", "compose", "version"],
+        cwd=str(project_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        raise AgentInstallError("Docker Compose v2 is required to apply the dev override migration.")
+    validation = command_runner(
+        ["docker", "compose", "--project-directory", str(project_root),
+         "-f", str(base_path), "-f", "-", "config"],
+        cwd=str(project_root),
+        check=False,
+        capture_output=True,
+        text=True,
+        input=updated,
+    )
+    if validation.returncode != 0:
+        detail = str(validation.stderr or "").strip()[:1000]
+        suffix = f": {detail}" if detail else ""
+        raise AgentInstallError(
+            f"docker compose config failed for the dev override; no project files were changed{suffix}"
+        )
+    if changed:
+        backup_root = _backup_root(project_root)
+        backup_path = backup_root / compose_path.relative_to(project_root)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(compose_path, backup_path)
+        _atomic_write(compose_path, updated)
+        result["backup_root"] = str(backup_root)
+    result["applied"] = True
+    return result
+
+
 def enable_agent(
     project_dir: str = ".",
     *,
@@ -929,6 +1218,26 @@ def migrate_dlux_init_containers(
         redeploy_command="docker compose up -d --force-recreate celery web",
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
+        include_diff=include_diff,
+        command_runner=command_runner,
+    )
+
+
+def migrate_dlux_dev_override(
+    project_dir: str = ".",
+    *,
+    compose_file: str = "compose.dev.yml",
+    base_file: str = "compose.yml",
+    apply: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    """Normalize the development override for the init-container topology."""
+    return _apply_dev_override_migration(
+        project_dir,
+        compose_file=compose_file,
+        base_file=base_file,
+        apply=apply,
         include_diff=include_diff,
         command_runner=command_runner,
     )
@@ -1007,10 +1316,11 @@ def enable_post_start_label(
     )
 
 
-# First dlux that ships the packaged runtime (dlux.updater.supervisor + the
-# dlux_reconcile command) — the migration must only be applied to an image at or
-# above this, or the compose would point at modules the image lacks.
+# First dlux releases that ship modules old scaffolds used to run from local
+# tools/. The migration must only be applied to an image at or above the module
+# it needs, or the compose would point at imports the image lacks.
 DLUX_PACKAGED_RUNTIME_MIN = (1, 6, 2)
+DLUX_SMTP_RELAY_MIN = (1, 7, 0)
 
 
 def parse_dlux_version(text):
@@ -1022,16 +1332,19 @@ def parse_dlux_version(text):
 
 
 def _migrate_dlux_updater_command(contents: str, project_slug: str) -> str:
-    """Point an existing dlux-updater block at the packaged runtime (idempotent).
+    """Point existing runtime references at the packaged DjangoLux runtime.
 
-    Two surgical edits, scoped to the dlux-owned block: the supervisor moved into
-    the dlux package, and a pre-migration ``dlux_reconcile`` guard was added so a
-    stale pinned release can't wedge the boot chain behind a maintenance screen.
+    The supervisor moved into the dlux package. Pre-1.6.2 scaffolds also mounted
+    the project's local ``tools/`` package into containers at ``/app/tools``;
+    that mount must go once compose commands import ``dlux.updater.supervisor``.
+    Existing dlux-updater services get the pre-migration ``dlux_reconcile`` guard
+    so a stale pinned release can't wedge the boot chain behind a maintenance
+    screen.
     """
-    if "  dlux-updater:\n" not in contents:
-        return contents
     migrated = contents.replace("tools.dlux_runtime_supervisor", "dlux.updater.supervisor")
-    if "dlux_reconcile" not in migrated:
+    migrated = migrated.replace("tools.smtp_relay", "dlux.smtp_relay")
+    migrated = _drop_local_tools_mounts(migrated)
+    if "  dlux-updater:\n" in migrated and "dlux_reconcile" not in migrated:
         migrated = migrated.replace(
             "python manage.py migrator && exec python manage.py dlux_update_worker",
             "python manage.py dlux_reconcile; python manage.py migrator "
@@ -1049,19 +1362,41 @@ def migrate_dlux_updater(
     include_diff: bool = False,
     command_runner=subprocess.run,
 ) -> Dict[str, Any]:
-    """Migrate a deployed project's dlux-updater command to the packaged runtime.
+    """Migrate local tools runtime references to the packaged DjangoLux runtime.
 
-    Pure, deployment-safe file transform (marker-scoped, idempotent) plus the
-    shared validate/backup/write. It is the CALLER's job to confirm the project
-    image actually ships the packaged runtime before applying — the compose on a
-    pulled deployment has no requirements.txt to read, so the image itself (via
-    ``dlux --version``) is the only authoritative signal.
+    Pure, deployment-safe file transform (idempotent) plus the shared
+    validate/backup/write. It is the CALLER's job to confirm the project image
+    actually ships the packaged runtime before applying — the compose on a pulled
+    deployment has no requirements.txt to read, so the image itself (via ``dlux
+    --version``) is the only authoritative signal.
     """
     return _apply_stack_migration(
         project_dir,
         compose_file=compose_file,
         transform=_migrate_dlux_updater_command,
         redeploy_command="docker compose up -d --force-recreate dlux-updater",
+        apply=apply,
+        allow_unverified_dlux=allow_unverified_dlux,
+        include_diff=include_diff,
+        command_runner=command_runner,
+    )
+
+
+def normalize_restart_labels(
+    project_dir: str = ".",
+    *,
+    compose_file: str = "",
+    apply: bool = False,
+    allow_unverified_dlux: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    """Install missing org.dlux.restart labels on generated stack services."""
+    return _apply_stack_migration(
+        project_dir,
+        compose_file=compose_file,
+        transform=_ensure_restart_labels,
+        redeploy_command="docker compose up -d",
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
