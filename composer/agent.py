@@ -640,37 +640,54 @@ class ComposerAgent:
         # deployment just installed.
         self.watch.maybe_check_availability(force=True)
 
-    def _observe_executor_package_update(self):
-        """Same contract as _observe_executor_update, for inline package updates.
+    def _staged_package_update(self, mode, version, token, operation_id):
+        """Fetch here, swap there — the two halves of an inline update.
 
-        Tracked under its own marker so an image deploy and a package swap cannot
-        mask each other's completion.
+        This agent has the egress the executor deliberately lacks; the executor
+        has the Docker authority this agent deliberately lacks. So the wheel is
+        fetched and verified here, onto the shared runtime volume, and only its
+        identity crosses the private socket. Returns ``(exit_code, detail)`` for
+        `WatchRuntime.process_package`, whose ack contract is unchanged.
         """
-        ack = self.watch.read_package_ack()
-        token = str(ack.get("token") or "").strip()
-        if not token:
-            return
-        last = self.store.get_meta("last_reported_package_ack_token")
-        if not last:
-            self.store.set_meta("last_reported_package_ack_token", token)
-            return
-        if token == last:
-            return
-        operation_id = str(ack.get("operation_id") or "").strip()
+        from . import executor_client
+        from .dlux_package_stage import stage_release
+
+        operation = operation_id or str(uuid.uuid4())
+        if mode == "rollback":
+            # A rollback restores a release already on the volume: no network,
+            # nothing to stage, nothing to hand over but the request itself.
+            return executor_client.run_operation("dlux_package_rollback", {}, operation)
         try:
-            exit_code = int(ack.get("exit_code", 0) or 0)
-        except (TypeError, ValueError):
-            exit_code = 1
-        self._report_local_update(token, operation_id, exit_code)
-        self.store.set_meta("last_reported_package_ack_token", token)
+            staged = stage_release(self.watch.runtime_root, version)
+        except Exception as exc:
+            return 1, f"Could not stage the DjangoLux release: {redact_text(exc)}"
+        print(
+            f"⟳ staged DjangoLux {staged['version']} for the executor", flush=True
+        )
+        return executor_client.run_operation("dlux_package_apply", staged, operation)
+
+    def _process_package_request(self, runner=None) -> None:
+        """Own the package trigger: DjangoLux refuses to queue a second request
+        while one is pending, so an unacknowledged one is a permanent wedge."""
+        package = self.watch.pending_package_request()
+        if not package:
+            return
+        operation_id = str(package.get("operation_id") or "").strip()
+        if operation_id and self.store.command_state(operation_id):
+            self.store.transition(operation_id, "running", {"phase": "dlux_package_update"})
+        exit_code = self.watch.process_package(package, runner=runner)
+        self._report_local_update(str(package.get("token") or ""), operation_id, exit_code)
 
     def process_local_update(self):
-        # Executor mode: the executor owns the trigger-watched update; the agent
-        # holds no Docker authority and only observes the result.
+        # Executor mode: the executor owns the trigger-watched image update; the
+        # agent holds no Docker authority and only observes the result. Inline
+        # package updates are the exception — the executor cannot fetch a wheel
+        # from a network it is not on — so the agent stages the release and hands
+        # the swap over the socket.
         from . import executor_client
         if executor_client.executor_configured():
             self._observe_executor_update()
-            self._observe_executor_package_update()
+            self._process_package_request(self._staged_package_update)
             return
         request = self.watch.pending_request()
         if request:
@@ -681,18 +698,9 @@ class ComposerAgent:
             token = str(request.get("token") or "")
             self._report_local_update(token, operation_id, exit_code)
             return
-        # No executor to defer to, so this loop also owns the package trigger.
-        # Without it a stack on the agent-only topology would leave a DjangoLux
-        # 1.8.0 update request unacknowledged forever — and DjangoLux refuses to
-        # queue a second one while the first is pending.
-        package = self.watch.pending_package_request()
-        if not package:
-            return
-        operation_id = str(package.get("operation_id") or "").strip()
-        if operation_id and self.store.command_state(operation_id):
-            self.store.transition(operation_id, "running", {"phase": "dlux_package_update"})
-        exit_code = self.watch.process_package(package)
-        self._report_local_update(str(package.get("token") or ""), operation_id, exit_code)
+        # No executor to defer to, so this loop runs the update itself: on the
+        # agent-only topology it holds both the network and Docker authority.
+        self._process_package_request()
 
     def run_once(self):
         self.watch.maybe_check_availability()

@@ -491,6 +491,9 @@ class WatchRuntime:
             "package-available.json"
         )
         self.next_package_check = 0.0
+        # The triggers live in <runtime root>/state/, and staging a wheel needs
+        # the root itself (downloads/ sits beside state/).
+        self.runtime_root = self.package_trigger.parent.parent
 
     def maybe_check_availability(self, force=False):
         if not self.availability_enabled:
@@ -571,11 +574,36 @@ class WatchRuntime:
         value["token"] = token
         return value
 
-    def process_package(self, request: dict) -> int:
+    def run_package_child(self, mode: str, version: str, token: str, operation_id: str):
+        """The local update: this process has both the network and Docker.
+
+        Returns ``(exit_code, launch_error)``. `composer watch` and the agent-only
+        topology use this; the hardened topology substitutes a runner that stages
+        here and swaps in the executor (see `AgentRuntime`).
+        """
+        child = [sys.executable, "-m", "composer", "dlux-update", mode]
+        if version:
+            child.extend(["--version", version])
+        if self.args.dev:
+            child.append("-d")
+        if self.args.file:
+            child.extend(["-f", self.args.file])
+        if self.args.status_file:
+            child.extend(["--status-file", self.args.status_file])
+        child_env = self.env.copy()
+        child_env["COMPOSER_REQUEST_TOKEN"] = token
+        if operation_id:
+            child_env["COMPOSER_OPERATION_ID"] = operation_id
+        try:
+            return subprocess.run(child, env=child_env).returncode, ""
+        except (OSError, subprocess.SubprocessError) as exc:
+            return 127, f"Composer dlux-update process could not start: {exc}"
+
+    def process_package(self, request: dict, runner=None) -> int:
         """Run an inline DjangoLux update for a request DjangoLux wrote.
 
-        Mirrors `process()`: run a child, ack the token whatever happens, and
-        never let an unreadable request wedge the loop. The child owns the
+        Mirrors `process()`: run the update, ack the token whatever happens, and
+        never let an unreadable request wedge the loop. The runner owns the
         rollback decision — see composer/dlux_package_update.py.
         """
         token = str(request["token"])
@@ -586,28 +614,10 @@ class WatchRuntime:
             mode = "apply"
         version = str(payload.get("target_version") or request.get("target_version") or "").strip()
 
-        child = [sys.executable, "-m", "composer", "dlux-update", mode]
-        if version:
-            child.extend(["--version", version])
-        if self.args.dev:
-            child.append("-d")
-        if self.args.file:
-            child.extend(["-f", self.args.file])
-        if self.args.status_file:
-            child.extend(["--status-file", self.args.status_file])
-
         label = f"{mode} {version}".strip()
         print(f"⟳ dlux package update {token} — {label}", flush=True)
-        child_env = self.env.copy()
-        child_env["COMPOSER_REQUEST_TOKEN"] = token
-        if operation_id:
-            child_env["COMPOSER_OPERATION_ID"] = operation_id
-        launch_error = ""
-        try:
-            exit_code = subprocess.run(child, env=child_env).returncode
-        except (OSError, subprocess.SubprocessError) as exc:
-            exit_code = 127
-            launch_error = f"Composer dlux-update process could not start: {exc}"
+        run = runner or self.run_package_child
+        exit_code, launch_error = run(mode, version, token, operation_id)
         if exit_code != 0:
             fallback = launch_error or (
                 f"Composer dlux-update exited with status {exit_code}."

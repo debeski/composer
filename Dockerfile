@@ -22,6 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# The one dependency composer does not reimplement. `dlux-update` mirrors
+# django-lux[updater]'s trust decisions, including its refusal to install a
+# wheel it cannot verify — without this the whole inline update path fails
+# closed, on every release, in every deployment. Same floor as the extra.
+RUN pip install --no-cache-dir "pypi-attestations>=0.0.29"
+
 COPY composer /app/composer
 COPY VERSION /app/VERSION
 # Reference wrappers for `composer check`: a deployment compares its start.sh /

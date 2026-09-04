@@ -129,15 +129,48 @@ Only operations the agent initiates from a remote command need the socket:
 |:--|:--|:--|
 | `restart` | `operation_id`, `service?` | Reject `PROTECTED_RESTART_SERVICES`; require membership in `COMPOSER_AGENT_RESTART_SERVICES`; empty service ⇒ the configured allowlist only. |
 | `recovery_deploy` | `operation_id`, `reason` (non-empty) | Recreate only from the known-good active state; never an arbitrary image/compose. |
+| `dlux_package_apply` | `operation_id`, `version`, `filename`, `sha256` | Filename must match the wheel shape (so it can never carry a path separator); digest must be SHA-256 hex; the staged bytes must hash to it, and the manifest inside the wheel must name that version and permit inline install. |
+| `dlux_package_rollback` | `operation_id` | Restores the previous release already on the volume; takes no payload. |
 
 Each request carries `protocol_version`; the executor rejects an unknown version
 (the fail-safe handshake) and runs one operation at a time.
+
+### C. Inline DjangoLux package updates: fetched by the agent, swapped by the executor
+
+An inline release swap needs two capabilities this split deliberately keeps
+apart: **egress** to fetch and verify the wheel, and **Docker authority** to
+restart and health-gate the services running it. The executor has the second and,
+sitting alone on the `internal: true` docker_proxy network, can never have the
+first — giving it egress would put the host-root-equivalent process on a routed
+network, which is the whole thing this design removes.
+
+So the halves each do what they can:
+
+1. The agent owns `package-update-request.json` (the executor's loop ignores it).
+2. On a request the agent resolves the release, verifies PyPI's Trusted Publisher
+   attestation and the SHA-256, and writes the wheel to `downloads/` on the
+   shared runtime volume.
+3. It sends `dlux_package_apply` with the version, filename and digest.
+4. The executor re-hashes the staged bytes, re-reads the manifest inside the
+   wheel, unpacks, activates, restarts, health-gates, and rolls back if the
+   deployment does not come back healthy — without one outbound connection.
+
+The digest travels over the socket rather than in a file beside the wheel because
+`celery` mounts that volume read-write too: a record kept next to the bytes is a
+record a planted wheel's author could write. Bytes may come from the volume; what
+they must hash to may not.
+
+The agent still holds no Docker authority — it stages a file and asks. Exit 3
+("rolled back and still unhealthy") crosses back unchanged, so a caller that
+retries on failure does not retry a deployment that needs a human.
 
 ### Not executor operations
 
 - **`dlux.backup.create`** runs a DjangoLux management command inside the DLUX
   container (no Docker authority); the agent bridges it to DLUX unchanged.
 - **`agent.rotate_credentials`** is agent-local (credential store, no Docker).
+- **Fetching a DjangoLux release** needs the network the executor does not have;
+  the agent stages the verified wheel and the executor swaps it (see C).
 - **Reads** — availability via `docker image inspect`, `ps`/`inspect` for health —
   stay with the agent through the **read-only** `docker-socket-proxy`.
 

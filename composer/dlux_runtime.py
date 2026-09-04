@@ -213,9 +213,22 @@ class DluxRuntime:
             raise DluxRuntimeError(
                 f"Release directory {version} contains DjangoLux {declared or 'unknown'}."
             )
-        if not isinstance(manifest.get("inline_safe"), bool):
-            raise DluxRuntimeError(f"Release {version} does not declare inline_safe.")
-        return manifest
+        # Inline safety is schema-dependent: schema 1 declares `inline_safe`
+        # outright, schema 2 derives it from install/migrations and never carries
+        # the key. Reading it directly refused every schema-2 release here, after
+        # the wheel had already been fetched, verified and staged. Defer to the
+        # one normalizer both halves of the update path already use.
+        from .dlux_release_source import ReleaseSourceError, normalize_manifest
+
+        try:
+            normalized = normalize_manifest(manifest, version)
+        except ReleaseSourceError as exc:
+            raise DluxRuntimeError(str(exc)) from exc
+        if not normalized.get("inline_safe"):
+            raise DluxRuntimeError(
+                f"Release {version} may not be applied inline; refusing to activate it."
+            )
+        return normalized
 
     def quarantine(self, version, reason="") -> Optional[Path]:
         """Move a release out of ``releases/`` so it cannot be activated again."""

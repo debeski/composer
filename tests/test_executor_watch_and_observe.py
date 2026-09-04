@@ -96,6 +96,38 @@ class ExecutorWatchLoopTests(unittest.TestCase):
             self.assertEqual(json.loads(ack.read_text())["token"], "tok-1")
             child.assert_called()  # the update pipeline was invoked by the executor
 
+    def test_the_loop_leaves_the_package_trigger_to_the_agent(self):
+        """Staging a release needs PyPI, and this service is on no routed network.
+
+        Acting on the trigger here would ack the request with a download failure
+        and leave DjangoLux unable to queue another one.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            trigger = Path(tmp) / "image-update-request.json"
+            package = Path(tmp) / "package-update-request.json"
+            args = SimpleNamespace(
+                trigger_file=str(trigger),
+                status_file=str(Path(tmp) / "deploy-status.json"),
+                log_file=None,
+                interval=2,
+                dev=False,
+                file=None,
+            )
+            watch = _build_watch_runtime(args)
+            lease = threading.Lock()
+            stop = threading.Event()
+
+            with patch.object(watch, "process_package") as processed:
+                t = threading.Thread(target=_run_watch_loop, args=(watch, lease, stop), daemon=True)
+                t.start()
+                package.write_text(json.dumps({"token": "pkg-1"}), encoding="utf-8")
+                time.sleep(0.3)
+                stop.set()
+                t.join(2)
+
+            processed.assert_not_called()
+            self.assertFalse(Path(f"{package}.ack").exists())
+
 
 class AgentObserveAckTests(unittest.TestCase):
     def _command(self, op_id):

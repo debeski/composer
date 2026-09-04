@@ -636,13 +636,56 @@ class AgentOnlyPackageUpdateTests(unittest.TestCase):
             self.assertEqual(image.call_count, 1)
             self.assertEqual(package.call_count, 0)
 
-    def test_with_an_executor_the_agent_only_observes(self):
-        """The agent holds no Docker authority in the hardened topology."""
+    def test_with_an_executor_the_agent_stages_and_delegates_the_swap(self):
+        """The agent still holds no Docker authority: it fetches, the executor swaps.
+
+        The executor sits on an internal network and cannot reach PyPI, so this
+        is the only half that can stage the wheel — and only its identity, never
+        the bytes' provenance, crosses the socket.
+        """
+        staged = {
+            "version": "1.8.0",
+            "filename": "django_lux-1.8.0-py3-none-any.whl",
+            "sha256": "b" * 64,
+        }
         with tempfile.TemporaryDirectory() as temp_dir:
             agent = self._agent(Path(temp_dir))
             self._request(agent)
             with patch("composer.executor_client.executor_configured", return_value=True), \
-                 patch.object(agent.watch, "process_package", return_value=0) as package:
+                 patch("composer.dlux_package_stage.stage_release", return_value=staged) as stage, \
+                 patch("composer.executor_client.run_operation", return_value=(0, "")) as op:
                 agent.process_local_update()
 
-            self.assertEqual(package.call_count, 0)
+            self.assertEqual(stage.call_args[0][1], "1.8.0")
+            self.assertEqual(op.call_args[0][0], "dlux_package_apply")
+            self.assertEqual(op.call_args[0][1], staged)
+            ack = json.loads(Path(f"{agent.watch.package_trigger}.ack").read_text(encoding="utf-8"))
+            self.assertEqual((ack["token"], ack["exit_code"]), ("pkg-1", 0))
+
+    def test_a_rollback_is_delegated_without_staging_anything(self):
+        """Rolling back restores a release already on the volume — no fetch."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = self._agent(Path(temp_dir))
+            self._request(agent, mode="rollback", target_version="")
+            with patch("composer.executor_client.executor_configured", return_value=True), \
+                 patch("composer.dlux_package_stage.stage_release") as stage, \
+                 patch("composer.executor_client.run_operation", return_value=(0, "")) as op:
+                agent.process_local_update()
+
+            stage.assert_not_called()
+            self.assertEqual(op.call_args[0][0], "dlux_package_rollback")
+
+    def test_a_staging_failure_never_reaches_the_executor(self):
+        """A wheel that could not be fetched or verified is not a swap request."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = self._agent(Path(temp_dir))
+            self._request(agent)
+            with patch("composer.executor_client.executor_configured", return_value=True), \
+                 patch("composer.dlux_package_stage.stage_release",
+                       side_effect=RuntimeError("PyPI is unreachable")), \
+                 patch("composer.executor_client.run_operation") as op:
+                agent.process_local_update()
+
+            op.assert_not_called()
+            ack = json.loads(Path(f"{agent.watch.package_trigger}.ack").read_text(encoding="utf-8"))
+            self.assertEqual(ack["exit_code"], 1, "the request is acked, not left pending")

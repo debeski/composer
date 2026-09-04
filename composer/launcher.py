@@ -443,7 +443,7 @@ class DockerComposeLauncher(
             if argv and argv[0] == "dlux-update":
                 from .dlux_package_cli import parse_dlux_update_args, run_dlux_update
 
-                sys.exit(run_dlux_update(parse_dlux_update_args(argv[1:])))
+                sys.exit(run_dlux_update(parse_dlux_update_args(argv[1:]), argv[1:]))
             if argv and argv[0] == "watch":
                 from .watcher import run_watch
 

@@ -7,9 +7,12 @@ anything else. A ``protocol_version`` handshake makes a transient agent/executor
 version skew fail safe instead of misinterpreting an operation.
 
 Image updates are NOT socket requests: they stay file-triggered and are executed
-by the executor's watcher loop. Backups are DjangoLux-side (no Docker). So the
-socket surface here is deliberately just the two agent-initiated Docker ops:
-``restart`` and ``recovery_deploy``.
+by the executor's watcher loop. Backups are DjangoLux-side (no Docker). Inline
+DjangoLux package updates are the one file-triggered flow that does travel this
+way, because it needs both halves: the agent has the egress to fetch and verify
+the wheel, the executor has the Docker authority to swap and health-gate it. The
+agent sends only what the executor cannot derive locally — version, filename and
+the digest the staged bytes must hash to.
 """
 
 import json
@@ -31,12 +34,20 @@ _LENGTH_PREFIX_BYTES = 4
 # The agent-initiated Docker operations that travel over the socket. Note the
 # absence of image_update (file-triggered), backup (DLUX-side), and
 # rotate_credentials (agent-local) — none of them belong on this surface.
-EXECUTOR_OPS = frozenset({"restart", "recovery_deploy"})
+EXECUTOR_OPS = frozenset(
+    {"restart", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback"}
+)
 
 REQUEST_FIELDS = frozenset({"protocol_version", "operation_id", "op", "payload"})
 RESULT_STATES = frozenset({"succeeded", "failed", "rejected"})
 
 _SERVICE_RE = re.compile(r"[A-Za-z0-9_-]+")
+# Mirrors dlux_release_source's wheel and version shapes. A filename cannot
+# carry a path separator, so the executor's join into downloads/ is confined by
+# the protocol itself rather than by the code that later reads it.
+_WHEEL_RE = re.compile(r"^django_lux-[0-9][A-Za-z0-9._+-]{0,96}\.whl$")
+_PACKAGE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[.-]?(?:a|b|rc|post|dev)[0-9]+)?$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -103,6 +114,21 @@ def validate_executor_request(value: Any) -> Dict[str, Any]:
         if not reason:
             raise ProtocolError("A recovery deployment requires a reason.")
         payload = {"force": force, "reason": reason}
+    elif op == "dlux_package_apply":
+        _require_payload_fields(payload, {"version", "filename", "sha256"})
+        version = _clip(payload.get("version"), 64)
+        filename = _clip(payload.get("filename"), 200)
+        digest = _clip(payload.get("sha256"), 64).lower()
+        if not _PACKAGE_VERSION_RE.fullmatch(version):
+            raise ProtocolError("The package version is invalid.")
+        if not _WHEEL_RE.fullmatch(filename):
+            raise ProtocolError("The staged wheel filename is invalid.")
+        if not _SHA256_RE.fullmatch(digest):
+            raise ProtocolError("The staged wheel digest must be a SHA-256 hex string.")
+        payload = {"version": version, "filename": filename, "sha256": digest}
+    elif op == "dlux_package_rollback":
+        _require_payload_fields(payload, set())
+        payload = {}
 
     return {
         "protocol_version": EXECUTOR_PROTOCOL_VERSION,

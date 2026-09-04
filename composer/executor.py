@@ -208,11 +208,15 @@ def _expected_peer_uid_from_env() -> Optional[int]:
 
 
 def _run_watch_loop(watch, op_lease, stop_event) -> None:
-    """The executor's trigger-watched update loop (image and inline package).
+    """The executor's trigger-watched image-update loop.
 
     Serializes with socket ops on the shared ``op_lease``. Availability checks are
     NOT run here — those are a Docker read the agent performs via the read-only
-    proxy. A single bad cycle must never take the executor down.
+    proxy. Neither is the inline *package* trigger: staging a release means
+    reaching PyPI, and this service sits on an internal network by design. The
+    agent owns that trigger and sends the swap back as a `dlux_package_apply`
+    socket op, which lands on the same lease through the ops handler. A single
+    bad cycle must never take the executor down.
     """
     interval = max(2.0, float(getattr(watch, "interval", 2) or 2))
     while not stop_event.is_set():
@@ -221,10 +225,6 @@ def _run_watch_loop(watch, op_lease, stop_event) -> None:
             if request:
                 with op_lease:
                     watch.process(request)
-            package_request = watch.pending_package_request()
-            if package_request:
-                with op_lease:
-                    watch.process_package(package_request)
         except Exception:
             pass
         stop_event.wait(interval)

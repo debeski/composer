@@ -29,6 +29,22 @@ def _stage_source(root: Path, version: str, *, manifest_version=None, inline_saf
     return src
 
 
+def _schema_two_source(root: Path, version: str, *, effect="none", inline="allowed") -> Path:
+    """A real DjangoLux 1.8.7-shaped manifest: no `inline_safe` key at all."""
+    src = root / f"unpacked-{version}"
+    (src / "dlux").mkdir(parents=True)
+    manifest = {
+        "schema_version": 2,
+        "version": version,
+        "requires": {"updater_schema": ">=1", "baked_image": ">=1.2.7"},
+        "migrations": {"effect": effect, "rollback_compatible": True, "downtime": "none"},
+        "install": {"inline": inline},
+        "rollback": {"supported": True},
+    }
+    (src / "dlux" / "release-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return src
+
+
 class VersionValidationTests(unittest.TestCase):
     def test_accepts_release_versions(self):
         for value in ("1.8.0", "1.8.0rc1", "2.0", "1.8.0.post1"):
@@ -62,6 +78,24 @@ class StagingTests(unittest.TestCase):
         empty.mkdir()
         with self.assertRaises(DluxRuntimeError):
             self.runtime.stage_release("1.8.0", empty)
+
+    def test_verify_accepts_a_schema_two_release(self):
+        """Schema 2 derives inline safety; it never carries an `inline_safe` key.
+
+        Reading that key directly refused every current release *after* the wheel
+        had been fetched, verified and staged — the swap failed at the last step.
+        """
+        self.runtime.stage_release("1.8.7", _schema_two_source(self.root, "1.8.7"))
+        self.assertTrue(self.runtime.verify_release("1.8.7")["inline_safe"])
+        self.assertEqual(self.runtime.activate("1.8.7"), {})
+
+    def test_verify_rejects_a_schema_two_release_that_forbids_inline_install(self):
+        self.runtime.stage_release(
+            "1.8.7", _schema_two_source(self.root, "1.8.7", inline="forbidden")
+        )
+        with self.assertRaises(DluxRuntimeError) as ctx:
+            self.runtime.verify_release("1.8.7")
+        self.assertIn("inline", str(ctx.exception))
 
     def test_verify_rejects_a_release_whose_manifest_disagrees(self):
         """The artifact must be what was asked for — caught before activation."""
