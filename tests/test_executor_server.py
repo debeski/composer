@@ -3,7 +3,6 @@ import shutil
 import socket
 import tempfile
 import threading
-import time
 import unittest
 import uuid
 from unittest.mock import patch
@@ -55,11 +54,12 @@ class ExecutorServerTests(unittest.TestCase):
         thread = threading.Thread(target=executor.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(executor.stop)
-        for _ in range(100):
-            if os.path.exists(self.socket_path):
-                break
-            time.sleep(0.02)
-        self.assertTrue(os.path.exists(self.socket_path), "executor socket never appeared")
+        # Not `os.path.exists`: the socket file appears at bind time, before
+        # `listen()`, and a connect in that window is refused.
+        self.assertTrue(
+            executor.wait_until_listening(timeout=5),
+            "executor never started listening",
+        )
         return executor
 
     def test_valid_request_reaches_handler_and_returns_result(self):

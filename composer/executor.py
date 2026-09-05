@@ -78,6 +78,10 @@ class Executor:
         self._op_lease = self.op_lease
         self._conn_slots = threading.BoundedSemaphore(_MAX_INFLIGHT_CONNS)
         self._stop = threading.Event()
+        # `bind()` creates the socket file, `listen()` is what starts accepting.
+        # Waiting on the path alone therefore says "ready" during the window in
+        # between, where a connect is refused outright.
+        self._listening = threading.Event()
         self._server: Optional[socket.socket] = None
 
     # -- lifecycle -------------------------------------------------------
@@ -109,6 +113,7 @@ class Executor:
 
     def serve_forever(self) -> None:
         self._server = self._bind()
+        self._listening.set()
         try:
             while not self._stop.is_set():
                 try:
@@ -125,8 +130,17 @@ class Executor:
         finally:
             self._close()
 
+    def wait_until_listening(self, timeout: Optional[float] = None) -> bool:
+        """Block until the socket is accepting connections.
+
+        The socket file existing is not the same thing: it appears at bind time,
+        and a connect before `listen()` is refused.
+        """
+        return self._listening.wait(timeout)
+
     def stop(self) -> None:
         self._stop.set()
+        self._listening.clear()
         server = self._server
         if server is not None:
             try:
