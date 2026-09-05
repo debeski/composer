@@ -73,6 +73,15 @@ class StagingTests(unittest.TestCase):
         self.assertEqual(self.runtime.staged_versions(), ["1.8.0"])
         self.assertEqual(self.runtime.verify_release("1.8.0")["version"], "1.8.0")
 
+    def test_staged_versions_are_ordered_by_version(self):
+        """As strings, "1.8.10" sorts below "1.8.9" — and the rollback target and
+        the prune are both taken from the end of this list."""
+        for version in ("1.8.9", "1.8.10", "1.9.0", "1.10.0"):
+            self.runtime.stage_release(version, _stage_source(self.root, version))
+        self.assertEqual(
+            self.runtime.staged_versions(), ["1.8.9", "1.8.10", "1.9.0", "1.10.0"]
+        )
+
     def test_staging_rejects_a_directory_without_the_package(self):
         empty = self.root / "empty"
         empty.mkdir()

@@ -221,6 +221,30 @@ class RollbackTests(_Base):
         self.assertTrue(result.ok)
         self.assertEqual(self.runtime.read_active(), {})
 
+    def test_a_two_digit_patch_is_ordered_by_number_not_by_string(self):
+        """"1.8.10" sorts below "1.8.9" as a string, and did here."""
+        self._stage("1.8.9")
+        self._stage("1.8.10")
+        self.runtime.activate("1.8.10")
+        ops = _Ops()
+
+        result = rollback_package_update(self.runtime, restart=ops.restart, health_check=ops.health)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(self.runtime.read_active()["version"], "1.8.9")
+
+    def test_a_release_above_the_active_one_is_never_a_rollback_target(self):
+        """Rolling back twice must not roll forward onto what was just left."""
+        self._stage("1.8.9")
+        self._stage("1.8.10")
+        self.runtime.activate("1.8.9")
+        ops = _Ops()
+
+        result = rollback_package_update(self.runtime, restart=ops.restart, health_check=ops.health)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(self.runtime.read_active(), {}, "back to the image, not up to 1.8.10")
+
     def test_an_unhealthy_rollback_is_critical(self):
         self._stage("1.7.1")
         self._stage("1.8.0")
@@ -246,6 +270,18 @@ class PruneTests(_Base):
         self.assertIn("1.7.1", remaining, "a protected release is never pruned")
         self.assertTrue(removed)
         self.assertNotIn("1.5.0", remaining)
+
+    def test_the_newest_kept_releases_are_the_newest_by_version(self):
+        for version in ("1.8.8", "1.8.9", "1.8.10", "1.8.11"):
+            self._stage(version)
+        self.runtime.activate("1.8.11")
+
+        prune_releases(self.runtime, keep=1)
+
+        remaining = self.runtime.staged_versions()
+        self.assertIn("1.8.11", remaining, "the active release is never pruned")
+        self.assertIn("1.8.10", remaining, "the newest spare is the highest version")
+        self.assertNotIn("1.8.8", remaining)
 
 
 if __name__ == "__main__":

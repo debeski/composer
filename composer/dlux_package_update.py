@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from . import dlux_release_source as release_source
-from .dlux_runtime import DluxRuntime, DluxRuntimeError
+from .dlux_runtime import DluxRuntime, DluxRuntimeError, version_sort_key
 
 # Releases kept on the volume besides the active one, so a rollback target is
 # always present without the volume growing without bound.
@@ -201,9 +201,16 @@ def rollback_package_update(
         return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
 
     current = active.get("version", "")
-    targets = [v for v in runtime.staged_versions() if v != current]
+    # Strictly below the active release, which is what a rollback means. Taking
+    # the newest staged release that merely differs would roll *forward* onto a
+    # release the deployment had already stepped back from — the exact shape of
+    # a rollback loop.
+    targets = [
+        version for version in runtime.staged_versions()
+        if version_sort_key(version) < version_sort_key(current)
+    ]
     if not targets:
-        # Nothing staged below the active release: fall back to the image copy.
+        # Nothing below the active release: fall back to the image copy.
         steps.append("restore-image")
         say("Returning to the DjangoLux release baked into the image")
         runtime.restore({})

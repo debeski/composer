@@ -37,6 +37,16 @@ _SIMPLE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[.-]?(?:a|b|rc|post|dev
 VALID_SOURCES = frozenset({"image", "volume"})
 
 
+def version_sort_key(version) -> tuple:
+    """Numeric ordering for a release version. Mirrors dlux_release_source's
+    candidate sort; a non-numeric part sorts below any number (1.9.0rc1 < 1.9.0).
+    """
+    return tuple(
+        int(part) if part.isdigit() else -1
+        for part in re.split(r"[._-]", str(version or ""))
+    )
+
+
 class DluxRuntimeError(RuntimeError):
     """The runtime volume is not in a state Composer can safely act on."""
 
@@ -91,13 +101,19 @@ class DluxRuntime:
         return self.releases / normalize_version(version)
 
     def staged_versions(self) -> list:
+        """Staged releases, oldest first — by version, not by string.
+
+        `sorted()` alone puts "1.8.10" *below* "1.8.9", which is wrong the first
+        time a two-digit patch is staged: the rollback would pick the wrong
+        target and the prune would drop the wrong release.
+        """
         if not self.releases.is_dir():
             return []
         found = []
         for entry in self.releases.iterdir():
             if entry.is_dir() and _VERSION_DIR_RE.fullmatch(entry.name):
                 found.append(entry.name)
-        return sorted(found)
+        return sorted(found, key=version_sort_key)
 
     # -- generation -----------------------------------------------------
 

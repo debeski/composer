@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.9 is tagged/published, v1.3.10 is in progress.
+- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.10 is released, v1.3.11 is in progress.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
 - `migrate` is terminal-bound, defaults to `web`, prefers its label command, and forwards remaining migrator args.
@@ -33,7 +33,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish v1.3.10, then `./start.sh update-self` on the VPS so `dlux-update` works there (the fix ships in the image; wrappers are unchanged).
+  - [ ] Publish v1.3.11, then `./start.sh update-self` + `./start.sh agent-update` on the VPS.
   - [ ] Live verify the hardened inline update on a real stack: panel-triggered apply, agent stages, executor swaps, and DjangoLux reports the new version.
   - [ ] After publishing v1.3.6, run `./start.sh check --fix -y` on project-archive and confirm the missing label is installed with a `.xpose/` backup.
   - [ ] Live verify full startup via the published wrapper/image: `-d`, `-d -mm`, and `-d -nm`; each must run one migrator and return its failure status.
@@ -46,6 +46,7 @@
   - [ ] Drop pip/setuptools from the image AFTER the `pypi-attestations` install layer (it is now the only pip dependency; +95MB, 347->442MB) - clears 3 fixable HIGH from pip's vendor tree.
   - [ ] Add `provenance: mode=max` + `sbom: true` to the release build-push step (Scout attestation policy).
 - **Completed Recently:**
+  - [x] v1.3.11: staged releases order numerically (`1.8.10` sorted below `1.8.9` as a string), and a rollback target must be strictly below the active release — it could roll forward onto the release just left.
   - [x] v1.3.10: inline updates work end to end — agent stages the verified wheel and the executor swaps it offline over `dlux_package_apply` (`dlux_package_stage.py`), `verify_release` accepts schema-2 manifests, `dlux-update` from the project root re-runs itself with the runtime volume attached (`dlux_runtime_access.py`), and the image ships `pypi-attestations`. +47 tests.
   - [x] v1.3.9: `check --fix` normalizes retired local DLUX tools wiring, restart labels, one-pass legacy hardening, native post_start stripping, and `-d` dev overrides.
   - [x] v1.3.8 released: schema-2 DjangoLux manifests enforce inline install safety, migration rollback compatibility, supported service requirements, and the Composer version floor.
@@ -53,6 +54,7 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (agent-update). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
+- Verified 2026-09-05: 544 tests pass (4 new on release ordering); rollback target and prune verified against a staged 1.8.9/1.8.10 pair.
 - Verified 2026-09-04: 540 tests pass; real e2e in the built image — stage 1.8.7 from PyPI, offline apply activates it (`active.json` -> volume), a tampered wheel is refused; `./start.sh dlux-update --check`/`--dry-run` work from the sales project root.
 - Verified 2026-09-04: transformed `project-trademarks/compose.yml` candidate has no DLUX stack-contract drift except intentionally preserved `pgadmin_data`.
 - Verified 2026-08-29: 485 tests passed with 6 expected skips; local image smoke and the v1.3.8 GitHub release workflow passed.
