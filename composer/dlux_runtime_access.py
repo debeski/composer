@@ -3,7 +3,7 @@
 ``/opt/dlux-runtime`` is a *container* path. The runtime volume is mounted there
 in `composer-executor`, `composer-agent`, `web` and `celery` — and nowhere else.
 A composer started from the project root (the `./start.sh` wrapper, or a native
-`python -m composer`) has no such mount, so `dlux-update` failed with "No
+`python -m composer`) has no such mount, so `dlux update` failed with "No
 DjangoLux runtime volume" on every correctly deployed stack.
 
 Handing the work to a stack service does not fix it: `composer-executor` holds
@@ -127,6 +127,7 @@ def secret_flags(env=None, project_dir=None) -> List[str]:
 
 def build_delegated_command(
     *,
+    action: str,
     image: str,
     volume: str,
     runtime_root: str,
@@ -146,7 +147,7 @@ def build_delegated_command(
     command.extend(["-v", f"{project_dir}:{project_dir}", "-w", project_dir])
     command.extend(secret_flags(env=env, project_dir=project_dir))
     command.append(image)
-    command.extend(["dlux-update", *argv])
+    command.extend(["dlux", action, *argv])
     # Appended last so they win over anything the caller typed: the child must
     # look where we mounted the volume, and must never delegate again.
     command.extend(["--runtime-root", runtime_root, "--no-delegate"])
@@ -180,7 +181,7 @@ def resolve_runtime_volume(launcher, runtime_root: str) -> str:
 
 
 def delegate_dlux_update(args, argv: List[str], *, launcher=None) -> int:
-    """Re-run this `dlux-update` in a container that mounts the volume."""
+    """Re-run this `dlux` action in a container that mounts the volume."""
     if launcher is None:
         from .launcher import DockerComposeLauncher
 
@@ -194,6 +195,7 @@ def delegate_dlux_update(args, argv: List[str], *, launcher=None) -> int:
 
     volume = resolve_runtime_volume(launcher, args.runtime_root)
     command = build_delegated_command(
+        action=args.action,
         image=self_image(launcher.run_command),
         volume=volume,
         runtime_root=args.runtime_root,

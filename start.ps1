@@ -1,9 +1,9 @@
-# composer-wrapper: 1
+# composer-wrapper: 2
 Set-StrictMode -Version Latest
 $composerSelfImage = if ($env:COMPOSER_SELF_IMAGE) { $env:COMPOSER_SELF_IMAGE } else { "debeski/composer:latest" }
 
-# `update-self` replaces the legacy one-argument `--update` route.
-if ($args.Count -eq 1 -and $args[0] -in @("update-self", "--update")) {
+# Pull the deployer image before launching composer from that same image.
+if ($args.Count -eq 2 -and $args[0] -eq "self" -and $args[1] -eq "update") {
     # `docker image inspect` first: `docker run` on a missing image pulls it,
     # silently, since the progress goes to the stderr this used to discard.
     Write-Host "=== Current Composer Version ==="

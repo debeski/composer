@@ -93,7 +93,7 @@ def _run_dlux_package_apply(operation_id: str, payload: Dict) -> Tuple[int, str]
     failure must not retry that one.
     """
     argv = [
-        sys.executable, "-m", "composer", "dlux-update", "apply",
+        sys.executable, "-m", "composer", "dlux", "update",
         "--version", payload["version"],
         "--staged-wheel", payload["filename"],
         "--staged-sha256", payload["sha256"],
@@ -102,7 +102,7 @@ def _run_dlux_package_apply(operation_id: str, payload: Dict) -> Tuple[int, str]
 
 
 def _run_dlux_package_rollback(operation_id: str) -> Tuple[int, str]:
-    argv = [sys.executable, "-m", "composer", "dlux-update", "rollback"]
+    argv = [sys.executable, "-m", "composer", "dlux", "rollback"]
     return _run(argv, _op_env(operation_id))
 
 

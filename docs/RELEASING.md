@@ -15,7 +15,7 @@ Add two repository secrets (Settings → Secrets and variables → Actions):
 | `DOCKERHUB_TOKEN` | Docker Hub **access token** with read/write on `debeski/composer` (Docker Hub → Account Settings → Personal access tokens). |
 
 > The wrapper scripts (`start.sh`, `start.ps1`) pull `debeski/composer:latest`,
-> so the image must stay on Docker Hub under that name for `--update` to work.
+> so the image must stay on Docker Hub under that name for `self update` to work.
 
 ## Cutting a release
 

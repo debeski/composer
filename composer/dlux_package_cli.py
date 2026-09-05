@@ -1,4 +1,4 @@
-"""`composer dlux-update` — apply or roll back an inline DjangoLux release.
+"""`composer dlux` — check, apply, or roll back an inline DjangoLux release.
 
 The plumbing between the trigger file / agent command and the orchestration in
 ``dlux_package_update``. This is where the injected `restart` and `health_check`
@@ -29,52 +29,59 @@ DEFAULT_RUNTIME_ROOT = "/opt/dlux-runtime"
 DEFAULT_RESTART_SERVICES = ("web", "celery")
 
 
-def parse_dlux_update_args(argv):
+def parse_dlux_update_args(argv, *, action="update"):
+    if action not in {"check", "update", "rollback"}:
+        raise ValueError(f"unsupported dlux action: {action}")
     parser = argparse.ArgumentParser(
-        prog="composer dlux-update",
-        description="Apply or roll back an inline DjangoLux release on the runtime volume.",
+        prog=f"composer dlux {action}",
+        description="Check, apply, or roll back an inline DjangoLux release on the runtime volume.",
     )
-    parser.add_argument("mode", choices=("apply", "rollback"), nargs="?", default="apply")
     parser.add_argument("--version", default="", help="Target version (default: newest eligible)")
     parser.add_argument(
         "--runtime-root",
         default=os.environ.get("DLUX_UPDATE_RUNTIME_ROOT", DEFAULT_RUNTIME_ROOT),
         help="DjangoLux runtime volume root",
     )
-    parser.add_argument(
-        "--restart-service", action="append", dest="restart_services", default=None,
-        metavar="SERVICE", help="Service to restart (repeatable; default: web, celery)",
-    )
     parser.add_argument("-f", "--file", help="Alternate compose file")
     parser.add_argument("-d", "--dev", action="store_true", help="Use compose.dev.yml")
     parser.add_argument("--status-file", help="Write the result as JSON to PATH")
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Resolve and verify the release, but do not activate or restart it",
-    )
-    parser.add_argument(
-        "--check", action="store_true",
-        help="Publish what is available to the runtime volume; install nothing",
-    )
-    parser.add_argument(
-        "--availability-file", default=None,
-        help="Where --check writes its result (default: state/package-available.json)",
-    )
-    parser.add_argument(
-        "--staged-wheel", default="", metavar="FILENAME",
-        help="Apply a wheel already staged in the runtime volume's downloads/ (no network)",
-    )
-    parser.add_argument(
-        "--staged-sha256", default="", metavar="HEX",
-        help="The digest --staged-wheel must hash to; required with it",
-    )
+    if action == "check":
+        parser.add_argument(
+            "--availability-file", default=None,
+            help="Where the check writes its result (default: state/package-available.json)",
+        )
+    else:
+        parser.set_defaults(availability_file=None)
+        parser.add_argument(
+            "--restart-service", action="append", dest="restart_services", default=None,
+            metavar="SERVICE", help="Service to restart (repeatable; default: web, celery)",
+        )
+    if action == "update":
+        parser.add_argument(
+            "--dry-run", action="store_true",
+            help="Resolve and verify the release, but do not activate or restart it",
+        )
+        parser.add_argument(
+            "--staged-wheel", default="", metavar="FILENAME",
+            help="Apply a wheel already staged in the runtime volume's downloads/ (no network)",
+        )
+        parser.add_argument(
+            "--staged-sha256", default="", metavar="HEX",
+            help="The digest --staged-wheel must hash to; required with it",
+        )
+    else:
+        parser.set_defaults(dry_run=False, staged_wheel="", staged_sha256="")
     parser.add_argument(
         # Set on the child composer this command starts when the runtime volume
         # is not mounted where it runs. Not for hand use: it turns the missing
         # volume back into the plain failure it is inside that container.
         "--no-delegate", action="store_true", help=argparse.SUPPRESS,
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.action = action
+    args.mode = "rollback" if action == "rollback" else "apply"
+    args.check = action == "check"
+    return args
 
 
 AVAILABILITY_FILENAME = "package-available.json"
@@ -121,7 +128,7 @@ def build_availability_payload(target_version="") -> dict:
 
 
 def run_availability_check(args, runtime) -> int:
-    """`--check`: resolve, verify and publish. Never activates anything."""
+    """`composer dlux check`: resolve, verify and publish. Never activates anything."""
     payload = build_availability_payload(args.version)
     path = write_availability(runtime, payload, args.availability_file)
     if payload["error"]:

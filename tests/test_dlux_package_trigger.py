@@ -1,4 +1,4 @@
-"""The plumbing: a package-update trigger file drives `composer dlux-update`.
+"""The plumbing: a package-update trigger file drives `composer dlux update`.
 
 Mirrors the image-update trigger contract — a request is processed once, its
 token is acked whatever happens, and a re-run of the loop does not repeat it.
@@ -78,8 +78,7 @@ class PackageTriggerTests(unittest.TestCase):
 
         argv = run.call_args[0][0]
         self.assertEqual(exit_code, 0)
-        self.assertIn("dlux-update", argv)
-        self.assertIn("apply", argv)
+        self.assertEqual(argv[1:5], ["-m", "composer", "dlux", "update"])
         self.assertIn("--version", argv)
         self.assertIn("1.8.0", argv)
 
@@ -91,7 +90,7 @@ class PackageTriggerTests(unittest.TestCase):
             runtime.process_package(runtime.pending_package_request())
 
         argv = run.call_args[0][0]
-        self.assertIn("rollback", argv)
+        self.assertEqual(argv[1:5], ["-m", "composer", "dlux", "rollback"])
         self.assertNotIn("--version", argv)
 
     def test_an_unknown_mode_falls_back_to_apply(self):
@@ -102,7 +101,7 @@ class PackageTriggerTests(unittest.TestCase):
             runtime.process_package(runtime.pending_package_request())
 
         argv = run.call_args[0][0]
-        self.assertIn("apply", argv)
+        self.assertEqual(argv[1:5], ["-m", "composer", "dlux", "update"])
         self.assertNotIn("destroy", argv)
 
     def test_a_processed_token_is_acked_and_not_repeated(self):

@@ -1,6 +1,6 @@
 # Composer Agent Protocol v1
 
-`composer agent` is one outbound-only deployment sidecar per Compose project. Composer owns Docker execution, durable command/event relay, registry discovery, reconnection, and redaction. DLUX owns backup, maintenance, monitoring, update locks, and application state. The control panel owns enrollment, authorization, fleet routing, batches, and current relayed snapshots.
+`composer agent run` is one outbound-only deployment sidecar per Compose project. Composer owns Docker execution, durable command/event relay, registry discovery, reconnection, and redaction. DLUX owns backup, maintenance, monitoring, update locks, and application state. The control panel owns enrollment, authorization, fleet routing, batches, and current relayed snapshots.
 
 ## Transport and authentication
 
@@ -47,8 +47,8 @@ Canonical examples live in `tests/fixtures/agent-protocol-v1/` and are copied un
 ## Generated-project migration
 
 Composer owns the only Compose transformer. After pulling Composer 1.2.0, run
-`./start.sh enable-agent` to review the exact diff and then
-`./start.sh enable-agent --apply`. Apply recognizes only generated DLUX updater
+`./start.sh agent enable` to review the exact diff and then
+`./start.sh agent enable --apply`. Apply recognizes only generated DLUX updater
 markers, verifies the DjangoLux bridge version when a dependency manifest is
 present, validates the proposed
 document through Docker Compose before any write, preserves the original beneath
@@ -56,6 +56,6 @@ document through Docker Compose before any write, preserves the original beneath
 label, and the web image reference are carried over from the block being replaced
 instead of being derived from the Compose `name:`, so pre-1.5 scaffolds keep
 `egress`/`docker_proxy` and their deployment-specific baked-version label. The
-DjangoLux `enable-agent` command is a one-cycle compatibility forwarder, not a
+DjangoLux `agent enable` command is a one-cycle compatibility forwarder, not a
 second implementation. The transformer reads and writes only the Compose file,
 so it runs unchanged on a deployment host that carries no project sources.

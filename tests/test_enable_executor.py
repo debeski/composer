@@ -11,7 +11,7 @@ from composer.agent_installer import (
 )
 
 # A legacy composer-updater stack; _transform_compose turns it into the current
-# composer-agent topology, which is the starting point enable-executor hardens.
+# composer-agent topology, which is the starting point executor enable hardens.
 LEGACY_COMPOSE = """name: demo_project
 
 services:
@@ -100,6 +100,20 @@ class TransformToHardenedTests(unittest.TestCase):
     def test_is_idempotent(self):
         again = _transform_to_hardened(self.hardened, "demo_project")
         self.assertEqual(again, self.hardened)
+
+    def test_already_hardened_stack_gets_nested_role_commands(self):
+        old = self.hardened.replace(
+            "    command:\n      - agent\n      - run\n",
+            "    command:\n      - agent\n",
+        ).replace(
+            "    command:\n      - executor\n      - run\n",
+            "    command:\n      - executor\n",
+        )
+
+        updated = _transform_to_hardened(old, "demo_project")
+
+        self.assertIn("    command:\n      - agent\n      - run\n", updated)
+        self.assertIn("    command:\n      - executor\n      - run\n", updated)
 
     def test_refuses_a_legacy_updater_stack(self):
         with self.assertRaises(AgentInstallError):

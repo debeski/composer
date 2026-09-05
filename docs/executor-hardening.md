@@ -254,18 +254,18 @@ release is a coordinated **composer + dlux-scaffold** change.
   migration UX. Add `composer-executor` to the exclusion/self-management sets
   alongside `composer-agent`, `docker-socket-proxy`.
 - Migration for live deployments (decrees, dhub, sales-crm, …): an
-  `enable-executor` one-cycle forwarder that prints the migration diff from
+  `executor enable` one-cycle forwarder that prints the migration diff from
   "broad-proxy agent" to "executor + read-only proxy", mirroring how
-  `enable-agent` migrated `composer-updater` → `composer-agent`. Carry forward
+  `agent enable` migrated `composer-updater` → `composer-agent`. Carry forward
   the existing caveat: a stale pre-migration proxy/agent must be reconciled
   before the first post-migration update.
-- **`enable-executor` MUST be wired into `composer check --fix`**, exactly like
-  `enable-agent` is today. `check` already detects the legacy-agent topology
+- **`executor enable` MUST be wired into `composer check --fix`**, exactly like
+  `agent enable` is today. `check` already detects the legacy-agent topology
   (`_check_topology`) and hints at the fix; `_maybe_fix` gains an "agent present,
   no executor" condition that — after the standard consequences/confirm prompt —
-  runs the `enable-executor` migration. So an operator never has to know the
+  runs the `executor enable` migration. So an operator never has to know the
   command name: `composer check --fix` both diagnoses and hardens, and
-  `composer enable-executor --apply` remains the direct path. This is a
+  `composer executor enable --apply` remains the direct path. This is a
   non-optional acceptance criterion for the slice.
 
 ### Self-update and version consistency (the resident pair)
@@ -275,23 +275,23 @@ that separation rather than adding a new self-recreation problem:
 
 - **Operator / deployer path** — `start.sh` → `docker run debeski/composer …`
   with the host socket. Operator-invoked, transient, not network-facing;
-  legitimately holds full Docker access. This is how `update`, `agent-update`,
-  `agent-restart`, and `agent-off` already run.
+  legitimately holds full Docker access. This is how `update`, `agent update`,
+  `agent restart`, and `agent off` already run.
 - **Resident / agent path** — the long-lived, network-facing agent that processes
   remote Control-Plane commands. This is the only path being de-privileged.
 
 Consequences to design in:
 
-- **No resident service recreates itself.** `agent-update` is an operator action
+- **No resident service recreates itself.** `agent update` is an operator action
   performed by the transient deployer, which recreates the resident services — so
   the executor holding the socket is never asked to replace itself, and no
   network-facing component needs Docker authority to self-update.
-- **`agent-update` must target the resident *pair*.** Today `AGENT_SERVICE` is a
+- **`agent update` must target the resident *pair*.** Today `AGENT_SERVICE` is a
   single `composer-agent` ([launcher.py](../composer/launcher.py)); with the
-  split, `agent-update`, `agent-restart`, `agent-off`, and `agent-check` must act
+  split, `agent update`, `agent restart`, `agent off`, and `agent check` must act
   on `composer-agent` **and** `composer-executor` together — pull the shared image
   once and recreate both, so they can never drift to different versions.
-- **`agent-check`** checks one image for the pair (both are `debeski/composer`), so
+- **`agent check`** checks one image for the pair (both are `debeski/composer`), so
   a single availability check still covers both.
 
 Together with the socket `protocol_version` handshake (§4), a partially-applied
@@ -311,9 +311,9 @@ Deploy order — **Composer first.** A freshly-generated project references the
 `composer:latest` without the executor and fail to start. So:
 
 1. **Composer `v1.3.0` published first** — `debeski/composer:latest` now has the
-   `executor` role, so both new stacks and `enable-executor` migrations resolve.
+   `executor run` role, so both new stacks and `executor enable` migrations resolve.
 2. DjangoLux scaffold `v1.6.0` published — new generations get the hardened stack.
-3. Existing deployments migrate via `composer check --fix` / `enable-executor`
+3. Existing deployments migrate via `composer check --fix` / `executor enable`
    (diff-reviewed), then a normal update recreates the agent + executor.
 4. Non-production canary: run image update, `restart`, and `recovery_deploy`
    end-to-end through the executor; confirm a raw Docker mutation from the agent

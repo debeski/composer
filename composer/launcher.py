@@ -54,6 +54,22 @@ DEFAULT_SELF_IMAGE = "debeski/composer:latest"
 # it. Everything else (deploys, updates, restarts, the resident roles) keeps
 # running when the terminal closes and only stops on Ctrl+C.
 TERMINAL_BOUND_COMMANDS = {"run", "migrate", "log", "logs"}
+REMOVED_COMMANDS = {
+    "--update": "self update",
+    "update-self": "self update",
+    "agent-check": "agent check",
+    "agent-update": "agent update",
+    "agent-restart": "agent restart",
+    "agent-off": "agent off",
+    "watch": "agent watch",
+    "dlux-update": "dlux update",
+    "enable-agent": "agent enable",
+    "enable-executor": "executor enable",
+}
+
+
+def _group_usage(group: str, commands: List[str]) -> str:
+    return f"Usage: composer {group} {{{'|'.join(commands)}}} ..."
 
 
 class DockerComposeLauncher(
@@ -106,7 +122,7 @@ class DockerComposeLauncher(
 
         # Status reporting (phase 1) — opt-in via --status-file / COMPOSER_STATUS_FILE.
         self.status_file: Optional[str] = None
-        # Console log — opt-in via COMPOSER_LOG_FILE (set by `composer watch`).
+        # Console log — opt-in via COMPOSER_LOG_FILE (set by `composer agent watch`).
         self.log_file: Optional[str] = None
         # Version gate (phase 2) — opt-in via COMPOSER_ACTIVE_VERSION_FILE.
         self.force = False
@@ -302,7 +318,7 @@ class DockerComposeLauncher(
         """Resident services the agent-* commands act on: composer-agent, plus
         composer-executor when the hardened topology defines it.
 
-        agent-update in particular must recreate both from the one shared image
+        `agent update` in particular must recreate both from the one shared image
         so they can never drift to different versions (both are debeski/composer).
         Legacy stacks with no executor resolve to just composer-agent.
         """
@@ -352,7 +368,7 @@ class DockerComposeLauncher(
         args = parse_agent_off_args(argv)
         self.configure_stop(
             self._agent_target_argv(args),
-            command="agent-off",
+            command="agent off",
         )
         self.down_services = self._resident_pair_scope()
 
@@ -431,8 +447,20 @@ class DockerComposeLauncher(
                     file=sys.stderr,
                 )
                 sys.exit(2)
-            if argv == ["--update"] or (argv and argv[0] == "update-self"):
-                self.handle_update_self([] if argv == ["--update"] else argv[1:])
+            if argv and argv[0] in REMOVED_COMMANDS:
+                print(
+                    f"✖ '{argv[0]}' was removed. Use 'composer {REMOVED_COMMANDS[argv[0]]}'.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if argv and argv[0] == "self":
+                if len(argv) == 1 or argv[1] in {"-h", "--help"}:
+                    print(_group_usage("self", ["update"]))
+                    return
+                if argv[1] != "update":
+                    print(_group_usage("self", ["update"]), file=sys.stderr)
+                    sys.exit(2)
+                self.handle_update_self(argv[2:])
                 return
             if argv and argv[0] == "run":
                 self.handle_run(argv[1:])
@@ -440,46 +468,70 @@ class DockerComposeLauncher(
             if argv and argv[0] == "migrate":
                 self.handle_migrate(argv[1:])
                 return
-            if argv and argv[0] == "dlux-update":
+            if argv and argv[0] == "dlux":
                 from .dlux_package_cli import parse_dlux_update_args, run_dlux_update
 
-                sys.exit(run_dlux_update(parse_dlux_update_args(argv[1:]), argv[1:]))
-            if argv and argv[0] == "watch":
-                from .watcher import run_watch
-
-                sys.exit(run_watch(parse_watch_args(argv[1:])))
+                commands = ["check", "update", "rollback"]
+                if len(argv) == 1 or argv[1] in {"-h", "--help"}:
+                    print(_group_usage("dlux", commands))
+                    return
+                if argv[1] not in commands:
+                    print(_group_usage("dlux", commands), file=sys.stderr)
+                    sys.exit(2)
+                args = parse_dlux_update_args(argv[2:], action=argv[1])
+                sys.exit(run_dlux_update(args, argv[2:]))
             if argv and argv[0] == "agent":
-                from .agent import run_agent
+                commands = ["check", "update", "restart", "off", "watch", "run", "enable"]
+                if len(argv) == 1 or argv[1] in {"-h", "--help"}:
+                    print(_group_usage("agent", commands))
+                    return
+                action = argv[1]
+                if action == "check":
+                    from .watcher import run_agent_check
 
-                sys.exit(run_agent(parse_agent_args(argv[1:])))
+                    sys.exit(run_agent_check(parse_agent_check_args(argv[2:])))
+                if action == "update":
+                    self.configure_agent_update(argv[2:])
+                elif action == "restart":
+                    self.configure_agent_restart(argv[2:])
+                elif action == "off":
+                    self.configure_agent_off(argv[2:])
+                elif action == "watch":
+                    from .watcher import run_watch
+
+                    sys.exit(run_watch(parse_watch_args(argv[2:])))
+                elif action == "run":
+                    from .agent import run_agent
+
+                    sys.exit(run_agent(parse_agent_args(argv[2:])))
+                elif action == "enable":
+                    from .agent_installer import run_enable_agent
+
+                    sys.exit(run_enable_agent(parse_enable_agent_args(argv[2:])))
+                else:
+                    print(_group_usage("agent", commands), file=sys.stderr)
+                    sys.exit(2)
             if argv and argv[0] == "executor":
-                from .executor import run_executor
+                commands = ["run", "enable"]
+                if len(argv) == 1 or argv[1] in {"-h", "--help"}:
+                    print(_group_usage("executor", commands))
+                    return
+                if argv[1] == "run":
+                    from .executor import run_executor
 
-                sys.exit(run_executor(parse_executor_args(argv[1:])))
-            if argv and argv[0] == "enable-agent":
-                from .agent_installer import run_enable_agent
+                    sys.exit(run_executor(parse_executor_args(argv[2:])))
+                if argv[1] == "enable":
+                    from .agent_installer import run_enable_executor
 
-                sys.exit(run_enable_agent(parse_enable_agent_args(argv[1:])))
-            if argv and argv[0] == "enable-executor":
-                from .agent_installer import run_enable_executor
-
-                sys.exit(run_enable_executor(parse_enable_executor_args(argv[1:])))
+                    sys.exit(run_enable_executor(parse_enable_executor_args(argv[2:])))
+                print(_group_usage("executor", commands), file=sys.stderr)
+                sys.exit(2)
             if argv and argv[0] in {"log", "logs"}:
                 self.handle_log(argv[1:])
                 return
             if argv and argv[0] == "check":
                 sys.exit(self.run_checkup(parse_check_args(argv[1:])))
-            if argv and argv[0] == "agent-check":
-                from .watcher import run_agent_check
-
-                sys.exit(run_agent_check(parse_agent_check_args(argv[1:])))
-            if argv and argv[0] == "agent-update":
-                self.configure_agent_update(argv[1:])
-            elif argv and argv[0] == "agent-restart":
-                self.configure_agent_restart(argv[1:])
-            elif argv and argv[0] == "agent-off":
-                self.configure_agent_off(argv[1:])
-            elif argv and argv[0] in {"restart", "-r", "--restart"}:
+            if argv and argv[0] in {"restart", "-r", "--restart"}:
                 self.configure_restart(argv[1:])
             elif argv and argv[0] in {"stop", "down"}:
                 self.configure_stop(argv[1:], command=argv[0])

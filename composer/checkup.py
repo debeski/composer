@@ -233,15 +233,15 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     WARN,
                     "topology",
                     "Managed by composer-agent. docker-socket-proxy is missing, so the agent cannot drive Docker.",
-                    fix="Re-run 'composer check --fix' or 'composer enable-agent --apply'.",
+                    fix="Re-run 'composer check --fix' or 'composer agent enable --apply'.",
                 )
             return _result(
                 WARN,
                 "topology",
                 "Managed by composer-agent (the agent drives Docker directly through docker-socket-proxy).",
                 fix=(
-                    "Harden with 'composer check --fix' (runs enable-executor) or "
-                    "'composer enable-executor --apply': moves Docker authority off the network-facing "
+                    "Harden with 'composer check --fix' (runs executor enable) or "
+                    "'composer executor enable --apply': moves Docker authority off the network-facing "
                     "agent into composer-executor and demotes docker-socket-proxy to read-only. "
                     "See docs/executor-hardening.md."
                 ),
@@ -251,7 +251,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 WARN,
                 "topology",
                 "Legacy composer-updater topology detected.",
-                fix="Migrate with 'composer check --fix' (runs enable-agent) or 'composer enable-agent --apply'.",
+                fix="Migrate with 'composer check --fix' (runs agent enable) or 'composer agent enable --apply'.",
             )
         return _result(
             FAIL,
@@ -506,7 +506,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                         f"wrapper:{name}",
                         f"{name} is wrapper version {found}, newer than the {baked} this composer "
                         "ships — the image is behind, not the wrapper.",
-                        fix="Run './start.sh update-self'. Do not 'check --fix' this; it would downgrade the wrapper.",
+                        fix="Run './start.sh self update'. Do not 'check --fix' this; it would downgrade the wrapper.",
                     )
                 )
         return results
@@ -562,19 +562,19 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         needs_hardening = (
             "composer-agent" in set(self.services) and "composer-executor" not in set(self.services)
         )
-        # Already-hardened stacks are not caught by legacy/needs_hardening, so a
-        # deployer missing the secrets read capability would otherwise be skipped.
-        # A dry-run reports a file change only when the cap must be added.
-        needs_secret_cap = False
+        # Already-hardened stacks are not caught by legacy/needs_hardening, so
+        # targeted agent-block repairs would otherwise be skipped. A dry-run
+        # reports a file change only when something must be normalized.
+        needs_agent_block_migration = False
         if "composer-executor" in set(self.services):
             try:
                 from .agent_installer import enable_executor
 
-                needs_secret_cap = bool(
+                needs_agent_block_migration = bool(
                     enable_executor(".", compose_file=args.file or "", apply=False).get("files")
                 )
             except Exception:
-                needs_secret_cap = False
+                needs_agent_block_migration = False
         # Older DjangoLux scaffolds may still import the local tools supervisor
         # or bind-mount ./tools into /app/tools. Detect it from the compose (a
         # dry-run reports a file change), then gate on the dlux version the IMAGE
@@ -738,7 +738,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             return fixes
         proxy_routes = proxy_inspection["recognized"]
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
-                and not needs_secret_cap and not needs_updater_migration
+                and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
                 and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration):
@@ -813,11 +813,12 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     "Recreate docker-socket-proxy, composer-executor, and composer-agent.",
                 ]
             )
-        if needs_secret_cap:
+        if needs_agent_block_migration:
             consequences.append(
-                "Add cap_add: DAC_READ_SEARCH to composer-executor so it can read the "
-                "project's 0600 .secrets/.env to deploy (read-only override; fixes inline "
-                "updates failing the secrets guard)."
+                "Normalize the generated Composer resident block: use nested "
+                "agent/executor run commands and add cap_add: DAC_READ_SEARCH to "
+                "composer-executor when missing so it can read the project's 0600 "
+                ".secrets/.env to deploy."
             )
         if needs_updater_migration:
             consequences.append(
@@ -990,10 +991,10 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             try:
                 outcome = enable_agent(".", compose_file=args.file or "", apply=True)
                 fixes.append(
-                    _result(OK, "fix:enable-agent", "Migrated to composer-agent. Backup: " + (outcome.get("backup_root") or "n/a"))
+                    _result(OK, "fix:agent-enable", "Migrated to composer-agent. Backup: " + (outcome.get("backup_root") or "n/a"))
                 )
             except AgentInstallError as exc:
-                fixes.append(_result(FAIL, "fix:enable-agent", f"Migration failed: {exc}"))
+                fixes.append(_result(FAIL, "fix:agent-enable", f"Migration failed: {exc}"))
             else:
                 from .agent_installer import enable_executor
 
@@ -1002,13 +1003,13 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     fixes.append(
                         _result(
                             OK,
-                            "fix:enable-executor",
+                            "fix:executor-enable",
                             "Hardened migrated composer-agent into the executor topology. Backup: "
                             + (outcome.get("backup_root") or "n/a"),
                         )
                     )
                 except AgentInstallError as exc:
-                    fixes.append(_result(FAIL, "fix:enable-executor", f"Hardening failed: {exc}"))
+                    fixes.append(_result(FAIL, "fix:executor-enable", f"Hardening failed: {exc}"))
         if needs_hardening:
             from .agent_installer import AgentInstallError, enable_executor
 
@@ -1017,14 +1018,14 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 fixes.append(
                     _result(
                         OK,
-                        "fix:enable-executor",
+                        "fix:executor-enable",
                         "Hardened composer-agent into the executor topology. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )
                 )
             except AgentInstallError as exc:
-                fixes.append(_result(FAIL, "fix:enable-executor", f"Hardening failed: {exc}"))
-        if needs_secret_cap:
+                fixes.append(_result(FAIL, "fix:executor-enable", f"Hardening failed: {exc}"))
+        if needs_agent_block_migration:
             from .agent_installer import AgentInstallError, enable_executor
 
             try:

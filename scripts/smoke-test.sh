@@ -26,10 +26,17 @@ for flag in --down --purge --volumes --build --force --status-file; do
 done
 echo "$help" | grep -q -- "run " || { echo "::error::--help is missing the 'run' subcommand"; exit 1; }
 echo "$help" | grep -q -- "restart " || { echo "::error::--help is missing the 'restart' subcommand"; exit 1; }
-echo "$help" | grep -q -- "watch " || { echo "::error::--help is missing the 'watch' subcommand"; exit 1; }
-for subcommand in run restart update pull update-self stop check agent-check agent-update agent-restart agent-off log watch agent enable-agent; do
+echo "$help" | grep -q -- "agent watch " || { echo "::error::--help is missing the 'agent watch' subcommand"; exit 1; }
+for subcommand in run restart update pull stop check log; do
   run "$subcommand" --help >/dev/null || {
     echo "::error::'$subcommand --help' failed"
+    exit 1
+  }
+done
+for group_command in "self update" "agent check" "agent update" "agent restart" "agent off" "agent watch" "agent run" "agent enable" "executor run" "executor enable" "dlux check" "dlux update" "dlux rollback"; do
+  read -r first second <<< "$group_command"
+  run "$first" "$second" --help >/dev/null || {
+    echo "::error::'$group_command --help' failed"
     exit 1
   }
 done
@@ -104,11 +111,11 @@ cleanup_agent_lifecycle() {
   docker compose -f "$agent_compose" down >/dev/null 2>&1 || true
 }
 trap cleanup_agent_lifecycle EXIT
-agent_lifecycle agent-update
-agent_lifecycle agent-restart
-agent_lifecycle agent-off
+agent_lifecycle agent update
+agent_lifecycle agent restart
+agent_lifecycle agent off
 running="$(docker compose -f "$agent_compose" ps --status running --services)"
-[ -z "$running" ] || { echo "::error::agent-off left services running: $running"; exit 1; }
+[ -z "$running" ] || { echo "::error::agent off left services running: $running"; exit 1; }
 cleanup_agent_lifecycle
 trap - EXIT
 echo "    agent lifecycle: update, restart, and off target composer-agent only"

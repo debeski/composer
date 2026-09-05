@@ -2,7 +2,7 @@
 
 Composer owns both wrappers. Every line in them is composer's own invocation
 contract — the self image, `-i`/`-t`, the `--env-file` secrets handoff, the
-`update-self` route — and composer is the only component that keeps running in
+`self update` route — and composer is the only component that keeps running in
 a project after creation: the DLUX scaffold writes them once and then refuses
 to touch them (`_write_rendered` will not overwrite). The copies under DLUX's
 `scaffold_templates/project/` are mirrors of these files, not the source; they

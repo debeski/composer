@@ -107,17 +107,17 @@ class AgentLifecycleCommandTests(unittest.TestCase):
         with patch.object(launcher, "run_docker_compose", return_value=(False, "", "boom")):
             self.assertEqual(launcher._resident_pair_scope(), ["composer-agent"])
 
-    def test_agent_lifecycle_commands_dispatch_before_flat_arguments(self):
+    def test_agent_lifecycle_commands_dispatch_from_nested_agent_group(self):
         methods = {
-            "agent-update": "configure_agent_update",
-            "agent-restart": "configure_agent_restart",
-            "agent-off": "configure_agent_off",
+            "update": "configure_agent_update",
+            "restart": "configure_agent_restart",
+            "off": "configure_agent_off",
         }
         for command, method in methods.items():
             with self.subTest(command=command):
                 launcher = DockerComposeLauncher()
                 with (
-                    patch.object(sys, "argv", ["composer", command, "-d"]),
+                    patch.object(sys, "argv", ["composer", "agent", command, "-d"]),
                     patch.object(
                         launcher,
                         method,
@@ -190,22 +190,34 @@ class UpdateSelfCommandTests(unittest.TestCase):
         self.assertIn("no space left on device", errors.getvalue())
         version.assert_not_called()
 
-    def test_update_self_and_legacy_alias_dispatch_before_flat_update(self):
-        for argv in (["composer", "update-self"], ["composer", "--update"]):
-            with self.subTest(argv=argv):
+    def test_self_update_dispatches_before_flat_update(self):
+        launcher = DockerComposeLauncher()
+        with (
+            patch.object(sys, "argv", ["composer", "self", "update"]),
+            patch.object(
+                launcher,
+                "handle_update_self",
+                side_effect=SystemExit(32),
+            ) as update_self,
+            self.assertRaisesRegex(SystemExit, "32"),
+        ):
+            launcher.run()
+
+        update_self.assert_called_once_with([])
+
+    def test_removed_flat_commands_fail_before_root_argparse_help(self):
+        for command in ("update-self", "--update", "agent-update", "dlux-update"):
+            with self.subTest(command=command):
                 launcher = DockerComposeLauncher()
                 with (
-                    patch.object(sys, "argv", argv),
-                    patch.object(
-                        launcher,
-                        "handle_update_self",
-                        side_effect=SystemExit(32),
-                    ) as update_self,
-                    self.assertRaisesRegex(SystemExit, "32"),
+                    patch.object(sys, "argv", ["composer", command, "--help"]),
+                    patch("sys.stderr", new_callable=io.StringIO) as errors,
+                    self.assertRaises(SystemExit) as exit_code,
                 ):
                     launcher.run()
 
-                update_self.assert_called_once_with([])
+                self.assertEqual(exit_code.exception.code, 2)
+                self.assertIn("was removed", errors.getvalue())
 
 
 if __name__ == "__main__":

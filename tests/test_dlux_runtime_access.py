@@ -1,4 +1,4 @@
-"""`composer dlux-update` from the project root, where nothing mounts the volume.
+"""`composer dlux update` from the project root, where nothing mounts the volume.
 
 `/opt/dlux-runtime` only exists inside the stack's containers, so the deployer
 CLI has to find the Docker volume behind it and re-run itself with that volume
@@ -100,6 +100,7 @@ class DelegatedCommandTests(unittest.TestCase):
     def _command(self, argv, **overrides):
         options = dict(
             image="composer:test",
+            action="check",
             volume="app_dlux_runtime",
             runtime_root="/opt/dlux-runtime",
             argv=argv,
@@ -112,61 +113,62 @@ class DelegatedCommandTests(unittest.TestCase):
         return access.build_delegated_command(**options)
 
     def test_the_runtime_volume_is_mounted_where_the_child_looks_for_it(self):
-        command = self._command(["--check"])
+        command = self._command([])
         self.assertIn("app_dlux_runtime:/opt/dlux-runtime:rw", command)
         root = command.index("--runtime-root")
         self.assertEqual(command[root + 1], "/opt/dlux-runtime")
 
     def test_the_child_cannot_delegate_again(self):
-        self.assertIn("--no-delegate", self._command(["--check"]))
+        self.assertIn("--no-delegate", self._command([]))
 
     def test_the_original_arguments_are_forwarded_in_order(self):
-        command = self._command(["apply", "--version", "1.8.7"])
-        tail = command[command.index("dlux-update"):]
-        self.assertEqual(tail[:4], ["dlux-update", "apply", "--version", "1.8.7"])
+        command = self._command(["--version", "1.8.7"], action="update")
+        tail = command[command.index("dlux"):]
+        self.assertEqual(tail[:4], ["dlux", "update", "--version", "1.8.7"])
 
     def test_the_project_directory_is_mounted_at_its_own_path(self):
-        command = self._command(["--check"])
+        command = self._command([])
         self.assertIn("/srv/app:/srv/app", command)
         self.assertEqual(command[command.index("-w") + 1], "/srv/app")
 
     def test_the_docker_socket_is_mounted_when_this_composer_has_one(self):
-        command = self._command(["apply"], socket_path=__file__)
+        command = self._command([], action="update", socket_path=__file__)
         self.assertIn(f"{__file__}:{__file__}", command)
 
     def test_inherited_secrets_are_forwarded_by_name_not_by_value(self):
         env = {"COMPOSER_INHERITED_SECRET_KEYS": "SECRET_KEY,DB_PASSWORD"}
-        command = self._command(["--check"], env=env)
+        command = self._command([], env=env)
         self.assertEqual(command.count("-e"), 3)
         self.assertIn("SECRET_KEY", command)
         self.assertNotIn("--env-file", command)
         self.assertFalse([token for token in command if "=" in token and "SECRET" in token])
 
     def test_a_tty_is_only_requested_when_there_is_one(self):
-        self.assertNotIn("-t", self._command(["--check"]))
-        self.assertIn("-t", self._command(["--check"], interactive=True))
+        self.assertNotIn("-t", self._command([]))
+        self.assertIn("-t", self._command([], interactive=True))
 
 
 class RunDluxUpdateTests(unittest.TestCase):
     def test_a_missing_runtime_root_delegates_instead_of_failing(self):
-        args = parse_dlux_update_args(["--check", "--runtime-root", "/nope/dlux-runtime"])
+        args = parse_dlux_update_args(["--runtime-root", "/nope/dlux-runtime"], action="check")
         with patch("composer.dlux_runtime_access.delegate_dlux_update", return_value=7) as delegate:
-            self.assertEqual(run_dlux_update(args, ["--check"]), 7)
-        self.assertEqual(delegate.call_args[0][1], ["--check"])
+            self.assertEqual(run_dlux_update(args, []), 7)
+        self.assertEqual(delegate.call_args[0][1], [])
 
     def test_the_delegated_child_reports_the_missing_volume_instead_of_looping(self):
         args = parse_dlux_update_args(
-            ["--check", "--runtime-root", "/nope/dlux-runtime", "--no-delegate"]
+            ["--runtime-root", "/nope/dlux-runtime", "--no-delegate"],
+            action="check",
         )
         with patch("composer.dlux_runtime_access.delegate_dlux_update") as delegate:
-            self.assertEqual(run_dlux_update(args, ["--check"]), 2)
+            self.assertEqual(run_dlux_update(args, []), 2)
         delegate.assert_not_called()
 
     def test_delegation_runs_the_sibling_container_and_returns_its_status(self):
-        args = parse_dlux_update_args(["--check", "--runtime-root", "/opt/dlux-runtime"])
+        args = parse_dlux_update_args(["--runtime-root", "/opt/dlux-runtime"], action="check")
         launcher = _Launcher()
         with patch.object(access, "self_image", return_value="composer:test"):
-            code = access.delegate_dlux_update(args, ["--check"], launcher=launcher)
+            code = access.delegate_dlux_update(args, [], launcher=launcher)
         self.assertEqual(code, 0)
         command = launcher.interactive_calls[0]
         self.assertEqual(command[:3], ["docker", "run", "--rm"])
@@ -174,10 +176,10 @@ class RunDluxUpdateTests(unittest.TestCase):
         self.assertIn("composer:test", command)
 
     def test_a_discovery_failure_is_a_message_not_a_traceback(self):
-        args = parse_dlux_update_args(["--check", "--runtime-root", "/nope/dlux-runtime"])
+        args = parse_dlux_update_args(["--runtime-root", "/nope/dlux-runtime"], action="check")
         error = access.RuntimeVolumeError("no volume here")
         with patch("composer.dlux_runtime_access.delegate_dlux_update", side_effect=error):
-            self.assertEqual(run_dlux_update(args, ["--check"]), 2)
+            self.assertEqual(run_dlux_update(args, []), 2)
 
 
 class SelfImageTests(unittest.TestCase):

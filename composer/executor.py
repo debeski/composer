@@ -272,7 +272,7 @@ def _build_watch_runtime(args):
 
 
 def run_executor(args) -> int:
-    """Entry point for ``composer executor``: serve the socket with the real
+    """Entry point for ``composer executor run``: serve the socket with the real
     operation handler, and (when a trigger file is configured) run the
     trigger-watched image-update loop sharing the same one-op-in-flight lease."""
     from .executor_ops import default_operation_handler

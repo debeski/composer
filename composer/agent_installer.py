@@ -186,6 +186,7 @@ def _agent_stack(project_slug: str, services: set[str], topology: Dict[str, Any]
     working_dir: "${{PWD}}"
     command:
       - agent
+      - run
       - --trigger-file
       - /opt/dlux-runtime/state/image-update-request.json
       - --status-file
@@ -279,6 +280,7 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
     working_dir: "${{PWD}}"
     command:
       - executor
+      - run
       - --socket
       - {COMPOSER_EXEC_SOCKET_PATH}
       - --trigger-file
@@ -316,6 +318,7 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
     working_dir: "${{PWD}}"
     command:
       - agent
+      - run
       - --trigger-file
       - /opt/dlux-runtime/state/image-update-request.json
       - --status-file
@@ -393,6 +396,25 @@ def _ensure_deployer_read_cap(contents: str, project_slug: str) -> str:
     return contents[:start] + block.replace(body, healed, 1) + contents[end:]
 
 
+def _ensure_nested_role_commands(contents: str) -> str:
+    """Normalize generated resident role commands to the nested CLI shape."""
+    updated = contents
+    for service, first, second in (
+        ("composer-agent", "agent", "run"),
+        ("composer-executor", "executor", "run"),
+    ):
+        span = _service_block_span(updated, service)
+        if span is None:
+            continue
+        block = updated[span[0]:span[1]]
+        old = f"    command:\n      - {first}\n"
+        new = f"    command:\n      - {first}\n      - {second}\n"
+        if old in block and new not in block:
+            block = block.replace(old, new, 1)
+            updated = updated[:span[0]] + block + updated[span[1]:]
+    return updated
+
+
 def _transform_compose(contents: str, project_slug: str) -> str:
     if COMPOSER_AGENT_START in contents:
         if (
@@ -405,7 +427,7 @@ def _transform_compose(contents: str, project_slug: str) -> str:
             raise AgentInstallError("The project contains both agent and legacy updater services.")
         if not re.search(r"(?m)^  composer_agent_state:\s*$", contents):
             raise AgentInstallError("The existing Composer agent has no dedicated state volume.")
-        return _ensure_deployer_read_cap(contents, project_slug)
+        return _ensure_nested_role_commands(_ensure_deployer_read_cap(contents, project_slug))
     if contents.count(COMPOSER_UPDATER_START) != 1 or contents.count(COMPOSER_UPDATER_END) != 1:
         raise AgentInstallError("No single recognized generated composer-updater block was found.")
     services = _service_names(contents)
@@ -695,7 +717,7 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
     delegates writes. Idempotent, and refuses anything it does not recognize."""
     if COMPOSER_AGENT_START not in contents:
         raise AgentInstallError(
-            "No recognized composer-agent block to harden. Run 'composer enable-agent' first."
+            "No recognized composer-agent block to harden. Run 'composer agent enable' first."
         )
     if (
         contents.count(COMPOSER_AGENT_START) != 1
@@ -708,7 +730,7 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
     if "composer-executor" in services:
         if "  composer-executor:\n" not in contents:
             raise AgentInstallError("An unmarked composer-executor service already exists.")
-        return _ensure_deployer_read_cap(contents, project_slug)
+        return _ensure_nested_role_commands(_ensure_deployer_read_cap(contents, project_slug))
     if "composer-agent" not in services or "docker-socket-proxy" not in services:
         raise AgentInstallError("The marked agent block is not a recognized topology.")
     if COMPOSER_UPDATER_START in contents or "  composer-updater:\n" in contents:
@@ -1043,7 +1065,7 @@ def _apply_stack_migration(
 ) -> Dict[str, Any]:
     """Shared dry-run-first stack migration: transform the Compose file, and on
     --apply validate with `docker compose config`, back up to .xpose/, and
-    atomically write. Used by both enable-agent and enable-executor."""
+    atomically write. Used by both agent enable and executor enable."""
     project_root, selected_file, compose_path = _selected_compose_path(project_dir, compose_file)
     contents = compose_path.read_text(encoding="utf-8")
     name_match = re.search(r"(?m)^name:\s*([A-Za-z0-9_-]+)\s*$", contents)
@@ -1417,7 +1439,7 @@ def run_enable_agent(args) -> int:
         if args.json:
             print(json.dumps({"error": str(exc)}, sort_keys=True))
         else:
-            print(f"✖ enable-agent: {exc}", file=sys.stderr)
+            print(f"✖ agent enable: {exc}", file=sys.stderr)
         return 2
     if args.json:
         print(json.dumps(result, sort_keys=True))
@@ -1451,7 +1473,7 @@ def run_enable_executor(args) -> int:
         if args.json:
             print(json.dumps({"error": str(exc)}, sort_keys=True))
         else:
-            print(f"✖ enable-executor: {exc}", file=sys.stderr)
+            print(f"✖ executor enable: {exc}", file=sys.stderr)
         return 2
     if args.json:
         print(json.dumps(result, sort_keys=True))

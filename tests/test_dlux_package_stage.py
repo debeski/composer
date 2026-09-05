@@ -229,7 +229,8 @@ class PackageOpHandlerTests(unittest.TestCase):
             "sha256": "a" * 64,
         })
         self.assertEqual(result["state"], "succeeded")
-        self.assertEqual(argv[1:5], ["-m", "composer", "dlux-update", "apply"])
+        self.assertEqual(argv[1:4], ["-m", "composer", "dlux"])
+        self.assertEqual(argv[4], "update")
         self.assertIn("--staged-wheel", argv)
         self.assertEqual(argv[argv.index("--staged-wheel") + 1],
                          "django_lux-1.8.7-py3-none-any.whl")
@@ -243,7 +244,8 @@ class PackageOpHandlerTests(unittest.TestCase):
 
     def test_a_rollback_needs_no_staged_release(self):
         _result, argv = self._handle("dlux_package_rollback", {})
-        self.assertEqual(argv[1:5], ["-m", "composer", "dlux-update", "rollback"])
+        self.assertEqual(argv[1:4], ["-m", "composer", "dlux"])
+        self.assertEqual(argv[4], "rollback")
         self.assertNotIn("--staged-wheel", argv)
 
 

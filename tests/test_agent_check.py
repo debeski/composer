@@ -20,6 +20,7 @@ services:
     image: debeski/composer:latest
     command:
       - agent
+      - run
       - --trigger-file
       - /opt/dlux-runtime/state/image-update-request.json
       - --check-image

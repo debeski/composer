@@ -2,10 +2,12 @@
   "schema_version": 1,
   "history": {
     "start.sh": {
-      "1": "fa7b31c5300d0359301010949c222da4f36003bab4f95c13c0c2913236896ae3"
+      "1": "fa7b31c5300d0359301010949c222da4f36003bab4f95c13c0c2913236896ae3",
+      "2": "f385fba0b14a22a10942f7926e7d6d91badacdcb4238a3e127d2fa1a7b5df9b5"
     },
     "start.ps1": {
-      "1": "6ce6d97ae74fa438d862dcc07e60beeb40dde729b5f4c6e33cc4cd38c7f1fa2c"
+      "1": "6ce6d97ae74fa438d862dcc07e60beeb40dde729b5f4c6e33cc4cd38c7f1fa2c",
+      "2": "8c0995443e77bffc61d01af0271973846d193b1c97560b9ed7d901fd8339581b"
     }
   }
 }

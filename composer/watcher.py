@@ -1,4 +1,4 @@
-"""Resident, trigger-driven updater loop for `composer watch`.
+"""Resident, trigger-driven updater loop for `composer agent watch`.
 
 Composer stays a one-shot tool: this loop is a thin supervisor that watches a
 trigger file and, on each new request, shells the existing `composer update`
@@ -277,7 +277,7 @@ def run_agent_check(args) -> int:
     images = _check_update_images(args)
     if not images:
         print(
-            "✖ agent-check: no image to check. Provide an IMAGE, set "
+            "✖ agent check: no image to check. Provide an IMAGE, set "
             "COMPOSER_CHECK_IMAGE or WEB_IMAGE, or run from a deployment "
             "whose compose file defines the composer agent.",
             file=sys.stderr,
@@ -286,7 +286,7 @@ def run_agent_check(args) -> int:
     pinned = [image for image in images if "@" in image]
     if pinned:
         print(
-            "✖ agent-check requires mutable tag references, not digest-pinned "
+            "✖ agent check requires mutable tag references, not digest-pinned "
             f"references: {', '.join(pinned)}",
             file=sys.stderr,
         )
@@ -299,7 +299,7 @@ def run_agent_check(args) -> int:
             _write_availability_payload(output_path, payload)
         except OSError as exc:
             print(
-                f"✖ agent-check could not write {output_path}: {exc}",
+                f"✖ agent check could not write {output_path}: {exc}",
                 file=sys.stderr,
             )
             return 1
@@ -577,11 +577,12 @@ class WatchRuntime:
     def run_package_child(self, mode: str, version: str, token: str, operation_id: str):
         """The local update: this process has both the network and Docker.
 
-        Returns ``(exit_code, launch_error)``. `composer watch` and the agent-only
+        Returns ``(exit_code, launch_error)``. `composer agent watch` and the agent-only
         topology use this; the hardened topology substitutes a runner that stages
         here and swaps in the executor (see `AgentRuntime`).
         """
-        child = [sys.executable, "-m", "composer", "dlux-update", mode]
+        action = "rollback" if mode == "rollback" else "update"
+        child = [sys.executable, "-m", "composer", "dlux", action]
         if version:
             child.extend(["--version", version])
         if self.args.dev:
@@ -597,7 +598,7 @@ class WatchRuntime:
         try:
             return subprocess.run(child, env=child_env).returncode, ""
         except (OSError, subprocess.SubprocessError) as exc:
-            return 127, f"Composer dlux-update process could not start: {exc}"
+            return 127, f"Composer dlux {action} process could not start: {exc}"
 
     def process_package(self, request: dict, runner=None) -> int:
         """Run an inline DjangoLux update for a request DjangoLux wrote.
@@ -620,7 +621,7 @@ class WatchRuntime:
         exit_code, launch_error = run(mode, version, token, operation_id)
         if exit_code != 0:
             fallback = launch_error or (
-                f"Composer dlux-update exited with status {exit_code}."
+                f"Composer dlux {mode} exited with status {exit_code}."
             )
             if self.args.status_file:
                 _publish_terminal_failure(
@@ -703,7 +704,7 @@ class WatchRuntime:
 def run_watch(args) -> int:
     runtime = WatchRuntime(args)
     print(
-        f"👀 composer watch — trigger={runtime.trigger} interval={runtime.interval:g}s"
+        f"👀 composer agent watch — trigger={runtime.trigger} interval={runtime.interval:g}s"
         + (
             f" · availability check every {runtime.check_interval:g}s for "
             f"{', '.join(runtime.check_images)}"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# composer-wrapper: 1
+# composer-wrapper: 2
 set -euo pipefail
 
 # Closing the terminal must not abort a run in flight. The ignored disposition
@@ -10,8 +10,8 @@ trap '' HUP
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 composer_self_image="${COMPOSER_SELF_IMAGE:-debeski/composer:latest}"
 
-# `update-self` replaces the legacy one-argument `--update` route.
-if [[ $# -eq 1 && ("${1:-}" == "update-self" || "${1:-}" == "--update") ]]; then
+# Pull the deployer image before launching composer from that same image.
+if [[ $# -eq 2 && "${1:-}" == "self" && "${2:-}" == "update" ]]; then
     # Show current version from image's VERSION file. `docker image inspect`
     # first, because `docker run` on a missing image pulls it — silently, since
     # the progress goes to the stderr this used to discard.

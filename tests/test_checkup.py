@@ -90,7 +90,7 @@ class CheckupCheckTests(unittest.TestCase):
         self.launcher.services = ["web", "composer-updater", "docker-socket-proxy"]
         result = self.launcher._check_topology()
         self.assertEqual(result["level"], WARN)
-        self.assertIn("enable-agent", result["fix"])
+        self.assertIn("agent enable", result["fix"])
 
     def test_topology_agent_without_proxy_warns(self):
         self.launcher.services = ["web", "composer-agent"]
@@ -99,13 +99,13 @@ class CheckupCheckTests(unittest.TestCase):
 
     def test_topology_agent_without_executor_warns_to_harden(self):
         # A functional but un-hardened agent stack: WARN (non-blocking, never
-        # FAILs), surfacing the hint and committing to check --fix / enable-executor.
+        # FAILs), surfacing the hint and committing to check --fix / executor enable.
         self.launcher.services = ["web", "composer-agent", "docker-socket-proxy"]
         result = self.launcher._check_topology()
         self.assertEqual(result["level"], WARN)
         self.assertIn("composer-executor", result["fix"])
         self.assertIn("check --fix", result["fix"])
-        self.assertIn("enable-executor", result["fix"])
+        self.assertIn("executor enable", result["fix"])
         self.assertIn("executor-hardening", result["fix"])
 
     def test_topology_hardened_pair_is_ok_and_labeled(self):
@@ -510,7 +510,7 @@ class CheckupRunTests(unittest.TestCase):
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             launcher.run_checkup(_args(fix=True))
-        harden.assert_called_once()  # check --fix runs enable-executor
+        harden.assert_called_once()  # check --fix runs executor enable
         legacy.assert_not_called()  # not the legacy path (agent already present)
 
     def test_fix_adds_missing_secrets_read_cap_on_hardened_stack(self):

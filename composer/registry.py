@@ -1,7 +1,7 @@
 """Minimal OCI/Docker registry v2 client — just enough to read the current
 digest of a tag without pulling the image.
 
-Used by `composer watch` to detect that a new application image has been
+Used by `composer agent watch` to detect that a new application image has been
 published (remote tag digest != the locally-pulled digest) and publish that
 availability for another process (e.g. dlux) to surface as "update available".
 

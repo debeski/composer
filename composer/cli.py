@@ -23,8 +23,8 @@ def parse_args():
             "      post-start tasks. Name services to scope it.\n"
             "  pull [-f FILE] [-d] [service...]\n"
             "      Pull images without recreating containers.\n"
-            "  update-self\n"
-            "      Pull the Composer deployer image (legacy alias: --update).\n"
+            "  self update\n"
+            "      Pull the Composer deployer image.\n"
             "  stop [-v] [-p] [-y] [-f FILE] [-d] [service...]\n"
             "      Stop and remove containers, or only the named services.\n"
             "      -v/--volumes and -p/--purge are destructive and ask for\n"
@@ -34,25 +34,31 @@ def parse_args():
             "      Doctor: verify Docker, compose config, secrets, required env,\n"
             "      topology, and version drift; --fix applies safe migrations,\n"
             "      --deep relays the in-container checks. Run 'composer check --help'.\n"
-            "  agent-check [--json] [--availability-file PATH] [IMAGE ...]\n"
+            "  agent check [--json] [--availability-file PATH] [IMAGE ...]\n"
             "      Compare remote tag digests with locally pulled images without\n"
             "      pulling or deploying. Defaults to COMPOSER_CHECK_IMAGE,\n"
             "      WEB_IMAGE, or the compose file's agent-watched images.\n"
-            "  agent-update | agent-restart | agent-off\n"
+            "  agent update | agent restart | agent off\n"
             "      Update, restart, or stop this stack's composer-agent service.\n"
             "  log [-n N|all] [--follow] [-f FILE] [-d] [service...]\n"
             "      Read Compose logs for the whole stack or named services\n"
             "      (default: last 50 lines). Run 'composer log --help'.\n"
-            "  watch --trigger-file PATH [--interval N]\n"
+            "  agent watch --trigger-file PATH [--interval N]\n"
             "      Resident updater: watch a trigger file and run a full update\n"
             "      (pull + version gate + recreate + health + post_start) on each\n"
-            "      new request. Run 'composer watch --help' for details.\n"
-            "  agent [--control-url URL] [--state-dir PATH]\n"
+            "      new request. Run 'composer agent watch --help' for details.\n"
+            "  agent run [--control-url URL] [--state-dir PATH]\n"
             "      Durable resident deployment agent with local DLUX handoff and\n"
-            "      outbound control-plane connectivity. Run 'composer agent --help'.\n"
-            "  enable-agent [--apply]\n"
+            "      outbound control-plane connectivity. Run 'composer agent run --help'.\n"
+            "  agent enable [--apply]\n"
             "      Migrate a generated DLUX project from composer-updater to\n"
-            "      composer-agent. Dry-run by default."
+            "      composer-agent. Dry-run by default.\n"
+            "  executor run | executor enable\n"
+            "      Run the privileged executor, or harden an agent stack into the\n"
+            "      executor topology. Run 'composer executor --help'.\n"
+            "  dlux check | dlux update | dlux rollback\n"
+            "      Check, apply, or roll back inline DjangoLux package releases.\n"
+            "      Run 'composer dlux --help'."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -226,7 +232,7 @@ def parse_pull_args(argv):
 
 def parse_update_self_args(argv):
     parser = argparse.ArgumentParser(
-        prog="composer update-self",
+        prog="composer self update",
         description="Pull the latest Composer deployer image.",
     )
     return parser.parse_args(argv)
@@ -287,7 +293,7 @@ def parse_check_args(argv):
 
 def parse_agent_check_args(argv):
     parser = argparse.ArgumentParser(
-        prog="composer agent-check",
+        prog="composer agent check",
         description=(
             "Check whether newer image tag digests are available without pulling "
             "or changing the deployment. The JSON form uses the same availability "
@@ -339,7 +345,7 @@ def _parse_agent_service_args(argv, prog, description, *, status_file=False):
 def parse_agent_update_args(argv):
     return _parse_agent_service_args(
         argv,
-        "composer agent-update",
+        "composer agent update",
         "Pull and recreate only this stack's composer-agent service.",
         status_file=True,
     )
@@ -348,7 +354,7 @@ def parse_agent_update_args(argv):
 def parse_agent_restart_args(argv):
     return _parse_agent_service_args(
         argv,
-        "composer agent-restart",
+        "composer agent restart",
         "Restart and health-check only this stack's composer-agent service.",
         status_file=True,
     )
@@ -357,7 +363,7 @@ def parse_agent_restart_args(argv):
 def parse_agent_off_args(argv):
     return _parse_agent_service_args(
         argv,
-        "composer agent-off",
+        "composer agent off",
         "Stop this stack's composer-agent service without changing the application.",
     )
 
@@ -570,9 +576,9 @@ def parse_restart_args(argv):
 
 
 def parse_watch_args(argv):
-    """Parse arguments for the `watch` subcommand (composer watch ...)."""
+    """Parse arguments for the `agent watch` subcommand."""
     parser = argparse.ArgumentParser(
-        prog="composer watch",
+        prog="composer agent watch",
         description=(
             "Resident updater. Watches a trigger file and, on each new request "
             "(a changed token / mtime), runs a full update via 'composer update' "
@@ -647,7 +653,7 @@ def parse_watch_args(argv):
 
 def parse_agent_args(argv):
     parser = argparse.ArgumentParser(
-        prog="composer agent",
+        prog="composer agent run",
         description=(
             "Resident deployment agent. Preserves the local DLUX trigger/status "
             "contract and optionally connects outbound to a DLUX control plane."
@@ -697,7 +703,7 @@ def parse_agent_args(argv):
 
 def parse_enable_agent_args(argv):
     parser = argparse.ArgumentParser(
-        prog="composer enable-agent",
+        prog="composer agent enable",
         description=(
             "Replace a recognized generated DLUX composer-updater block with the "
             "hardened composer-agent topology. The default is a read-only dry run."
@@ -721,7 +727,7 @@ def parse_enable_agent_args(argv):
 
 def parse_enable_executor_args(argv):
     parser = argparse.ArgumentParser(
-        prog="composer enable-executor",
+        prog="composer executor enable",
         description=(
             "Harden a generated composer-agent stack: move Docker write authority "
             "into a composer-executor, demote docker-socket-proxy to read-only, and "
@@ -746,7 +752,7 @@ def parse_enable_executor_args(argv):
 
 def parse_executor_args(argv):
     parser = argparse.ArgumentParser(
-        prog="composer executor",
+        prog="composer executor run",
         description=(
             "Run the privileged composer-executor: the sole holder of Docker "
             "authority. Serves a private Unix socket for the agent's typed "
