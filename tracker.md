@@ -46,7 +46,7 @@
   - [ ] Drop pip/setuptools from the image AFTER the `pypi-attestations` install layer (it is now the only pip dependency; +95MB, 347->442MB) - clears 3 fixable HIGH from pip's vendor tree.
   - [ ] Add `provenance: mode=max` + `sbom: true` to the release build-push step (Scout attestation policy).
 - **Completed Recently:**
-  - [x] v1.3.12: flat agent/DLUX/self routes removed in favor of `agent check/update/restart/off/watch/run/enable`, `dlux check/update/rollback`, `self update`, and `executor run/enable`; generated role commands and wrapper v2 history updated.
+  - [x] v1.3.12: flat agent/DLUX/self routes removed in favor of `agent check/update/restart/off/watch/run/enable`, `dlux check/update/rollback`, `self update`, and `executor run/enable`; leading `-f`/`-d`, generated role commands and wrapper v2 history updated.
   - [x] v1.3.11: staged releases order numerically (`1.8.10` sorted below `1.8.9` as a string), and a rollback target must be strictly below the active release — it could roll forward onto the release just left.
   - [x] v1.3.10: inline updates work end to end — agent stages the verified wheel and the executor swaps it offline over `dlux_package_apply` (`dlux_package_stage.py`), `verify_release` accepts schema-2 manifests, `dlux update` from the project root re-runs itself with the runtime volume attached (`dlux_runtime_access.py`), and the image ships `pypi-attestations`. +47 tests.
   - [x] v1.3.9: `check --fix` normalizes retired local DLUX tools wiring, restart labels, one-pass legacy hardening, native post_start stripping, and `-d` dev overrides.
@@ -55,7 +55,7 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (`agent update`). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
-- Verified 2026-09-05: 183 targeted CLI/wrapper/DLUX/agent/checkup tests pass; direct new-help checks pass; removed flat names exit 2; full `unittest discover` ran 507 tests but host Python lacks PyYAML for 2 modules.
+- Verified 2026-09-05: 185 targeted CLI/wrapper/DLUX/agent/checkup tests pass; rebuilt `composer:ci-test` and `./scripts/smoke-test.sh composer:ci-test` passes; full discovery blocked by missing PyYAML.
 - Verified 2026-09-05: 544 tests pass (4 new on release ordering); rollback target and prune verified against a staged 1.8.9/1.8.10 pair.
 - Verified 2026-09-04: 540 tests pass; real e2e in the built image — stage 1.8.7 from PyPI, offline apply activates it (`active.json` -> volume), a tampered wheel is refused; DLUX check/update worked from the sales project root.
 - Verified 2026-09-04: transformed `project-trademarks/compose.yml` candidate has no DLUX stack-contract drift except intentionally preserved `pgadmin_data`.

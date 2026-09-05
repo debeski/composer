@@ -149,6 +149,20 @@ class DelegatedCommandTests(unittest.TestCase):
 
 
 class RunDluxUpdateTests(unittest.TestCase):
+    def test_leading_global_file_flag_still_reaches_the_dlux_group(self):
+        from composer.launcher import DockerComposeLauncher
+
+        launcher = DockerComposeLauncher()
+        with (
+            patch.object(sys, "argv", ["composer", "-f", "compose.yml", "dlux", "check", "--runtime-root", "/nope/dlux-runtime"]),
+            patch("composer.dlux_runtime_access.delegate_dlux_update", return_value=7) as delegate,
+            self.assertRaises(SystemExit) as exit_code,
+        ):
+            launcher.run()
+
+        self.assertEqual(exit_code.exception.code, 7)
+        self.assertEqual(delegate.call_args[0][0].file, "compose.yml")
+
     def test_a_missing_runtime_root_delegates_instead_of_failing(self):
         args = parse_dlux_update_args(["--runtime-root", "/nope/dlux-runtime"], action="check")
         with patch("composer.dlux_runtime_access.delegate_dlux_update", return_value=7) as delegate:

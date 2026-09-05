@@ -1,7 +1,7 @@
 # Changelog
 
 ## v1.3.12
-- **Nested Agent And DLUX Commands**: Replaced flat agent/DLUX/self routes with `agent check/update/restart/off/watch/run/enable`, `dlux check/update/rollback`, `self update`, and `executor run/enable`; generated service commands now use `agent run` and `executor run`, and wrapper history advances to version 2.
+- **Nested Agent And DLUX Commands**: Replaced flat agent/DLUX/self routes with `agent check/update/restart/off/watch/run/enable`, `dlux check/update/rollback`, `self update`, and `executor run/enable`; leading `-f`/`-d` still route to nested commands, generated service commands use `agent run` and `executor run`, and wrapper history advances to version 2.
 
 ## v1.3.11
 - **Rollback Chose The Wrong Release**: `staged_versions()` ordered release directories as strings, so `1.8.10` sorted *below* `1.8.9` — the first two-digit patch would have sent a rollback to the wrong release and made `prune_releases` drop the wrong one. Ordering is numeric now (`version_sort_key`, mirroring the candidate sort in `dlux_release_source`). The rollback target is also restricted to releases strictly *below* the active one, which is what the function always claimed: taking the newest staged release that merely differed rolled *forward* onto the release the deployment had just stepped back from. 4 tests.

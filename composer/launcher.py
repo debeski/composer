@@ -72,6 +72,40 @@ def _group_usage(group: str, commands: List[str]) -> str:
     return f"Usage: composer {group} {{{'|'.join(commands)}}} ..."
 
 
+def _normalize_leading_global_options(argv: List[str]) -> List[str]:
+    """Move leading global -f/-d options behind the command they scope."""
+    leading: List[str] = []
+    rest = list(argv)
+    while rest:
+        token = rest[0]
+        if token in {"-d", "--dev"}:
+            leading.append(rest.pop(0))
+            continue
+        if token == "-f":
+            if len(rest) < 2:
+                return argv
+            leading.extend(rest[:2])
+            rest = rest[2:]
+            continue
+        if token.startswith("--file="):
+            leading.append(rest.pop(0))
+            continue
+        if token == "--file":
+            if len(rest) < 2:
+                return argv
+            leading.extend(rest[:2])
+            rest = rest[2:]
+            continue
+        break
+    if not leading or not rest:
+        return argv
+    if rest[0] in {"self", "agent", "executor", "dlux"}:
+        if len(rest) < 2:
+            return argv
+        return rest[:2] + leading + rest[2:]
+    return rest[:1] + leading + rest[1:]
+
+
 class DockerComposeLauncher(
     PostStartHooksMixin,
     HealthMonitorMixin,
@@ -435,7 +469,8 @@ class DockerComposeLauncher(
 
     def run(self):
         try:
-            argv = sys.argv[1:]
+            argv = _normalize_leading_global_options(sys.argv[1:])
+            pipeline_configured = False
             if not argv or argv[0] not in TERMINAL_BOUND_COMMANDS:
                 install_hangup_guard()
             if any(
@@ -492,10 +527,13 @@ class DockerComposeLauncher(
                     sys.exit(run_agent_check(parse_agent_check_args(argv[2:])))
                 if action == "update":
                     self.configure_agent_update(argv[2:])
+                    pipeline_configured = True
                 elif action == "restart":
                     self.configure_agent_restart(argv[2:])
+                    pipeline_configured = True
                 elif action == "off":
                     self.configure_agent_off(argv[2:])
+                    pipeline_configured = True
                 elif action == "watch":
                     from .watcher import run_watch
 
@@ -526,56 +564,61 @@ class DockerComposeLauncher(
                     sys.exit(run_enable_executor(parse_enable_executor_args(argv[2:])))
                 print(_group_usage("executor", commands), file=sys.stderr)
                 sys.exit(2)
-            if argv and argv[0] in {"log", "logs"}:
-                self.handle_log(argv[1:])
-                return
-            if argv and argv[0] == "check":
-                sys.exit(self.run_checkup(parse_check_args(argv[1:])))
-            if argv and argv[0] in {"restart", "-r", "--restart"}:
-                self.configure_restart(argv[1:])
-            elif argv and argv[0] in {"stop", "down"}:
-                self.configure_stop(argv[1:], command=argv[0])
-            elif argv and argv[0] == "update":
-                self.configure_update(argv[1:])
-            elif argv and argv[0] == "pull":
-                self.configure_pull(argv[1:])
-            else:
-                args = parse_args()
-
-                if args.version:
-                    print(f"composer {self.composer_version}")
+            if not pipeline_configured:
+                if argv and argv[0] in {"log", "logs"}:
+                    self.handle_log(argv[1:])
                     return
-                self.no_migrate = args.no_migrate
-                self.force_makemigrations = args.make_migrations
-                self.dev_mode = args.dev
-                self.compose_file = args.file
-                self.resolve_active_compose_files()
+                if argv and argv[0] == "check":
+                    sys.exit(self.run_checkup(parse_check_args(argv[1:])))
+                if argv and argv[0] in {"restart", "-r", "--restart"}:
+                    self.configure_restart(argv[1:])
+                    pipeline_configured = True
+                elif argv and argv[0] in {"stop", "down"}:
+                    self.configure_stop(argv[1:], command=argv[0])
+                    pipeline_configured = True
+                elif argv and argv[0] == "update":
+                    self.configure_update(argv[1:])
+                    pipeline_configured = True
+                elif argv and argv[0] == "pull":
+                    self.configure_pull(argv[1:])
+                    pipeline_configured = True
+                else:
+                    args = parse_args()
 
-                self.target_app = args.app
-                self.build_images = args.build
-                if args.update:
-                    # -u: pull then recreate. A service name scopes both the pull
-                    # and the recreate so only that service is updated and restarted
-                    # (Compose still starts its dependencies; dependents are left
-                    # untouched unless their own image changed).
-                    self.update_images = True
-                    if isinstance(args.update, str):
-                        self.pull_service = args.update
-                        self.up_service = args.update
-                self.down_mode = args.down
-                self.stop_command = "--down"
-                self.down_volumes = args.volumes
-                self.purge = args.purge
-                self.assume_yes = args.yes
+                    if args.version:
+                        print(f"composer {self.composer_version}")
+                        return
+                    self.no_migrate = args.no_migrate
+                    self.force_makemigrations = args.make_migrations
+                    self.dev_mode = args.dev
+                    self.compose_file = args.file
+                    self.resolve_active_compose_files()
 
-                # Status reporting + version gate config (env, overridable by flags).
-                self.status_file = args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
-                self.log_file = os.environ.get("COMPOSER_LOG_FILE") or None
-                self.force = args.force
-                self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
-                self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None
-                self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
-                self.exclude_services = parse_service_list(os.environ.get("COMPOSER_EXCLUDE_SERVICES"))
+                    self.target_app = args.app
+                    self.build_images = args.build
+                    if args.update:
+                        # -u: pull then recreate. A service name scopes both the pull
+                        # and the recreate so only that service is updated and restarted
+                        # (Compose still starts its dependencies; dependents are left
+                        # untouched unless their own image changed).
+                        self.update_images = True
+                        if isinstance(args.update, str):
+                            self.pull_service = args.update
+                            self.up_service = args.update
+                    self.down_mode = args.down
+                    self.stop_command = "--down"
+                    self.down_volumes = args.volumes
+                    self.purge = args.purge
+                    self.assume_yes = args.yes
+
+                    # Status reporting + version gate config (env, overridable by flags).
+                    self.status_file = args.status_file or os.environ.get("COMPOSER_STATUS_FILE") or None
+                    self.log_file = os.environ.get("COMPOSER_LOG_FILE") or None
+                    self.force = args.force
+                    self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
+                    self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None
+                    self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
+                    self.exclude_services = parse_service_list(os.environ.get("COMPOSER_EXCLUDE_SERVICES"))
 
             self.extract_config()
             if self.dev_mode:

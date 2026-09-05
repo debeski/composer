@@ -129,6 +129,35 @@ class AgentLifecycleCommandTests(unittest.TestCase):
 
                 configure.assert_called_once_with(["-d"])
 
+    def test_agent_lifecycle_accepts_leading_global_file_flag(self):
+        launcher = DockerComposeLauncher()
+        with (
+            patch.object(sys, "argv", ["composer", "-f", "compose.alt.yml", "agent", "update"]),
+            patch.object(
+                launcher,
+                "configure_agent_update",
+                side_effect=SystemExit(31),
+            ) as configure,
+            self.assertRaisesRegex(SystemExit, "31"),
+        ):
+            launcher.run()
+
+        configure.assert_called_once_with(["-f", "compose.alt.yml"])
+
+    def test_agent_lifecycle_does_not_fall_through_to_root_parser(self):
+        launcher = DockerComposeLauncher()
+        with (
+            patch.object(sys, "argv", ["composer", "agent", "update", "-f", "compose.alt.yml"]),
+            patch.object(launcher, "configure_agent_update") as configure,
+            patch.object(launcher, "extract_config", side_effect=SystemExit(44)),
+            patch("composer.launcher.parse_args") as root_parser,
+            self.assertRaisesRegex(SystemExit, "44"),
+        ):
+            launcher.run()
+
+        configure.assert_called_once_with(["-f", "compose.alt.yml"])
+        root_parser.assert_not_called()
+
 
 class UpdateSelfCommandTests(unittest.TestCase):
     def test_update_self_pulls_and_reports_the_deployer_image(self):
