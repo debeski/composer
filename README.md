@@ -261,6 +261,14 @@ and `COMPOSER_VERSION_LABEL` (the image label to compare, default
 `org.opencontainers.image.version`). With no active-version source configured the
 gate is disabled. `--force` overrides a block.
 
+Since Composer 1.3.13, an older image can also pass when the running DjangoLux
+deployment confirms it will keep its newer runtime-volume release. Composer runs
+`python manage.py dlux_image_gate --baked-dlux-version VERSION` in `web`, or the
+service selected by `COMPOSER_RUNTIME_GATE_SERVICE`. The command ships in Dlux
+1.8.12+ and checks the active release's `requires.baked_image` floor. Only a
+`keep` verdict permits this exception; an abort, unavailable service, missing
+command or invalid response still blocks. `--force` bypasses the check explicitly.
+
 ## mechanics
 - **Secrets**: Plaintext env file (`.env` → `secrets/.env` → `.secrets/.env`); the first that satisfies the compose's required vars wins.
 - **Version**: Every service gets `COMPOSER_VERSION`.

@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer is a Compose orchestrator plus outbound DLUX agent; v1.3.11 is tagged, v1.3.12 is in progress.
+- Composer v1.3.13 is prepared for release: `preflight_version_gate()` consults `dlux_image_gate` before refusing an older baked DjangoLux; only `keep` permits the exception. Unit suite and local arm64 image smoke passed 2026-09-07.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
 - Nested agent/DLUX CLI is canonical: `agent ...`, `dlux ...`, `self update`, `executor ...`.
@@ -33,7 +33,8 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Publish v1.3.12, then `./start.sh self update` + `./start.sh agent update` on the VPS.
+  - [ ] Beta workflow (2026-09-06, design discussion): user wants tag-derived beta/latest publication and check --beta channel switching for wrapper/agent/executor; include explicit stable return and preserve channel through check --fix. Audit version ordering; add automated shared Dlux/Composer stack acceptance.
+  - [ ] Publish v1.3.13 and verify the release pipeline before beginning channel implementation; VPS rollout remains separate.
   - [ ] Live verify the hardened inline update on a real stack: panel-triggered apply, agent stages, executor swaps, and DjangoLux reports the new version.
   - [ ] After publishing v1.3.6, run `./start.sh check --fix -y` on project-archive and confirm the missing label is installed with a `.xpose/` backup.
   - [ ] Live verify full startup via the published wrapper/image: `-d`, `-d -mm`, and `-d -nm`; each must run one migrator and return its failure status.
@@ -55,6 +56,7 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (`agent update`). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
+- Verified 2026-09-07: full unittest discovery ran 556 tests, OK (6 standalone Dlux interop skips); local arm64 `composer:release-1.3.13` build and `scripts/smoke-test.sh` passed, including real agent lifecycle. Logs under `.xpose/release-v1.3.13-*.log`.
 - Verified 2026-09-05: 185 targeted CLI/wrapper/DLUX/agent/checkup tests pass; rebuilt `composer:ci-test` and `./scripts/smoke-test.sh composer:ci-test` passes; full discovery blocked by missing PyYAML.
 - Verified 2026-09-05: 544 tests pass (4 new on release ordering); rollback target and prune verified against a staged 1.8.9/1.8.10 pair.
 - Verified 2026-09-04: 540 tests pass; real e2e in the built image — stage 1.8.7 from PyPI, offline apply activates it (`active.json` -> volume), a tampered wheel is refused; DLUX check/update worked from the sales project root.
@@ -65,6 +67,7 @@
 - Verified 2026-08-18: Docker Scout on published v1.3.6 digest = 4C/22H (2C/16H fixable); plain rebuild -> 3C/17H; +pip removal -> 3C/14H (1C/8H fixable) and smoke-test passes.
 - Verified 2026-08-18: residual fixable C/H all live in Docker's own `docker-ce-cli` 29.7.2 binary (Go stdlib 1.26.5, x/mod 0.38.0, docker/docker 28.5.2); alpine base is worse (docker-cli 29.5.3 = 9C/16H fixable).
 ### One-line info about last time edited Docs:
+- 2026-09-07: README version-gate section documents `dlux_image_gate`, Dlux 1.8.12+, `COMPOSER_RUNTIME_GATE_SERVICE` and fail-closed behavior; concise v1.3.13 changelog prepared.
 - 2026-09-05: README, agent protocol, executor hardening, and release docs use nested `agent`/`dlux`/`self`/`executor` command paths.
 
 ## Part 2: Global

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.13
+- **Runtime Image Gate**: `preflight_version_gate()` accepts an older baked DjangoLux when `dlux_image_gate` confirms the active runtime release can be kept. `COMPOSER_RUNTIME_GATE_SERVICE` selects the service (default `web`); missing, invalid or abort verdicts still block deployment.
+
 ## v1.3.12
 - **Nested Agent And DLUX Commands**: Replaced flat agent/DLUX/self routes with `agent check/update/restart/off/watch/run/enable`, `dlux check/update/rollback`, `self update`, and `executor run/enable`; leading `-f`/`-d` still route to nested commands, generated service commands use `agent run` and `executor run`, and wrapper history advances to version 2.
 

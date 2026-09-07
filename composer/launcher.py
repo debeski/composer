@@ -166,6 +166,9 @@ class DockerComposeLauncher(
         self.gate_images: List[str] = []
         self.gate_target_version: Optional[str] = None
         self.gate_active_version: Optional[str] = None
+        # Service the runtime-release verdict is asked in, and what it answered.
+        self.runtime_gate_service: Optional[str] = None
+        self.gate_runtime_verdict: Optional[str] = None
         self.exclude_services: List[str] = []
 
         self.sections = {
@@ -315,6 +318,7 @@ class DockerComposeLauncher(
         self.version_label = os.environ.get("COMPOSER_VERSION_LABEL") or None
         self.active_version_file = os.environ.get("COMPOSER_ACTIVE_VERSION_FILE") or None
         self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
+        self.runtime_gate_service = os.environ.get("COMPOSER_RUNTIME_GATE_SERVICE") or None
         self.exclude_services = parse_service_list(
             os.environ.get("COMPOSER_EXCLUDE_SERVICES")
         )

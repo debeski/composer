@@ -13,6 +13,11 @@ DEFAULT_ACTIVE_VERSION_KEY = "version"
 
 _GO_NO_VALUE = "<no value>"
 
+# A DjangoLux deployment can answer what an older target image actually does to
+# the release it is running. Opt-in: without the command the gate is unchanged.
+DEFAULT_RUNTIME_GATE_SERVICE = "web"
+RUNTIME_GATE_COMMAND = ["python", "manage.py", "dlux_image_gate"]
+
 
 class VersionGateMixin:
     """Preflight guard for deploy update flows (``-u``).
@@ -109,6 +114,41 @@ class VersionGateMixin:
             return None
         return value
 
+    def runtime_release_verdict(self, target_label: str) -> Optional[dict]:
+        """Ask the deployment what an older target image does to its active release.
+
+        The gate blocks a downgrade because old code against a forward-migrated
+        schema cannot be undone. A DjangoLux deployment can answer that
+        precisely: its active release lives on the runtime volume and is what
+        actually runs, so an image baking an older version does not by itself
+        downgrade anything.
+
+        Best-effort. Any failure — no such command, service down, unparseable
+        output — returns None and the caller blocks exactly as it does today, so
+        a deployment without the command is unaffected.
+        """
+        service = (
+            getattr(self, "runtime_gate_service", None) or DEFAULT_RUNTIME_GATE_SERVICE
+        )
+        ok, out, _ = self.run_docker_compose(
+            ["exec", "-T", service]
+            + RUNTIME_GATE_COMMAND
+            + ["--baked-dlux-version", str(target_label or "")],
+            timeout=30,
+        )
+        if not ok:
+            return None
+        text = out or ""
+        # The command prints JSON; compose may prepend its own noise.
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            verdict = json.loads(text[start : end + 1])
+        except ValueError:
+            return None
+        return verdict if isinstance(verdict, dict) else None
+
     def preflight_version_gate(self) -> Tuple[bool, str]:
         """Returns (ok, message). ``ok`` False means block the recreate.
 
@@ -151,17 +191,31 @@ class VersionGateMixin:
             )
 
         if self._version_lt(lowest[0], active):
+            if getattr(self, "force", False):
+                return True, (
+                    f"Version gate: {lowest[1]} < active {active_raw}, but --force was "
+                    f"given — proceeding."
+                )
+            verdict = self.runtime_release_verdict(lowest[1]) or {}
+            self.gate_runtime_verdict = verdict.get("verdict") or None
+            detail = str(verdict.get("reason") or "").strip()
+            if self.gate_runtime_verdict == "keep":
+                # Not a downgrade: the deployment keeps running its own newer
+                # release off the runtime volume, whatever the image bakes.
+                return True, (
+                    f"Version gate: target image '{lowest[2]}' bakes {lowest[1]}, older "
+                    f"than the active {active_raw}, but the deployment keeps its active "
+                    f"release — proceeding."
+                    + (f"\n   {detail}" if detail else "")
+                )
             message = (
                 f"Version gate: target image '{lowest[2]}' is version {lowest[1]}, "
                 f"OLDER than the active deployment version {active_raw}. Recreating "
                 f"onto it risks running old code against a forward-migrated schema.\n"
                 f"   Re-run with --force to override."
             )
-            if getattr(self, "force", False):
-                return True, (
-                    f"Version gate: {lowest[1]} < active {active_raw}, but --force was "
-                    f"given — proceeding."
-                )
+            if detail:
+                message = f"{message}\n   {detail}"
             return False, message
 
         return True, ""
