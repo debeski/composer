@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer v1.3.13 is prepared for release: `preflight_version_gate()` consults `dlux_image_gate` before refusing an older baked DjangoLux; only `keep` permits the exception. Unit suite and local arm64 image smoke passed 2026-09-07.
+- Composer v1.3.13 is tagged/published at b5af7df (2026-09-07); Release run 34129265711 passed build-push and github-release. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
 - Nested agent/DLUX CLI is canonical: `agent ...`, `dlux ...`, `self update`, `executor ...`.
@@ -34,7 +34,7 @@
 ### Incomplete Tasks:
 - **Priority 1:**
   - [ ] Beta workflow (2026-09-06, design discussion): user wants tag-derived beta/latest publication and check --beta channel switching for wrapper/agent/executor; include explicit stable return and preserve channel through check --fix. Audit version ordering; add automated shared Dlux/Composer stack acceptance.
-  - [ ] Publish v1.3.13 and verify the release pipeline before beginning channel implementation; VPS rollout remains separate.
+  - [ ] Implement `../pkg-django-lux/release_channels_plan.md` from clean Dlux 1.8.13 / Composer 1.3.13 baselines; first betas must be Dlux 1.9.0b1 and Composer 1.4.0b1. VPS rollout remains separate.
   - [ ] Live verify the hardened inline update on a real stack: panel-triggered apply, agent stages, executor swaps, and DjangoLux reports the new version.
   - [ ] After publishing v1.3.6, run `./start.sh check --fix -y` on project-archive and confirm the missing label is installed with a `.xpose/` backup.
   - [ ] Live verify full startup via the published wrapper/image: `-d`, `-d -mm`, and `-d -nm`; each must run one migrator and return its failure status.
@@ -47,6 +47,7 @@
   - [ ] Drop pip/setuptools from the image AFTER the `pypi-attestations` install layer (it is now the only pip dependency; +95MB, 347->442MB) - clears 3 fixable HIGH from pip's vendor tree.
   - [ ] Add `provenance: mode=max` + `sbom: true` to the release build-push step (Scout attestation policy).
 - **Completed Recently:**
+  - [x] Released v1.3.13: 556 tests (6 skips), local arm64 runtime smoke, GitHub amd64 smoke and multi-architecture publication passed; no channel code included.
   - [x] v1.3.12: flat agent/DLUX/self routes removed in favor of `agent check/update/restart/off/watch/run/enable`, `dlux check/update/rollback`, `self update`, and `executor run/enable`; leading `-f`/`-d`, generated role commands and wrapper v2 history updated.
   - [x] v1.3.11: staged releases order numerically (`1.8.10` sorted below `1.8.9` as a string), and a rollback target must be strictly below the active release — it could roll forward onto the release just left.
   - [x] v1.3.10: inline updates work end to end — agent stages the verified wheel and the executor swaps it offline over `dlux_package_apply` (`dlux_package_stage.py`), `verify_release` accepts schema-2 manifests, `dlux update` from the project root re-runs itself with the runtime volume attached (`dlux_runtime_access.py`), and the image ships `pypi-attestations`. +47 tests.
