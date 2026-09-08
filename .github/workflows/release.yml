@@ -49,20 +49,36 @@ jobs:
         run: python -m pip install "packaging>=23.2"
 
       # What :beta points at now decides whether a stable release may take that
-      # alias. Absent or unreadable is fine and means "nothing newer there".
+      # alias. Existence and version are read separately because they want
+      # opposite answers when absent: an alias that does not exist is free to
+      # claim, one that exists but cannot be read must not be overwritten.
+      #
+      # The version is indexed by platform. These are multi-arch manifest
+      # lists, and on a list `.Image` is nil — the un-indexed form fails with
+      # "index of untyped nil", which `|| true` then turns into a silent empty
+      # string. That looked exactly like "no beta published".
       - name: Read the current :beta version
         id: beta
         run: |
-          current="$(docker buildx imagetools inspect ${{ env.IMAGE }}:beta \
-            --format '{{ index .Image.Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)"
-          echo "current=${current}" >> "$GITHUB_OUTPUT"
-          echo ":beta currently points at '${current:-<none>}'"
+          if docker buildx imagetools inspect ${{ env.IMAGE }}:beta >/dev/null 2>&1; then
+            current="$(docker buildx imagetools inspect ${{ env.IMAGE }}:beta \
+              --format '{{ $img := index .Image "linux/amd64" }}{{ index $img.Config.Labels "org.opencontainers.image.version" }}' \
+              2>/dev/null | tr -d '[:space:]' || true)"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "current=${current}" >> "$GITHUB_OUTPUT"
+            echo ":beta exists and reports '${current:-<unreadable>}'"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "current=" >> "$GITHUB_OUTPUT"
+            echo ":beta does not exist yet"
+          fi
 
       - name: Classify and validate the release tag
         id: tag
         run: |
           python -m composer.release_tag --github-output \
-            --current-beta "${{ steps.beta.outputs.current }}"
+            --current-beta "${{ steps.beta.outputs.current }}" \
+            --beta-exists "${{ steps.beta.outputs.exists }}"
 
   build-push:
     needs: classify

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.3.14b2
+- **The `:beta` Alias Could Have Been Silently Overwritten**: the version read that decides whether a stable release may take `:beta` never worked. Composer images are multi-arch manifest lists, and on a list `.Image` is nil — the un-indexed Go template failed with "index of untyped nil", which the step's `|| true` turned into an empty string indistinguishable from "no beta published". `should_advance_beta()` then read that empty value as "nothing to protect" and advanced. Together those defeat the one rule the function exists for: the first stable release after a beta would have dragged `:beta` backwards onto itself, downgrading every beta deployment. The read is platform-indexed now, and existence is checked separately from version because the two absent cases want opposite answers — an alias that does not exist is free to claim, one that exists but cannot be read is never overwritten, since "could not check" is not evidence that overwriting is safe. Verified against the published `v1.3.14b1` manifest: the old form still errors, the new form returns `1.3.14b1`. Found while verifying the 1.3.14b1 release; b1 itself is unaffected, because a prerelease takes `:beta` unconditionally and never reaches this branch. +3 tests.
+
 ## v1.3.14b1
 The Composer half of the beta-channel rehearsal. Paired with DjangoLux 1.8.14b1;
 neither is a feature release, and the point of both is to prove the publication

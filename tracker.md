@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer v1.3.13 is tagged/published at b5af7df (2026-09-07). The tree is **v1.3.14b1 (UNTAGGED)** — the beta-channel rehearsal, paired with Dlux 1.8.14b1. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
+- Composer **v1.3.14b1 is tagged and published** (2026-09-08): `:v1.3.14b1` + `:beta` on Docker Hub (amd64+arm64), `:latest` verified unmoved at 1.3.13. Tree is v1.3.14b2 (UNTAGGED) carrying the `:beta` alias-read fix. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
 - Nested agent/DLUX CLI is canonical: `agent ...`, `dlux ...`, `self update`, `executor ...`.

@@ -325,8 +325,44 @@ class ReleaseTagTests(unittest.TestCase):
         # Stable 1.4.1 must not drag a 1.5.0b1 tester back a minor version.
         self.assertFalse(should_advance_beta("1.4.1", "1.5.0b1"))
 
-    def test_an_empty_beta_alias_is_free_to_claim(self):
-        self.assertTrue(should_advance_beta("1.4.0", ""))
+    def test_a_beta_alias_that_does_not_exist_is_free_to_claim(self):
+        self.assertTrue(should_advance_beta("1.4.0", "", beta_exists=False))
+
+    def test_an_unreadable_beta_alias_is_never_overwritten(self):
+        # The two "no version" cases want opposite answers. An alias that
+        # EXISTS but whose version could not be read must not be clobbered:
+        # "I could not check" is not evidence that overwriting is safe, and a
+        # silently downgraded beta line is worse than a stalled one.
+        #
+        # This was fail-open, and the registry read feeding it was broken in a
+        # way that always produced this case — `.Image` is nil on a multi-arch
+        # manifest list, so the un-indexed template errored and `|| true` made
+        # it look like "no beta published".
+        self.assertFalse(should_advance_beta("1.4.0", "", beta_exists=True))
+        self.assertFalse(should_advance_beta("1.4.0", "not-a-version", beta_exists=True))
+
+    def test_the_cli_defaults_to_the_cautious_reading(self):
+        # Nothing passed means "assume it exists", so a caller that forgets the
+        # flag does not silently get the dangerous branch.
+        import subprocess
+        import sys
+
+        # Derived from VERSION, not hardcoded: this shells out to the real CLI,
+        # which validates the tag against that file, so a pinned literal would
+        # fail on every version bump for a reason unrelated to what is tested.
+        root = Path(__file__).resolve().parents[1]
+        version = (root / "VERSION").read_text(encoding="utf-8").strip()
+        completed = subprocess.run(
+            [sys.executable, "-m", "composer.release_tag", f"v{version}"],
+            capture_output=True, text=True, cwd=str(root),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        if try_parse(version).is_prerelease:
+            self.assertIn('"advance_beta": true', completed.stdout, "a prerelease always takes :beta")
+        else:
+            # No --beta-exists passed, so the cautious default applies and a
+            # stable release must NOT claim an alias it could not compare.
+            self.assertIn('"advance_beta": false', completed.stdout)
 
 
 class ChangelogSectionTests(unittest.TestCase):

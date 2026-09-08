@@ -68,7 +68,7 @@ def classify_tag(tag, *, version_file_value="") -> dict:
     }
 
 
-def should_advance_beta(new_version, current_beta_version) -> bool:
+def should_advance_beta(new_version, current_beta_version, *, beta_exists=True) -> bool:
     """May a stable release also take the ``:beta`` alias?
 
     Yes, when it is genuinely newer than whatever ``:beta`` points at now — a
@@ -80,15 +80,24 @@ def should_advance_beta(new_version, current_beta_version) -> bool:
     stable, and an alias that can move backwards makes "update" mean "downgrade"
     without anyone asking for one.
 
-    An unreadable or absent current value is treated as "nothing newer there",
-    which is the same answer as a fresh registry.
+    ``beta_exists`` separates the two ways "no current version" happens, and
+    they want opposite answers:
+
+    * the alias does not exist at all — nothing to protect, so claim it;
+    * the alias exists but its version could not be read — refuse. Overwriting
+      an image whose version is unknown is exactly the move this function
+      exists to prevent, and "I could not check" is not evidence that it is
+      safe. A beta line that stops receiving finals is visible and recoverable;
+      a silently downgraded one is neither.
     """
     new = try_parse(new_version)
     if new is None:
         return False
+    if not beta_exists:
+        return True
     current = try_parse(current_beta_version)
     if current is None:
-        return True
+        return False
     return new > current
 
 
@@ -123,6 +132,14 @@ def main(argv=None) -> int:
         "--current-beta", default="",
         help="Version the :beta alias points at now, for the advance decision.",
     )
+    parser.add_argument(
+        "--beta-exists", default="",
+        help=(
+            "Whether the :beta alias exists at all ('true'/'false'). An alias "
+            "that exists but cannot be read is never overwritten; one that does "
+            "not exist is free to claim."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -141,8 +158,11 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
-    decision["advance_beta"] = (
-        decision["prerelease"] or should_advance_beta(decision["version"], args.current_beta)
+    # Default when the caller says nothing: assume the alias exists, which is
+    # the cautious reading — an unreadable alias is then not overwritten.
+    beta_exists = str(args.beta_exists or "").strip().lower() != "false"
+    decision["advance_beta"] = decision["prerelease"] or should_advance_beta(
+        decision["version"], args.current_beta, beta_exists=beta_exists,
     )
     print(json.dumps(decision, sort_keys=True))
     output = os.getenv("GITHUB_OUTPUT")
