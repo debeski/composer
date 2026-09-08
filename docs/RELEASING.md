@@ -38,10 +38,47 @@ Add two repository secrets (Settings → Secrets and variables → Actions):
 
 The `Release` workflow then:
 
-- verifies `tag == VERSION`,
+- classifies the tag (`composer/release_tag.py`), verifying `tag == VERSION` and
+  that `CHANGELOG.md` has a matching section,
 - builds `linux/amd64` + `linux/arm64` with Buildx,
-- pushes `debeski/composer:vX.Y.Z` and `debeski/composer:latest`,
-- publishes the GitHub Release using the matching `CHANGELOG.md` section.
+- pushes `debeski/composer:vX.Y.Z` plus the moving alias the tag earns,
+- publishes the GitHub Release with the real `prerelease`/`make_latest` flags,
+  using the matching `CHANGELOG.md` section.
+
+## Channels: stable and beta
+
+**The tag decides where a release is published.** No commit-message keyword, no
+workflow input, no branch convention.
+
+| Tag | Image tags pushed | GitHub release |
+| --- | --- | --- |
+| `v1.4.0b1` | `:v1.4.0b1`, `:beta` | Prerelease, **not** "latest" |
+| `v1.4.0rc1` | `:v1.4.0rc1`, `:beta` | Prerelease, **not** "latest" |
+| `v1.4.0` | `:v1.4.0`, `:latest`, and `:beta` *if newer* | Stable, takes "latest" |
+
+A stable release takes `:beta` as well **only when it is genuinely newer than
+whatever `:beta` already points at**. A beta tester should receive finals, or
+they would sit on `1.4.0b3` for ever once `1.4.0` shipped — but stable `1.4.1`
+must never drag a `1.5.0b1` deployment backwards. The beta channel is *ahead* of
+stable, and an alias that can move backwards makes "update" mean "downgrade".
+
+The classifier refuses a tag it cannot publish honestly: non-canonical spellings
+(`v1.4.0-beta1`, `v1.4.0.b1`, `V1.4.0` — tag `v1.4.0b1`), development releases,
+local versions, post-releases, epochs, a tag disagreeing with `VERSION`, and a
+version with no `## vX.Y.Z` section in `CHANGELOG.md`.
+
+Check a tag before pushing it:
+
+```bash
+python -m composer.release_tag v1.4.0b1
+```
+
+### Declare the tested minimum, not the release it precedes
+
+`1.4.0b1` is *not* `1.4.0`: by PEP 440, `>=1.4.0` is false for `1.4.0b1`, and
+deliberately so. A DjangoLux beta manifest whose Composer requirement was only
+satisfied by a Composer beta must say `">=1.4.0b1"`. Naming the final would
+refuse the exact Composer the pair was tested against — which may not exist yet.
 
 ## CI
 

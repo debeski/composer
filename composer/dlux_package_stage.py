@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from . import dlux_channel
 from . import dlux_release_source as release_source
 from .dlux_runtime import DluxRuntime
 
@@ -71,8 +72,12 @@ def stage_release(runtime_root, target_version="", *, source=release_source) -> 
     if not runtime.exists():
         raise StagingError(f"No DjangoLux runtime volume at {runtime.root}.")
     runtime.downloads.mkdir(parents=True, exist_ok=True)
+    # The agent stages what this deployment is entitled to install. Resolving on
+    # the deployment's own channel here — rather than trusting the caller — is
+    # what stops a beta reaching a stable deployment through the staging path.
+    channel, _policy_error = dlux_channel.read_policy(runtime.state_dir)
     try:
-        described = source.describe(target_version, workdir=runtime.downloads)
+        described = source.describe(target_version, channel=channel, workdir=runtime.downloads)
     except Exception as exc:
         raise StagingError(str(exc)) from exc
     if not described.get("inline_safe"):
@@ -85,6 +90,10 @@ def stage_release(runtime_root, target_version="", *, source=release_source) -> 
     if not wheel.is_file():
         raise StagingError("The verified wheel was not written to the runtime volume.")
     prune_downloads(runtime, filename)
+    # Deliberately just the identity: version, filename, digest. The channel
+    # decided WHICH release was resolved; it is not part of what the release IS,
+    # and the executor verifies the wheel against this digest rather than
+    # re-deciding eligibility. test_dlux_package_stage pins that contract.
     return {
         "version": str(described["version"]),
         "filename": filename,

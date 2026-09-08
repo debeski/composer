@@ -52,7 +52,7 @@ Composer owns the only Compose transformer. After pulling Composer 1.2.0, run
 markers, verifies the DjangoLux bridge version when a dependency manifest is
 present, validates the proposed
 document through Docker Compose before any write, preserves the original beneath
-`.xpose/dlux-agent-bootstrap/`, and replaces it atomically. Networks, the version
+`.xclude/dlux-agent-bootstrap/`, and replaces it atomically. Networks, the version
 label, and the web image reference are carried over from the block being replaced
 instead of being derived from the Compose `name:`, so pre-1.5 scaffolds keep
 `egress`/`docker_proxy` and their deployment-specific baked-version label. The

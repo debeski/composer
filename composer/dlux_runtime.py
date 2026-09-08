@@ -27,24 +27,32 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from .versions import try_parse
+
 CONTRACT_SCHEMA_VERSION = 1
 
 # Mirrors dlux/updater/runtime.py::_VERSION_DIR_RE. A version becomes a
 # directory name, so it is validated rather than trusted.
 _VERSION_DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
-_SIMPLE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[.-]?(?:a|b|rc|post|dev)[0-9]+)?$")
-
 VALID_SOURCES = frozenset({"image", "volume"})
 
 
 def version_sort_key(version) -> tuple:
-    """Numeric ordering for a release version. Mirrors dlux_release_source's
-    candidate sort; a non-numeric part sorts below any number (1.9.0rc1 < 1.9.0).
+    """PEP 440 ordering for a release version, total over unparseable input.
+
+    The tuple's first element separates "could not be parsed" from "parsed", so
+    an unreadable directory name sorts below every real release instead of
+    raising in the middle of a rollback.
+
+    This used to split on punctuation and score every non-numeric part as -1,
+    which collapsed ``1.9.0b1``, ``1.9.0b2`` and ``1.9.0`` onto one key. That is
+    harmless while only stable releases are staged and wrong the moment a beta
+    is: the rollback target search looks for a release *strictly below* the
+    active one, and a tie is not below, so a rollback from 1.9.0 would step past
+    its own beta to the image copy. The prune has the same tie.
     """
-    return tuple(
-        int(part) if part.isdigit() else -1
-        for part in re.split(r"[._-]", str(version or ""))
-    )
+    parsed = try_parse(version)
+    return (0,) if parsed is None else (1, parsed)
 
 
 class DluxRuntimeError(RuntimeError):
@@ -73,8 +81,16 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def normalize_version(value) -> str:
+    """Validate a version that is about to become a directory name.
+
+    Two independent gates, both required: it must be a real PEP 440 version, and
+    it must be safe as a path segment. The string is returned unchanged rather
+    than canonicalised — the directory on the volume was created under the name
+    the release carries, and rewriting ``1.9.0b1`` to some other spelling here
+    would look for a path that does not exist.
+    """
     raw = str(value or "").strip()
-    if not raw or not _SIMPLE_VERSION_RE.fullmatch(raw) or not _VERSION_DIR_RE.fullmatch(raw):
+    if not raw or try_parse(raw) is None or not _VERSION_DIR_RE.fullmatch(raw):
         raise DluxRuntimeError(f"Invalid DjangoLux version: {raw!r}")
     return raw
 

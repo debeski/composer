@@ -1015,7 +1015,7 @@ def _dlux_readiness_warning(project_root: Path) -> tuple[str, bool]:
 
 
 def _backup_root(project_root: Path) -> Path:
-    base = project_root / ".xpose" / "dlux-agent-bootstrap"
+    base = project_root / ".xclude" / "dlux-agent-bootstrap"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     destination = base / stamp
     suffix = 1
@@ -1064,7 +1064,7 @@ def _apply_stack_migration(
     command_runner,
 ) -> Dict[str, Any]:
     """Shared dry-run-first stack migration: transform the Compose file, and on
-    --apply validate with `docker compose config`, back up to .xpose/, and
+    --apply validate with `docker compose config`, back up to .xclude/, and
     atomically write. Used by both agent enable and executor enable."""
     project_root, selected_file, compose_path = _selected_compose_path(project_dir, compose_file)
     contents = compose_path.read_text(encoding="utf-8")
@@ -1492,3 +1492,101 @@ def run_enable_executor(args) -> int:
     else:
         print("Hardened executor topology is already enabled.")
     return 0
+
+
+# --- Composer channel switching ---------------------------------------------
+
+#: Only the `debeski/composer:<tag>` lines inside the generated block are moved.
+#: Scoped this narrowly on purpose: a channel switch is not a topology change,
+#: and rewriting the whole block would drag unrelated drift (networks, the web
+#: image, the version label) into an operation the operator asked nothing of.
+_COMPOSER_IMAGE_LINE = re.compile(
+    r"^(?P<indent>\s*)image:\s*debeski/composer:(?P<tag>[A-Za-z0-9._-]+)\s*$",
+    re.MULTILINE,
+)
+
+#: The resident services a channel switch has to recreate. `docker-socket-proxy`
+#: is not one of them: it runs a third-party image that no Composer channel
+#: affects, and restarting it would drop the agent's only route to Docker for no
+#: reason.
+CHANNEL_SWITCH_SERVICES = ("composer-agent", "composer-executor")
+
+
+def composer_images_in_block(contents: str) -> list:
+    """The `debeski/composer:<tag>` images the generated block declares."""
+    if COMPOSER_AGENT_START not in contents or COMPOSER_AGENT_END not in contents:
+        return []
+    start = contents.index(COMPOSER_AGENT_START)
+    end = contents.index(COMPOSER_AGENT_END, start)
+    return [
+        f"debeski/composer:{match.group('tag')}"
+        for match in _COMPOSER_IMAGE_LINE.finditer(contents[start:end])
+    ]
+
+
+def retag_composer_image(contents: str, image: str) -> str:
+    """Point every Composer service in the generated block at ``image``."""
+    if COMPOSER_AGENT_START not in contents or COMPOSER_AGENT_END not in contents:
+        raise AgentInstallError(
+            "No generated Composer block found; run 'composer check --fix' first."
+        )
+    start = contents.index(COMPOSER_AGENT_START)
+    end = contents.index(COMPOSER_AGENT_END, start)
+    block = contents[start:end]
+    if not _COMPOSER_IMAGE_LINE.search(block):
+        raise AgentInstallError(
+            "The generated Composer block declares no debeski/composer image to switch."
+        )
+    rewritten = _COMPOSER_IMAGE_LINE.sub(
+        lambda match: f"{match.group('indent')}image: {image}", block
+    )
+    return contents[:start] + rewritten + contents[end:]
+
+
+def switch_composer_channel(
+    project_dir: str = ".",
+    *,
+    channel: str,
+    compose_file: str = "",
+    apply: bool = False,
+    allow_unverified_dlux: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    """The one channel-switch operation. Flags, repair and self-update use this.
+
+    Two things move together, and they have to: the persisted channel that the
+    wrapper reads before Composer starts, and the image the resident pair runs
+    inside the stack. Leaving either behind produces a deployment whose deployer
+    and whose agent disagree about which Composer they are — which is exactly the
+    state that makes a bug report unreadable.
+
+    Dry-run first, like every other stack migration here. On ``apply`` the
+    channel file is written only after the Compose edit validates, so a refused
+    edit does not leave the wrapper pointing at an image the stack never adopted.
+    """
+    from . import channel_config
+
+    channel = channel_config.normalize_channel(channel)
+    image = channel_config.image_for_channel(channel)
+    result = _apply_stack_migration(
+        project_dir,
+        compose_file=compose_file,
+        transform=lambda contents, _slug: retag_composer_image(contents, image),
+        redeploy_command=(
+            "docker compose up -d --force-recreate " + " ".join(CHANNEL_SWITCH_SERVICES)
+        ),
+        apply=apply,
+        allow_unverified_dlux=allow_unverified_dlux,
+        include_diff=include_diff,
+        command_runner=command_runner,
+    )
+    result["channel"] = channel
+    result["image"] = image
+    result["channel_file"] = ""
+    if not apply:
+        return result
+    # After the Compose write, so a validation failure above has already raised.
+    path = channel_config.write_channel(channel, project_dir)
+    result["channel_file"] = str(path)
+    return result

@@ -142,7 +142,7 @@ class WrapperInstallTests(unittest.TestCase):
         target = self.project / "start.sh"
         target.write_text("# composer-wrapper: 3\necho old\n", encoding="utf-8")
         target.chmod(0o755)
-        archive = self.project / ".xpose" / "composer-check" / "stamp"
+        archive = self.project / ".xclude" / "composer-check" / "stamp"
 
         wrappers.install_wrapper(self.project, "start.sh", self.baked, archive)
 

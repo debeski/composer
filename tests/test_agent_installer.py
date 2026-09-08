@@ -103,7 +103,7 @@ class AgentInstallerTests(unittest.TestCase):
             self.assertIn("--- a/compose.yml", result["diff"])
             self.assertIn("+  composer-agent:", result["diff"])
             self.assertEqual((root / "compose.yml").read_text(encoding="utf-8"), COMPOSE)
-            self.assertFalse((root / ".xpose").exists())
+            self.assertFalse((root / ".xclude").exists())
 
     def test_apply_validates_before_atomic_write_and_preserves_original(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -209,7 +209,7 @@ class AgentInstallerTests(unittest.TestCase):
                     enable_agent(str(root), apply=True, command_runner=runner)
 
             self.assertEqual((root / "compose.yml").read_text(encoding="utf-8"), COMPOSE)
-            self.assertFalse((root / ".xpose").exists())
+            self.assertFalse((root / ".xclude").exists())
 
     def test_apply_refuses_an_old_or_unverified_dlux_bridge(self):
         with tempfile.TemporaryDirectory() as temp_dir:

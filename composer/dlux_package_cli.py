@@ -97,47 +97,72 @@ def write_availability(runtime, payload, path=None) -> Path:
     return target
 
 
-def build_availability_payload(target_version="") -> dict:
+def build_availability_payload(target_version="", *, channel=None, runtime=None) -> dict:
     """Resolve and verify the newest release, as a publishable report.
 
     A failure becomes a report too, never an exception: DjangoLux showing "could
     not check" is correct, and far better than it showing a stale "up to date"
     after PyPI became unreachable or an attestation stopped verifying.
     """
+    from . import dlux_channel
     from . import dlux_release_source as source
 
+    policy_error = ""
+    if channel is None:
+        if runtime is None:
+            channel = dlux_channel.STABLE
+        else:
+            channel, policy_error = dlux_channel.read_policy(runtime.state_dir)
     try:
-        described = source.describe(target_version)
+        described = source.describe(target_version, channel=channel)
     except Exception as exc:
         return {
             "checked_at": _utc_now(),
             "available": False,
             "version": "",
             "inline_safe": False,
+            "channel": channel,
             "reason": "",
-            "error": str(exc),
+            # A policy that could not be read is reported alongside the real
+            # failure rather than instead of it: the operator needs to know the
+            # check ran on stable because the policy was unreadable, not just
+            # that it found nothing.
+            "error": " ".join(part for part in (str(exc), policy_error) if part),
         }
     return {
         "checked_at": _utc_now(),
         "available": True,
         "version": described["version"],
         "inline_safe": described["inline_safe"],
+        "channel": described.get("channel", channel),
+        "prerelease": bool(described.get("prerelease")),
         "reason": described["reason"],
-        "error": "",
+        "error": policy_error,
     }
 
 
 def run_availability_check(args, runtime) -> int:
     """`composer dlux check`: resolve, verify and publish. Never activates anything."""
-    payload = build_availability_payload(args.version)
+    payload = build_availability_payload(args.version, runtime=runtime)
     path = write_availability(runtime, payload, args.availability_file)
-    if payload["error"]:
+    if not payload.get("available"):
         print(f"✖ {payload['error']}", file=sys.stderr)
         print(f"  published to {path}", file=sys.stderr)
         return 1
     state = "inline-safe" if payload["inline_safe"] else "requires an image rebuild"
-    print(f"✔ DjangoLux {payload['version']} available ({state}) — published to {path}")
+    channel_note = f", {payload['channel']} channel" if payload.get("channel") else ""
+    print(f"✔ DjangoLux {payload['version']} available ({state}{channel_note}) — published to {path}")
+    if payload.get("error"):
+        print(f"  note: {payload['error']}", file=sys.stderr)
     return 0
+
+
+def _resolved_channel(runtime) -> str:
+    """The published channel for this deployment, or stable when unreadable."""
+    from . import dlux_channel
+
+    channel, _error = dlux_channel.read_policy(runtime.state_dir)
+    return channel
 
 
 def _utc_now() -> str:
@@ -252,7 +277,7 @@ def run_dlux_update(args, argv=None) -> int:
 
         source = staged or dlux_release_source
         try:
-            candidate, _unpacked = source.obtain(args.version)
+            candidate, _unpacked = source.obtain(args.version, channel=_resolved_channel(runtime))
         except Exception as exc:
             print(f"✖ {exc}", file=sys.stderr)
             return 1
@@ -285,3 +310,75 @@ def run_dlux_update(args, argv=None) -> int:
         return 3
     print(f"✖ {result.message}", file=sys.stderr)
     return 1
+
+
+# --- `composer dlux channel` -------------------------------------------------
+# Reporting and requesting only. Composer never writes the policy itself: the
+# DjangoLux worker owns that file because it owns the database row it mirrors,
+# and two writers of one policy is how a deployment ends up disagreeing with
+# itself about which releases it may install.
+
+def parse_dlux_channel_args(argv):
+    parser = argparse.ArgumentParser(
+        prog="composer dlux channel",
+        description="Report or change the DjangoLux release channel for this deployment.",
+    )
+    parser.add_argument(
+        "channel", nargs="?", default="", choices=["", "stable", "beta"],
+        help="Channel to request. Omit to report the current one.",
+    )
+    parser.add_argument(
+        "--runtime-root",
+        default=os.environ.get("DLUX_UPDATE_RUNTIME_ROOT", DEFAULT_RUNTIME_ROOT),
+        help="DjangoLux runtime volume root",
+    )
+    parser.add_argument("-f", "--file", help="Alternate compose file")
+    parser.add_argument("-d", "--dev", action="store_true", help="Use compose.dev.yml")
+    parser.add_argument("--no-delegate", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    args.action = "channel"
+    args.version = ""
+    args.check = False
+    args.mode = "apply"
+    args.status_file = None
+    args.availability_file = None
+    return args
+
+
+def run_dlux_channel(args, argv=None) -> int:
+    from . import dlux_channel
+
+    runtime = DluxRuntime(args.runtime_root)
+    if not runtime.exists():
+        return _without_the_runtime_volume(args, argv)
+
+    if args.channel:
+        try:
+            request = dlux_channel.request_channel(runtime.state_dir, args.channel)
+        except dlux_channel.ChannelError as exc:
+            print(f"✖ {exc}", file=sys.stderr)
+            return 2
+        except OSError as exc:
+            print(f"✖ Could not write the channel request: {exc}", file=sys.stderr)
+            return 2
+        print(
+            f"✔ Requested the {request['channel']} channel. The DjangoLux worker "
+            "applies it on its next tick; re-run 'composer dlux channel' to confirm."
+        )
+        return 0
+
+    status = dlux_channel.describe(runtime.state_dir)
+    active = runtime.read_active() if runtime.exists() else {}
+    installed = str(active.get("version") or "") if isinstance(active, dict) else ""
+    print(f"Channel:   {status['channel']}")
+    if installed:
+        print(f"Installed: DjangoLux {installed}")
+    if status["pending"]:
+        print(f"Pending:   {status['pending']} (requested, not yet applied by the worker)")
+    if status["failed"]:
+        print(f"✖ Last change failed: {status['failed']}", file=sys.stderr)
+        return 1
+    if status["error"]:
+        print(f"✖ {status['error']}", file=sys.stderr)
+        return 1
+    return 0

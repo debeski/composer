@@ -476,8 +476,8 @@ class CheckupRunTests(unittest.TestCase):
             patch.object(launcher, "run_docker_compose", return_value=(False, "", "")),
             patch("composer.checkup.os.path.exists", return_value=True),
             patch("composer.checkup.confirm", return_value=True),
-            patch("composer.agent_installer.enable_agent", return_value={"backup_root": "/x/.xpose/b"}) as enable,
-            patch("composer.agent_installer.enable_executor", return_value={"backup_root": "/x/.xpose/h"}) as harden,
+            patch("composer.agent_installer.enable_agent", return_value={"backup_root": "/x/.xclude/b"}) as enable,
+            patch("composer.agent_installer.enable_executor", return_value={"backup_root": "/x/.xclude/h"}) as harden,
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             launcher.run_checkup(_args(fix=True))
@@ -504,7 +504,7 @@ class CheckupRunTests(unittest.TestCase):
             patch("composer.checkup.confirm", return_value=True),
             patch(
                 "composer.agent_installer.enable_executor",
-                return_value={"backup_root": "/x/.xpose/h"},
+                return_value={"backup_root": "/x/.xclude/h"},
             ) as harden,
             patch("composer.agent_installer.enable_agent") as legacy,
             patch("sys.stdout", new_callable=io.StringIO),
@@ -521,7 +521,7 @@ class CheckupRunTests(unittest.TestCase):
 
         def fake_enable_executor(path, compose_file="", apply=False, **kw):
             calls.append(apply)
-            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xpose/cap"}
+            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xclude/cap"}
 
         with (
             patch("composer.agent_installer.enable_executor", side_effect=fake_enable_executor),
@@ -546,7 +546,7 @@ class CheckupRunTests(unittest.TestCase):
 
         def fake_labels(path, compose_file="", apply=False, **kw):
             calls.append(apply)
-            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xpose/labels", "files": ["compose.yml"]}
+            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xclude/labels", "files": ["compose.yml"]}
 
         with (
             patch("composer.agent_installer.normalize_restart_labels", side_effect=fake_labels),
@@ -572,7 +572,7 @@ class CheckupRunTests(unittest.TestCase):
         def fake_dev(path, compose_file="", base_file="", apply=False, **kw):
             calls.append((compose_file, base_file, apply))
             return {"files": ["compose.dev.yml"]} if not apply else {
-                "backup_root": "/x/.xpose/dev",
+                "backup_root": "/x/.xclude/dev",
                 "files": ["compose.dev.yml"],
             }
 
@@ -603,7 +603,7 @@ class CheckupRunTests(unittest.TestCase):
 
         def fake_migrate(path, compose_file="", apply=False, **kw):
             calls.append(apply)
-            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xpose/upd"}
+            return {"files": ["compose.yml"]} if not apply else {"backup_root": "/x/.xclude/upd"}
 
         with (
             patch("composer.agent_installer.migrate_dlux_updater", side_effect=fake_migrate),
@@ -679,7 +679,7 @@ class CheckupRunTests(unittest.TestCase):
         outcome = {
             "removed_services": ["db_backup", "pgadmin"],
             "proxy_files": [],
-            "backup_root": "/x/.xpose/check",
+            "backup_root": "/x/.xclude/check",
             "container_cleanup_applied": True,
             "postflight_verified": True,
             "preserved_volumes": [],
@@ -732,7 +732,7 @@ class CheckupRunTests(unittest.TestCase):
         outcome = {
             "removed_services": [],
             "proxy_files": [".proxy/Caddyfile"],
-            "backup_root": "/x/.xpose/check",
+            "backup_root": "/x/.xclude/check",
             "container_cleanup_applied": False,
             "postflight_verified": True,
             "preserved_volumes": [],

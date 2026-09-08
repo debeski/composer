@@ -510,13 +510,18 @@ class DockerComposeLauncher(
             if argv and argv[0] == "dlux":
                 from .dlux_package_cli import parse_dlux_update_args, run_dlux_update
 
-                commands = ["check", "update", "rollback"]
+                commands = ["check", "update", "rollback", "channel"]
                 if len(argv) == 1 or argv[1] in {"-h", "--help"}:
                     print(_group_usage("dlux", commands))
                     return
                 if argv[1] not in commands:
                     print(_group_usage("dlux", commands), file=sys.stderr)
                     sys.exit(2)
+                if argv[1] == "channel":
+                    from .dlux_package_cli import parse_dlux_channel_args, run_dlux_channel
+
+                    channel_args = parse_dlux_channel_args(argv[2:])
+                    sys.exit(run_dlux_channel(channel_args, argv[2:]))
                 args = parse_dlux_update_args(argv[2:], action=argv[1])
                 sys.exit(run_dlux_update(args, argv[2:]))
             if argv and argv[0] == "agent":

@@ -4,9 +4,16 @@ name: Release
 #   git tag -a v1.0.0 -m "v1.0.0" && git push origin v1.0.0
 #
 # Pipeline:
-#   verify         -> tag == VERSION
-#   build-push     -> multi-arch (amd64+arm64) build, push debeski/composer:<ver> + :latest
+#   classify       -> parse the tag; decide channel/aliases once, for every job
+#   build-push     -> multi-arch (amd64+arm64) build, push debeski/composer:<ver>
+#                     plus the moving alias the tag is entitled to
 #   github-release -> create the GitHub Release from the matching CHANGELOG section
+#
+# The tag chooses the channel. `v1.4.0b1` pushes :v1.4.0b1 and :beta and marks
+# the GitHub release a prerelease that is NOT "latest"; `v1.4.0` pushes :v1.4.0
+# and :latest, and additionally takes :beta only when nothing newer is already
+# there — a beta deployment should receive finals, but :beta must never move
+# backwards onto an older stable than the beta it is already running.
 #
 # One-time setup (see docs/RELEASING.md): add repo secrets
 #   DOCKERHUB_USERNAME  - Docker Hub account/namespace (debeski)
@@ -23,31 +30,52 @@ permissions:
   contents: read
 
 jobs:
-  build-push:
+  classify:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      channel: ${{ steps.tag.outputs.channel }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      make_latest: ${{ steps.tag.outputs.make_latest }}
+      advance_beta: ${{ steps.tag.outputs.advance_beta }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify tag matches VERSION
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the version parser
+        run: python -m pip install "packaging>=23.2"
+
+      # What :beta points at now decides whether a stable release may take that
+      # alias. Absent or unreadable is fine and means "nothing newer there".
+      - name: Read the current :beta version
+        id: beta
         run: |
-          file_ver="$(tr -d '[:space:]' < VERSION)"
-          tag_ver="${GITHUB_REF_NAME#v}"
-          echo "VERSION file: '$file_ver'   tag: '$tag_ver'"
-          if [ "$file_ver" != "$tag_ver" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME != VERSION ($file_ver). Bump VERSION before tagging."
-            exit 1
-          fi
-          if ! grep -q "^## v${file_ver}$" CHANGELOG.md; then
-            echo "::error::CHANGELOG.md has no exact ## v${file_ver} release section."
-            exit 1
-          fi
+          current="$(docker buildx imagetools inspect ${{ env.IMAGE }}:beta \
+            --format '{{ index .Image.Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)"
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo ":beta currently points at '${current:-<none>}'"
+
+      - name: Classify and validate the release tag
+        id: tag
+        run: |
+          python -m composer.release_tag --github-output \
+            --current-beta "${{ steps.beta.outputs.current }}"
+
+  build-push:
+    needs: classify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
       - name: Install test dependencies
-        run: python -m pip install "PyYAML==6.0.3"
+        run: python -m pip install "PyYAML==6.0.3" "packaging>=23.2"
 
       - name: Unit tests
         run: python -m unittest discover -s tests -v
@@ -78,37 +106,65 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # The immutable version tag is always pushed. The moving aliases are
+      # computed, never hardcoded: a prerelease takes :beta and must not touch
+      # :latest, and a stable takes :latest plus :beta when it is newer than
+      # whatever :beta already holds.
+      - name: Resolve the image tags this release publishes
+        id: tags
+        run: |
+          {
+            echo 'list<<EOF'
+            echo "${{ env.IMAGE }}:${{ github.ref_name }}"
+            if [ "${{ needs.classify.outputs.prerelease }}" = "true" ]; then
+              echo "${{ env.IMAGE }}:beta"
+            else
+              echo "${{ env.IMAGE }}:latest"
+              if [ "${{ needs.classify.outputs.advance_beta }}" = "true" ]; then
+                echo "${{ env.IMAGE }}:beta"
+              fi
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ steps.tags.outputs.list }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.classify.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   github-release:
-    needs: build-push
+    needs: [classify, build-push]
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the GitHub Release
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Whole-heading match. The awk prefix regex this replaced matched
+      # `## v1.3.14b1` for version 1.3.14, so a stable release could ship its
+      # own beta's notes and look entirely normal doing it.
       - name: Extract this version's CHANGELOG section
         run: |
-          ver="${GITHUB_REF_NAME#v}"
-          awk -v ver="$ver" '
-            $0 ~ ("^## v" ver "([^0-9.]|$)") { grab=1; next }
-            grab && /^## v/ { exit }
-            grab { print }
-          ' CHANGELOG.md > RELEASE_NOTES.md
-          if [ ! -s RELEASE_NOTES.md ]; then
-            echo "Release ${GITHUB_REF_NAME}." > RELEASE_NOTES.md
-          fi
+          python -m pip install "packaging>=23.2"
+          python - "${{ needs.classify.outputs.version }}" <<'PY' > RELEASE_NOTES.md
+          import sys
+          from composer.release_tag import changelog_section
+          notes = changelog_section(sys.argv[1])
+          if not notes:
+              sys.exit(f"CHANGELOG.md has no '## v{sys.argv[1]}' section.")
+          sys.stdout.write(notes + "\n")
+          PY
           echo "---- release notes ----"; cat RELEASE_NOTES.md
 
       - name: Create GitHub Release
@@ -116,3 +172,5 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
+          prerelease: ${{ needs.classify.outputs.prerelease }}
+          make_latest: ${{ needs.classify.outputs.make_latest }}

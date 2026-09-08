@@ -1,5 +1,5 @@
 #!/bin/bash
-# composer-wrapper: 2
+# composer-wrapper: 3
 set -euo pipefail
 
 # Closing the terminal must not abort a run in flight. The ignored disposition
@@ -8,7 +8,24 @@ set -euo pipefail
 trap '' HUP
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-composer_self_image="${COMPOSER_SELF_IMAGE:-debeski/composer:latest}"
+
+# The wrapper resolves its own image before any composer code can run, so the
+# channel has to be readable from here. `.composer-channel` holds one word,
+# written by `composer check --beta` / `--stable`.
+#
+# COMPOSER_SELF_IMAGE still wins. An operator who pinned an exact image asked
+# for that image; a channel is a default, and a default must never quietly
+# discard an explicit pin.
+composer_channel="stable"
+if [[ -r "${script_dir}/.composer-channel" ]]; then
+  read -r composer_channel < "${script_dir}/.composer-channel" || composer_channel="stable"
+  composer_channel="$(printf '%s' "${composer_channel}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+fi
+case "${composer_channel}" in
+  beta) composer_channel_image="debeski/composer:beta" ;;
+  *)    composer_channel_image="debeski/composer:latest" ;;
+esac
+composer_self_image="${COMPOSER_SELF_IMAGE:-${composer_channel_image}}"
 
 # Pull the deployer image before launching composer from that same image.
 if [[ $# -eq 2 && "${1:-}" == "self" && "${2:-}" == "update" ]]; then

@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlparse
 
+from . import dlux_channel
 from .version import read_composer_version
+from .versions import at_least, try_parse
 
 # Mirrored from dlux/updater/manifest.py — keep in step.
 PYPI_SIMPLE_URL = "https://pypi.org/simple/django-lux/"
@@ -38,11 +40,19 @@ MAX_INDEX_BYTES = 4 * 1024 * 1024
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MANIFEST_PATH = "dlux/release-manifest.json"
 SAFE_INLINE_EFFECTS = frozenset({"none", "state_only", "additive"})
-KNOWN_REQUIREMENT_KEYS = frozenset({"baked_image", "updater_schema", "services"})
+# Fails closed: a requirement this Composer cannot evaluate refuses the release
+# rather than ignoring the constraint. That is why every key DjangoLux may
+# publish has to be listed here — `migration_baseline` was added by DjangoLux
+# 1.8.14, and until it appeared here every Composer rejected that manifest
+# outright. `migration_baseline` is informational to Composer (DjangoLux uses it
+# to warn that an update spans migrations an intermediate release introduced);
+# recognising it is what makes the release installable at all.
+KNOWN_REQUIREMENT_KEYS = frozenset({
+    "baked_image", "updater_schema", "services", "migration_baseline",
+})
 
 _HREF_RE = re.compile(r'<a\s[^>]*href="([^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
 _WHEEL_RE = re.compile(r"^django_lux-([0-9][^-]*)-py3-none-any\.whl$", re.IGNORECASE)
-_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[.-]?(?:a|b|rc|post|dev)[0-9]+)?$")
 
 
 class ReleaseSourceError(RuntimeError):
@@ -104,7 +114,7 @@ def fetch_index(*, opener=urllib.request.urlopen) -> list:
         if not match:
             continue
         version = match.group(1)
-        if not _VERSION_RE.fullmatch(version):
+        if try_parse(version) is None:
             continue
         url, _, fragment = href.partition("#")
         digest = ""
@@ -121,24 +131,44 @@ def fetch_index(*, opener=urllib.request.urlopen) -> list:
     return candidates
 
 
-def select_candidate(candidates, target_version="") -> ReleaseCandidate:
-    """Pin to ``target_version`` when given, otherwise take the newest release."""
+def select_candidate(candidates, target_version="", *, channel=dlux_channel.STABLE) -> ReleaseCandidate:
+    """Pin to ``target_version`` when given, otherwise the newest eligible release.
+
+    ``channel`` decides only whether prereleases are eligible. On stable there is
+    deliberately no "fall back to a prerelease when no stable exists": a
+    deployment that never opted in must get "nothing available", not a beta.
+
+    An explicit ``target_version`` is honoured on either channel. That is not a
+    hole — pinning is how a rollback and a `--version` install work, both of
+    which are already deliberate operator acts naming an exact release.
+    """
     if not candidates:
         raise ReleaseSourceError("No DjangoLux release is available to install.")
     if target_version:
+        wanted = try_parse(target_version)
         for candidate in candidates:
             if candidate.version == target_version:
                 return candidate
+            parsed = try_parse(candidate.version)
+            if wanted is not None and parsed is not None and parsed == wanted:
+                return candidate
         raise ReleaseSourceError(f"DjangoLux {target_version} is not published.")
 
-    def sort_key(candidate):
-        parts = re.split(r"[._-]", candidate.version)
-        return tuple(int(p) if p.isdigit() else -1 for p in parts)
-
-    stable = [c for c in candidates if _VERSION_RE.fullmatch(c.version) and not re.search(
-        r"(a|b|rc|dev)[0-9]+$", c.version)]
-    pool = stable or list(candidates)
-    return sorted(pool, key=sort_key)[-1]
+    allow_prereleases = dlux_channel.prereleases_allowed(channel)
+    pool = []
+    for candidate in candidates:
+        parsed = try_parse(candidate.version)
+        if parsed is None or parsed.is_devrelease:
+            continue
+        if parsed.is_prerelease and not allow_prereleases:
+            continue
+        pool.append((parsed, candidate))
+    if not pool:
+        raise ReleaseSourceError(
+            "No DjangoLux release is available to install on the "
+            f"{dlux_channel.normalize_channel(channel)} channel."
+        )
+    return max(pool, key=lambda item: item[0])[1]
 
 
 def verify_attestation(candidate: ReleaseCandidate, *, runner=subprocess.run) -> None:
@@ -206,14 +236,13 @@ def read_wheel_manifest(wheel_path) -> dict:
 
 
 def _version_at_least(current, requirement) -> bool:
-    match = re.fullmatch(r">=\s*(\d+(?:\.\d+)*)", str(requirement or "").strip())
-    current_match = re.match(r"v?(\d+(?:\.\d+)*)", str(current or "").strip())
-    if not match or not current_match:
-        return False
-    required = tuple(int(part) for part in match.group(1).split("."))
-    installed = tuple(int(part) for part in current_match.group(1).split("."))
-    width = max(len(required), len(installed))
-    return installed + (0,) * (width - len(installed)) >= required + (0,) * (width - len(required))
+    """PEP 440 comparison against a ``">=X.Y.Z"`` floor.
+
+    The regex this replaced read the leading release segment, so a Composer
+    running ``1.3.14b1`` satisfied ``>=1.3.14`` — it would have installed a
+    DjangoLux release that needs a fix its own beta predates.
+    """
+    return at_least(current, requirement)
 
 
 def normalize_manifest(manifest, expected_version) -> dict:
@@ -304,8 +333,8 @@ def assess(candidate: ReleaseCandidate, wheel_path) -> dict:
     return manifest
 
 
-def describe(target_version="", *, workdir=None, opener=urllib.request.urlopen,
-             runner=subprocess.run) -> dict:
+def describe(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
+             opener=urllib.request.urlopen, runner=subprocess.run) -> dict:
     """Resolve and inspect the newest (or pinned) release without installing it.
 
     Downloads and verifies the wheel — the manifest inside it is the only
@@ -313,7 +342,7 @@ def describe(target_version="", *, workdir=None, opener=urllib.request.urlopen,
     whether a release may be applied to the runtime volume. Nothing is unpacked
     and nothing is activated.
     """
-    candidate = select_candidate(fetch_index(opener=opener), target_version)
+    candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel)
     workdir = Path(workdir or tempfile.mkdtemp(prefix="composer-dlux-check-"))
     workdir.mkdir(parents=True, exist_ok=True)
     verify_attestation(candidate, runner=runner)
@@ -324,6 +353,8 @@ def describe(target_version="", *, workdir=None, opener=urllib.request.urlopen,
         "version": candidate.version,
         "filename": candidate.filename,
         "sha256": candidate.sha256,
+        "channel": dlux_channel.normalize_channel(channel),
+        "prerelease": bool(try_parse(candidate.version) and try_parse(candidate.version).is_prerelease),
         "inline_safe": inline_safe,
         "reason": "" if inline_safe else (
             f"DjangoLux {candidate.version} requires a project image rebuild."
@@ -352,14 +383,14 @@ def unpack(wheel_path, destination) -> Path:
     return destination
 
 
-def obtain(target_version="", *, workdir=None, opener=urllib.request.urlopen,
-           runner=subprocess.run) -> tuple:
+def obtain(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
+           opener=urllib.request.urlopen, runner=subprocess.run) -> tuple:
     """Resolve, verify and unpack a release. Returns ``(candidate, unpacked_dir)``.
 
     Order matters: attestation and digest are checked before the archive is
     opened, and `inline_safe` before anything is unpacked into place.
     """
-    candidate = select_candidate(fetch_index(opener=opener), target_version)
+    candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel)
     workdir = Path(workdir or tempfile.mkdtemp(prefix="composer-dlux-"))
     workdir.mkdir(parents=True, exist_ok=True)
     verify_attestation(candidate, runner=runner)

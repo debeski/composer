@@ -30,7 +30,7 @@ def parse_args():
             "      -v/--volumes and -p/--purge are destructive and ask for\n"
             "      confirmation unless -y/--yes is given (alias: composer down).\n"
             "      Run 'composer stop --help' for details.\n"
-            "  check [--fix] [-y] [--deep] [--json] [-f FILE] [-d]\n"
+            "  check [--fix] [-y] [--deep] [--json] [--beta|--stable] [-f FILE] [-d]\n"
             "      Doctor: verify Docker, compose config, secrets, required env,\n"
             "      topology, and version drift; --fix applies safe migrations,\n"
             "      --deep relays the in-container checks. Run 'composer check --help'.\n"
@@ -56,7 +56,7 @@ def parse_args():
             "  executor run | executor enable\n"
             "      Run the privileged executor, or harden an agent stack into the\n"
             "      executor topology. Run 'composer executor --help'.\n"
-            "  dlux check | dlux update | dlux rollback\n"
+            "  dlux check | dlux update | dlux rollback | dlux channel\n"
             "      Check, apply, or roll back inline DjangoLux package releases.\n"
             "      Run 'composer dlux --help'."
         ),
@@ -286,6 +286,20 @@ def parse_check_args(argv):
         default="python manage.py dlux_doctor",
         metavar="CMD",
         help="In-container doctor command (default: 'python manage.py dlux_doctor')",
+    )
+    channel = parser.add_mutually_exclusive_group()
+    channel.add_argument(
+        "--beta",
+        action="store_true",
+        help=(
+            "Switch this project to the beta Composer channel: the wrapper and "
+            "the resident agent/executor pair move to debeski/composer:beta"
+        ),
+    )
+    channel.add_argument(
+        "--stable",
+        action="store_true",
+        help="Return this project to the stable Composer channel (debeski/composer:latest)",
     )
     parser.add_argument("--json", action="store_true", help="Emit results as JSON")
     return parser.parse_args(argv)

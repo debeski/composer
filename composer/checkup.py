@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import wrappers
@@ -474,7 +475,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                         WARN,
                         f"wrapper:{name}",
                         f"{name} predates wrapper versioning and differs from version {baked}.",
-                        fix="Run 'composer check --fix'; the current file is archived under .xpose/ first.",
+                        fix="Run 'composer check --fix'; the current file is archived under .xclude/ first.",
                     )
                 )
             elif status == wrappers.STALE:
@@ -495,7 +496,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                         "what that version shipped — it has local edits.",
                         fix=(
                             "Diff it against /app/wrappers/ inside the composer image. "
-                            "'composer check --fix' replaces it, archiving your copy under .xpose/."
+                            "'composer check --fix' replaces it, archiving your copy under .xclude/."
                         ),
                     )
                 )
@@ -524,10 +525,106 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             fix="Ensure the service is running and provides the deep-check command (override with --deep-command).",
         )
 
+    def _requested_channel(self, args) -> str:
+        if getattr(args, "beta", False):
+            return "beta"
+        if getattr(args, "stable", False):
+            return "stable"
+        return ""
+
+    def _check_composer_channel(self) -> Dict[str, Any]:
+        """Does the wrapper's channel agree with what the stack actually runs?
+
+        These are two different files, changed by two different operations, and
+        an operator debugging a Composer beta needs to know when only one of them
+        moved — a deployer on :beta talking to an agent on :latest is a
+        configuration nobody chose and nothing else reports.
+        """
+        from . import channel_config
+        from .agent_installer import composer_images_in_block
+
+        state = channel_config.describe(".")
+        note = f"Composer channel: {state['channel']} ({state['image']})"
+        if state["pinned"]:
+            note += " — COMPOSER_SELF_IMAGE pin overrides the channel"
+        try:
+            declared = set(composer_images_in_block(self._compose_contents()))
+        except Exception:
+            declared = set()
+        if not declared:
+            return _result(OK, "composer-channel", note)
+        expected = state["channel_image"]
+        drifted = sorted(image for image in declared if image != expected)
+        if drifted:
+            return _result(
+                WARN,
+                "composer-channel",
+                f"{note}, but the resident pair runs {', '.join(drifted)}.",
+                fix=f"Run 'composer check --{state['channel']}' to move both together.",
+            )
+        return _result(OK, "composer-channel", f"{note}; resident pair agrees.")
+
+    def _compose_contents(self) -> str:
+        for candidate in (self.compose_file, "compose.yml", "docker-compose.yml"):
+            if not candidate:
+                continue
+            path = Path(candidate)
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+        return ""
+
+    def _switch_channel(self, args, channel: str) -> List[Dict[str, Any]]:
+        """Apply a requested channel change, or explain why it did not happen."""
+        from .agent_installer import AgentInstallError, switch_composer_channel
+        from .channel_config import image_for_channel
+
+        image = image_for_channel(channel)
+        try:
+            preview = switch_composer_channel(
+                ".", channel=channel, compose_file=args.file or "", apply=False,
+            )
+        except AgentInstallError as exc:
+            return [_result(FAIL, "composer-channel-switch", str(exc))]
+
+        if not confirm(
+            f"Switch this project to the {channel} Composer channel ({image})",
+            [
+                "The wrapper and the resident agent/executor pair both move.",
+                "Running containers are recreated on the new image.",
+            ],
+            assume_yes=args.yes,
+        ):
+            return [_result(WARN, "composer-channel-switch", "Channel switch declined.")]
+
+        try:
+            outcome = switch_composer_channel(
+                ".", channel=channel, compose_file=args.file or "", apply=True,
+            )
+        except AgentInstallError as exc:
+            return [_result(FAIL, "composer-channel-switch", str(exc))]
+
+        if not outcome.get("applied") and not outcome.get("channel_file"):
+            return [_result(
+                FAIL,
+                "composer-channel-switch",
+                f"The switch to {channel} did not complete; the project is unchanged.",
+            )]
+        detail = f"Composer channel set to {channel} ({image})."
+        if not preview.get("files"):
+            detail += " The resident pair already ran that image."
+        return [_result(OK, "composer-channel-switch", detail)]
+
     def run_checkup(self, args) -> int:
         self.compose_file = args.file
         self.dev_mode = args.dev
         self.resolve_active_compose_files()
+
+        # Before the diagnosis, so the checks below report the state the
+        # operator asked for rather than the one they are leaving.
+        switched: List[Dict[str, Any]] = []
+        requested = self._requested_channel(args)
+        if requested:
+            switched = self._switch_channel(args, requested)
 
         results: List[Dict[str, Any]] = []
         results.extend(self._check_docker())
@@ -535,6 +632,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         results.append(self._check_compose_parses())
         results.append(self._check_secrets())
         results.extend(self._check_wrappers())
+        results.append(self._check_composer_channel())
         if self.services:
             results.append(self._check_required_vars())
             results.append(self._check_topology())
@@ -545,7 +643,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
 
-        fixed = self._maybe_fix(args, results) if args.fix else []
+        fixed = switched + (self._maybe_fix(args, results) if args.fix else [])
 
         if args.json:
             import json
@@ -753,7 +851,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             if any(entry["status"] == wrappers.MODIFIED for entry in stale_wrappers):
                 consequences.append(
                     "One or more of those wrappers carries local edits; the current file is "
-                    "archived under .xpose/ before it is replaced."
+                    "archived under .xclude/ before it is replaced."
                 )
         if obsolete:
             consequences.append(
@@ -843,7 +941,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         consequences.extend(
             [
                 "Validate the candidate with docker compose config before replacement.",
-                "Preserve original deployment files under .xpose/.",
+                "Preserve original deployment files under .xclude/.",
             ]
         )
         if not confirm(

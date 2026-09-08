@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer v1.3.13 is tagged/published at b5af7df (2026-09-07); Release run 34129265711 passed build-push and github-release. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
+- Composer v1.3.13 is tagged/published at b5af7df (2026-09-07). The tree is **v1.3.14b1 (UNTAGGED)** — the beta-channel rehearsal, paired with Dlux 1.8.14b1. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
 - Nested agent/DLUX CLI is canonical: `agent ...`, `dlux ...`, `self update`, `executor ...`.
@@ -13,14 +13,14 @@
 - Route Compose operations through the shared command helpers.
 - Keep runtime metadata/environment in generated overrides.
 - Agent control traffic is outbound HTTPS; localhost HTTP is development-only.
-- Preserve deployment originals under `.xpose/` before guarded rewrites.
+- Preserve deployment originals under `.xclude/` before guarded rewrites.
 
 ### Adopted Standards' rules and policies:
 - Secrets are plaintext-only: `.env` -> `secrets/.env` -> `.secrets/.env`.
 - Destructive flags require typed confirmation unless `-y` or `COMPOSER_ASSUME_YES=1`; non-TTY fails closed.
 - `update` deploys, `pull` only downloads, `self update` updates Composer, and `-u` is the sole compact update argument.
 - Never modify a tagged changelog entry; append changes to the next unreleased version.
-- Preserve user changes and move generated caches under `.xpose/`.
+- Preserve user changes and move generated caches under `.xclude/`.
 
 ### Cross-Cutting Audits if any:
 - 2026-07-24 security audit covered protocol, bridge, Docker boundary, registry, subprocess, supply chain, and releases.
@@ -33,10 +33,11 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Beta workflow (2026-09-06, design discussion): user wants tag-derived beta/latest publication and check --beta channel switching for wrapper/agent/executor; include explicit stable return and preserve channel through check --fix. Audit version ordering; add automated shared Dlux/Composer stack acceptance.
-  - [ ] Implement `../pkg-django-lux/release_channels_plan.md` from clean Dlux 1.8.13 / Composer 1.3.13 baselines; first betas must be Dlux 1.9.0b1 and Composer 1.4.0b1. VPS rollout remains separate.
+  - [ ] TAG THE REHEARSAL: `v1.3.14b1` must be published BEFORE Dlux `v1.8.14b1` — that manifest requires `>=1.3.14b1`. Nothing pushed yet. Then verify `:beta` and `:v1.3.14b1` both appear and `:latest` did NOT move.
+  - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
+  - [ ] Untested in a real registry: the `:beta` alias read (`docker buildx imagetools inspect`) that decides whether a stable release may advance `:beta`. Absent/unreadable falls back to "advance", which is right for a first publish; confirm on the first stable after a beta.
   - [ ] Live verify the hardened inline update on a real stack: panel-triggered apply, agent stages, executor swaps, and DjangoLux reports the new version.
-  - [ ] After publishing v1.3.6, run `./start.sh check --fix -y` on project-archive and confirm the missing label is installed with a `.xpose/` backup.
+  - [ ] After publishing v1.3.6, run `./start.sh check --fix -y` on project-archive and confirm the missing label is installed with a `.xclude/` backup.
   - [ ] Live verify full startup via the published wrapper/image: `-d`, `-d -mm`, and `-d -nm`; each must run one migrator and return its failure status.
   - [ ] Run `./start.sh self update` from each deployment root once v1.3.12 is tagged.
   - [ ] Live verify on a real deployment: after `./start.sh update`, DLUX's image-update indicator clears within ~30s (agent must see the new local digest through the read-only proxy).
@@ -47,6 +48,8 @@
   - [ ] Drop pip/setuptools from the image AFTER the `pypi-attestations` install layer (it is now the only pip dependency; +95MB, 347->442MB) - clears 3 fixable HIGH from pip's vendor tree.
   - [ ] Add `provenance: mode=max` + `sbom: true` to the release build-push step (Scout attestation policy).
 - **Completed Recently:**
+  - [x] BLOCKER: `KNOWN_REQUIREMENT_KEYS` lacked `migration_baseline`, and that allow-list fails closed — **every published Composer would have refused the Dlux 1.8.14 manifest outright**, so the release was uninstallable as written. Proven by a test run against the pre-fix module (2026-09-08).
+  - [x] v1.3.14b1 channels: `versions.py` (real PEP 440 via `packaging`, now a declared image dep) replaces three hand-rolled regexes that each broke on prereleases — the candidate sort tied `b2`/`b10`, `version_sort_key` tied a beta with its own final (breaking rollback and prune), and `_version_at_least` let `1.3.14b1` satisfy `>=1.3.14`. Plus `dlux_channel.py` (read-only policy + request), `channel_config.py` + wrappers at marker 3, `dlux channel`, `check --beta|--stable` as one operation over wrapper *and* resident pair, and `release_tag.py` tag classification with the `:beta`-never-moves-backwards rule (2026-09-08).
   - [x] Released v1.3.13: 556 tests (6 skips), local arm64 runtime smoke, GitHub amd64 smoke and multi-architecture publication passed; no channel code included.
   - [x] v1.3.12: flat agent/DLUX/self routes removed in favor of `agent check/update/restart/off/watch/run/enable`, `dlux check/update/rollback`, `self update`, and `executor run/enable`; leading `-f`/`-d`, generated role commands and wrapper v2 history updated.
   - [x] v1.3.11: staged releases order numerically (`1.8.10` sorted below `1.8.9` as a string), and a rollback target must be strictly below the active release — it could roll forward onto the release just left.
@@ -57,6 +60,7 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (`agent update`). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
+- 2026-09-08: channels — 599 tests OK (43 new in `tests/test_channels.py`), 4 skips. Key tests confirmed failing against the pre-change modules: the `migration_baseline` refusal, `select_candidate(channel=…)`, and `1.3.14b1` satisfying `>=1.3.14`. No image build or smoke test run yet for 1.3.14b1.
 - Verified 2026-09-07: full unittest discovery ran 556 tests, OK (6 standalone Dlux interop skips); local arm64 `composer:release-1.3.13` build and `scripts/smoke-test.sh` passed, including real agent lifecycle. Logs under `.xpose/release-v1.3.13-*.log`.
 - Verified 2026-09-05: 185 targeted CLI/wrapper/DLUX/agent/checkup tests pass; rebuilt `composer:ci-test` and `./scripts/smoke-test.sh composer:ci-test` passes; full discovery blocked by missing PyYAML.
 - Verified 2026-09-05: 544 tests pass (4 new on release ordering); rollback target and prune verified against a staged 1.8.9/1.8.10 pair.
@@ -81,7 +85,7 @@
 
 ### Agent Handoff Rules:
 - `start.py` is intentionally absent; do not restore it.
-- Re-run syntax/tests after edits; latest generated caches moved to `.xpose/test-cache-20260905-nested-commands/`.
+- Re-run syntax/tests after edits; latest generated caches moved to `.xclude/test-cache-20260905-nested-commands/`.
 
 ### References and Links:
 - Docker Compose CLI reference: https://docs.docker.com/engine/reference/commandline/

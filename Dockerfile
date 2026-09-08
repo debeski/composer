@@ -22,11 +22,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# The one dependency composer does not reimplement. `dlux-update` mirrors
-# django-lux[updater]'s trust decisions, including its refusal to install a
-# wheel it cannot verify — without this the whole inline update path fails
-# closed, on every release, in every deployment. Same floor as the extra.
-RUN pip install --no-cache-dir "pypi-attestations>=0.0.29"
+# The two dependencies composer does not reimplement.
+#
+# `pypi-attestations` mirrors django-lux[updater]'s trust decisions, including
+# its refusal to install a wheel it cannot verify — without this the whole
+# inline update path fails closed, on every release, in every deployment. Same
+# floor as the extra.
+#
+# `packaging` is the reference PEP 440 implementation. Composer must order
+# `1.9.0b2 < 1.9.0b10 < 1.9.0rc1 < 1.9.0` and must not let `1.4.0b1` satisfy
+# `>=1.4.0`; the regexes that preceded it got both wrong. See composer/versions.py.
+RUN pip install --no-cache-dir "pypi-attestations>=0.0.29" "packaging>=23.2"
 
 COPY composer /app/composer
 COPY VERSION /app/VERSION

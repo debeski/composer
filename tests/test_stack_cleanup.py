@@ -194,7 +194,7 @@ class StackCleanupApplyTests(unittest.TestCase):
                 )
 
             self.assertEqual(compose.read_text(encoding="utf-8"), COMPOSE)
-            rejected = list((root / ".xpose" / "composer-check").glob("*/rejected/compose.yml"))
+            rejected = list((root / ".xclude" / "composer-check").glob("*/rejected/compose.yml"))
             self.assertEqual(len(rejected), 1)
             self.assertNotIn("  pgadmin:", rejected[0].read_text(encoding="utf-8"))
 
@@ -249,7 +249,7 @@ class StackCleanupApplyTests(unittest.TestCase):
 
             self.assertEqual(compose.read_text(encoding="utf-8"), COMPOSE)
             originals = list(
-                (root / ".xpose" / "composer-check").glob("*/original/compose.yml")
+                (root / ".xclude" / "composer-check").glob("*/original/compose.yml")
             )
             self.assertEqual(len(originals), 1)
 
@@ -274,7 +274,7 @@ class StackCleanupApplyTests(unittest.TestCase):
 
             self.assertNotIn("  pgadmin:", compose.read_text(encoding="utf-8"))
             originals = list(
-                (root / ".xpose" / "composer-check").glob("*/original/compose.yml")
+                (root / ".xclude" / "composer-check").glob("*/original/compose.yml")
             )
             self.assertEqual(len(originals), 1)
 

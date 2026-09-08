@@ -140,7 +140,7 @@ def _top_level_mapping_keys(contents: str, section_name: str) -> set[str]:
 
 
 def _archive_root(project_root: Path) -> Path:
-    base = project_root / ".xpose" / "composer-check"
+    base = project_root / ".xclude" / "composer-check"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     destination = base / stamp
     suffix = 1
