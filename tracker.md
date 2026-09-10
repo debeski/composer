@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Composer **v1.3.14b1 is tagged and published** (2026-09-08): `:v1.3.14b1` + `:beta` on Docker Hub (amd64+arm64), `:latest` verified unmoved at 1.3.13. Tree is v1.3.14b2 (UNTAGGED) carrying the `:beta` alias-read fix. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
+- Composer **v1.3.14b2 is tagged and published** (2026-09-10): `:v1.3.14b2` + `:beta` (amd64+arm64), `:latest` still 1.3.13, `v1.3.14b1` untouched, GitHub release prerelease with `latest` still v1.3.13. Carries the `:beta` alias-read fix and the beta-first gate. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
 - Nested agent/DLUX CLI is canonical: `agent ...`, `dlux ...`, `self update`, `executor ...`.
@@ -35,7 +35,6 @@
 - **Priority 1:**
   - [ ] TAG THE REHEARSAL: `v1.3.14b1` must be published BEFORE Dlux `v1.8.14b1` — that manifest requires `>=1.3.14b1`. Nothing pushed yet. Then verify `:beta` and `:v1.3.14b1` both appear and `:latest` did NOT move.
   - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
-  - [ ] Untested in a real registry: the `:beta` alias read (`docker buildx imagetools inspect`) that decides whether a stable release may advance `:beta`. Absent/unreadable falls back to "advance", which is right for a first publish; confirm on the first stable after a beta.
   - [ ] Live verify the hardened inline update on a real stack: panel-triggered apply, agent stages, executor swaps, and DjangoLux reports the new version.
   - [ ] After publishing v1.3.6, run `./start.sh check --fix -y` on project-archive and confirm the missing label is installed with a `.xclude/` backup.
   - [ ] Live verify full startup via the published wrapper/image: `-d`, `-d -mm`, and `-d -nm`; each must run one migrator and return its failure status.
@@ -61,6 +60,7 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (`agent update`). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
+- 2026-09-10: v1.3.14b2 published — the FIXED `:beta` read returns `1.3.14b2` from the live multi-arch manifest, `:beta` advanced, `:latest` unmoved.
 - 2026-09-10: beta-first gate — 8 new tests; live against real git + Docker Hub: `v1.3.14b1` served, a nonexistent `v1.3.14b9` rejected; `release_tag v1.3.14b2` classifies.
 - 2026-09-08: 1.3.14b1 — local arm64 `composer:release-1.3.14b1` build and `scripts/smoke-test.sh` passed (exit 0), including the real agent lifecycle and the new `dlux channel` help sweep; `packaging` 26.3 confirmed present in the image and `1.3.14b1 >= 1.3.14` correctly False inside it. GitHub amd64 smoke still runs on tag.
 - 2026-09-08: channels — 599 tests OK (43 new in `tests/test_channels.py`), 4 skips. Key tests confirmed failing against the pre-change modules: the `migration_baseline` refusal, `select_candidate(channel=…)`, and `1.3.14b1` satisfying `>=1.3.14`. No image build or smoke test run yet for 1.3.14b1.
