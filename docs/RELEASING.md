@@ -73,6 +73,16 @@ Check a tag before pushing it:
 python -m composer.release_tag v1.4.0b1
 ```
 
+### A new minor or major must be a beta first
+
+The classifier refuses a stable `vX.Y.0` tag unless a beta or release candidate
+of that exact version is in the tagged commit's history **and** Docker Hub
+serves its image. `v1.4.0` cannot publish until `v1.4.0b1` (or `rc1`) has, and
+a beta tag whose build never pushed does not count. Patch releases (`v1.4.1`)
+are not gated. A registry that cannot be reached refuses the tag.
+
+This proves a beta was *published*, not that it passed acceptance.
+
 ### Declare the tested minimum, not the release it precedes
 
 `1.4.0b1` is *not* `1.4.0`: by PEP 440, `>=1.4.0` is false for `1.4.0b1`, and

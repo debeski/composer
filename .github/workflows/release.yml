@@ -39,7 +39,11 @@ jobs:
       make_latest: ${{ steps.tag.outputs.make_latest }}
       advance_beta: ${{ steps.tag.outputs.advance_beta }}
     steps:
+      # Full history with tags: the beta-first gate asks which prerelease tags
+      # of this version are reachable from the commit being released.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

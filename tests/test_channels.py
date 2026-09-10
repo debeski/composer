@@ -6,6 +6,7 @@ test states the rule it is defending rather than just exercising the function.
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,7 +26,14 @@ from composer.dlux_release_source import (
     select_candidate,
 )
 from composer.dlux_runtime import version_sort_key
-from composer.release_tag import ReleaseTagError, classify_tag, changelog_section, should_advance_beta
+from composer.release_tag import (
+    ReleaseTagError,
+    changelog_section,
+    classify_tag,
+    published_image_tags,
+    should_advance_beta,
+    validate_beta_first,
+)
 from composer.versions import at_least, try_parse
 
 
@@ -387,6 +395,65 @@ class ChangelogSectionTests(unittest.TestCase):
 
     def test_a_missing_section_is_empty_rather_than_the_next_one(self):
         self.assertEqual(changelog_section("9.9.9", self.path), "")
+
+
+
+class BetaFirstGateTests(unittest.TestCase):
+    """A new minor or major must never first appear as stable (plan §1)."""
+
+    @staticmethod
+    def _published(*tags):
+        return lambda betas: [tag for tag in betas if tag in tags]
+
+    def test_a_new_minor_with_no_beta_tag_is_refused(self):
+        errors = validate_beta_first("1.4.0", tags=["v1.3.14", "v1.3.14b2"], fetch_published=self._published())
+        self.assertIn("must be published as a beta first", errors[0])
+
+    def test_a_published_beta_admits_the_stable_release(self):
+        self.assertEqual(validate_beta_first(
+            "1.4.0", tags=["v1.3.14", "v1.4.0b1"], fetch_published=self._published("v1.4.0b1"),
+        ), [])
+
+    def test_a_release_candidate_counts_as_the_beta(self):
+        self.assertEqual(validate_beta_first(
+            "1.4.0", tags=["v1.4.0rc1"], fetch_published=self._published("v1.4.0rc1"),
+        ), [])
+
+    def test_a_beta_that_was_never_pushed_does_not_count(self):
+        errors = validate_beta_first("1.4.0", tags=["v1.4.0b1"], fetch_published=self._published())
+        self.assertIn("Docker Hub serves none of them", errors[0])
+
+    def test_a_beta_of_another_release_does_not_count(self):
+        errors = validate_beta_first(
+            "1.4.0", tags=["v1.3.14b1", "v1.5.0b1"],
+            fetch_published=self._published("v1.3.14b1", "v1.5.0b1"),
+        )
+        self.assertIn("must be published as a beta first", errors[0])
+
+    def test_a_registry_error_refuses(self):
+        def broken(_betas):
+            raise OSError("docker not found")
+
+        self.assertIn("Could not confirm", validate_beta_first("1.4.0", tags=["v1.4.0b1"], fetch_published=broken)[0])
+
+    def test_patches_and_prereleases_consult_nothing(self):
+        def must_not_be_called(_betas):
+            raise AssertionError("the gate consulted the registry for a release it does not cover")
+
+        for version in ("1.3.15", "1.4.1", "1.4.0b1", "1.4.0rc2"):
+            with self.subTest(version=version):
+                self.assertEqual(validate_beta_first(version, tags=None, fetch_published=must_not_be_called), [])
+
+    def test_the_registry_is_asked_about_each_beta_tag(self):
+        asked = []
+
+        def runner(command, **_kwargs):
+            asked.append(command[-1])
+            code = 0 if command[-1].endswith(":v1.4.0b2") else 1
+            return subprocess.CompletedProcess(command, code, "", "")
+
+        self.assertEqual(published_image_tags(["v1.4.0b1", "v1.4.0b2"], runner=runner), ["v1.4.0b2"])
+        self.assertEqual(asked, ["debeski/composer:v1.4.0b1", "debeski/composer:v1.4.0b2"])
 
 
 if __name__ == "__main__":

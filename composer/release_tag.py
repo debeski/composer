@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -101,6 +102,98 @@ def should_advance_beta(new_version, current_beta_version, *, beta_exists=True) 
     return new > current
 
 
+IMAGE_REPOSITORY = "debeski/composer"
+
+
+def requires_beta_first(version) -> bool:
+    """True for a stable release that opens a new line: X.Y.0.
+
+    A patch may still ship stable directly — a hotfix held back for a beta cycle
+    is usually worse than the risk it avoids. What must never happen is a new
+    minor or major reaching :latest before anyone ran it as a beta.
+    """
+    parsed = Version(str(version))
+    if parsed.is_prerelease:
+        return False
+    return (tuple(parsed.release) + (0, 0, 0))[2] == 0
+
+
+def prerelease_tags_for(version, tags) -> list:
+    """The ``vX.Y.ZbN``/``rcN`` tags that are prereleases of exactly ``version``."""
+    base = Version(Version(str(version)).base_version)
+    found = []
+    for tag in tags:
+        tag = str(tag).strip()
+        if not tag.startswith("v"):
+            continue
+        parsed = try_parse(tag[1:])
+        if parsed is None or not parsed.is_prerelease or parsed.is_devrelease:
+            continue
+        if Version(parsed.base_version) == base:
+            found.append(tag)
+    return found
+
+
+def merged_release_tags(*, runner=subprocess.run) -> list:
+    """``v*`` tags reachable from HEAD. Needs a checkout with tags fetched."""
+    completed = runner(
+        ["git", "tag", "--merged", "HEAD"], capture_output=True, text=True, check=True,
+    )
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip().startswith("v")]
+
+
+def published_image_tags(tags, *, runner=subprocess.run) -> list:
+    """The subset of ``tags`` that Docker Hub actually serves as images."""
+    published = []
+    for tag in tags:
+        completed = runner(
+            ["docker", "buildx", "imagetools", "inspect", f"{IMAGE_REPOSITORY}:{tag}"],
+            capture_output=True, text=True, check=False,
+        )
+        if completed.returncode == 0:
+            published.append(tag)
+    return published
+
+
+def validate_beta_first(version, *, tags=None, fetch_published=published_image_tags) -> list:
+    """Refuse a new minor or major stable release that no published beta preceded.
+
+    Enforces release_channels_plan.md §1 — 1.4.0 must not first appear as stable
+    — in CI rather than in someone's memory. Two conditions, both required: a
+    prerelease tag of this exact version is in the tagged commit's history, and
+    Docker Hub serves that image. A tag whose build died before the push was never
+    pullable, so it was never tested either.
+
+    Deliberately narrower than the plan's final gate: it proves a beta was
+    published, not that it passed acceptance (plan §3.5/§3.8, still ahead). A
+    registry that cannot be reached reads as "not published", which refuses.
+    """
+    if not requires_beta_first(version):
+        return []
+    tags = merged_release_tags() if tags is None else list(tags)
+    betas = prerelease_tags_for(version, tags)
+    if not betas:
+        return [
+            f"v{version} opens a new release line and must be published as a beta first: "
+            f"no v{version}bN or v{version}rcN tag is in this commit's history."
+        ]
+    try:
+        live = list(fetch_published(betas))
+    except Exception as exc:
+        return [
+            f"Could not confirm on Docker Hub that a beta of v{version} was published ({exc}). "
+            "Refusing to publish stable without that evidence."
+        ]
+    if not live:
+        names = ", ".join(sorted(betas, key=lambda tag: Version(tag[1:])))
+        return [
+            f"v{version} has beta tags ({names}) but Docker Hub serves none of them "
+            "(never pushed, or the registry was unreachable). A beta nobody could pull "
+            "was never tested."
+        ]
+    return []
+
+
 def changelog_section(version, path="CHANGELOG.md") -> str:
     """The body of this exact version's ``## vX.Y.Z`` section.
 
@@ -157,6 +250,11 @@ def main(argv=None) -> int:
             f"::error::CHANGELOG.md has no '## v{decision['version']}' section.",
             file=sys.stderr,
         )
+        return 1
+    errors = validate_beta_first(decision["version"])
+    if errors:
+        for error in errors:
+            print(f"::error::{error}", file=sys.stderr)
         return 1
     # Default when the caller says nothing: assume the alias exists, which is
     # the cautious reading — an unreadable alias is then not overwritten.
