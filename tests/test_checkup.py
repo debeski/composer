@@ -439,6 +439,52 @@ class DluxRuntimeMountTests(unittest.TestCase):
             self.assertIsNone(self.launcher._mounts_dlux_runtime("composer-executor"))
 
 
+class ResidentCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.launcher = DockerComposeLauncher()
+
+    def _check(self, agent=None, executor=None, compose_ok=True):
+        services = {}
+        if agent is not None:
+            services["composer-agent"] = {"command": agent}
+        if executor is not None:
+            services["composer-executor"] = {"command": executor}
+        model = json.dumps({"services": services})
+        with patch.object(self.launcher, "run_docker_compose", return_value=(compose_ok, model, "")):
+            return self.launcher._check_resident_commands()
+
+    def test_the_flat_form_found_on_a_live_decrees_stack_fails(self):
+        result = self._check(
+            agent=["agent", "--trigger-file", "/opt/dlux-runtime/state/image-update-request.json"],
+            executor=["executor", "--socket", "/run/composer-exec/composer-exec.sock"],
+        )
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("composer-agent", result["message"])
+        self.assertIn("composer-executor", result["message"])
+        self.assertIn("--fix", result["fix"])
+
+    def test_the_nested_form_is_ok(self):
+        result = self._check(
+            agent=["agent", "run", "--interval", "2"],
+            executor=["executor", "run", "--socket", "/run/x.sock"],
+        )
+        self.assertEqual(result["level"], OK)
+
+    def test_a_bare_role_with_no_subcommand_fails(self):
+        self.assertEqual(self._check(executor=["executor"])["level"], FAIL)
+
+    def test_a_string_command_is_read_too(self):
+        self.assertEqual(self._check(agent="agent --interval 2")["level"], FAIL)
+
+    def test_a_custom_command_is_not_second_guessed(self):
+        self.assertEqual(self._check(agent=["python", "-m", "composer", "agent"])["level"], OK)
+
+    def test_an_unreadable_model_reports_nothing(self):
+        self.assertIsNone(self._check(compose_ok=False))
+        with patch.object(self.launcher, "run_docker_compose", return_value=(True, "1.2.6\n", "")):
+            self.assertIsNone(self.launcher._check_resident_commands())
+
+
 class CheckupRunTests(unittest.TestCase):
     def test_failing_docker_yields_nonzero_exit(self):
         launcher = DockerComposeLauncher()

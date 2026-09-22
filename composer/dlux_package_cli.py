@@ -141,6 +141,28 @@ def build_availability_payload(target_version="", *, channel=None, runtime=None)
     }
 
 
+def availability_summary(payload: dict, installed: str = "") -> str:
+    """One line for a successful check, relative to what is installed.
+
+    The payload names the newest release on the channel, which is not an update
+    when the deployment already runs it or something newer (a beta, after an
+    opt-out). DjangoLux makes the same comparison before offering anything.
+    """
+    from . import versions
+
+    latest = str(payload.get("version") or "")
+    channel = payload.get("channel") or ""
+    current, candidate = versions.try_parse(installed), versions.try_parse(latest)
+    if current is not None and candidate is not None and candidate <= current:
+        where = f" on the {channel} channel" if channel else ""
+        if candidate == current:
+            return f"Up to date: DjangoLux {installed} is the newest release{where}"
+        return f"Up to date: DjangoLux {installed} is newer than {latest}, the newest release{where}"
+    state = "inline-safe" if payload.get("inline_safe") else "requires an image rebuild"
+    channel_note = f", {channel} channel" if channel else ""
+    return f"DjangoLux {latest} available ({state}{channel_note})"
+
+
 def run_availability_check(args, runtime) -> int:
     """`composer dlux check`: resolve, verify and publish. Never activates anything."""
     payload = build_availability_payload(args.version, runtime=runtime)
@@ -149,9 +171,9 @@ def run_availability_check(args, runtime) -> int:
         print(f"✖ {payload['error']}", file=sys.stderr)
         print(f"  published to {path}", file=sys.stderr)
         return 1
-    state = "inline-safe" if payload["inline_safe"] else "requires an image rebuild"
-    channel_note = f", {payload['channel']} channel" if payload.get("channel") else ""
-    print(f"✔ DjangoLux {payload['version']} available ({state}{channel_note}) — published to {path}")
+    active = runtime.read_active() if runtime.exists() else {}
+    installed = str(active.get("version") or "") if isinstance(active, dict) else ""
+    print(f"✔ {availability_summary(payload, installed)} — published to {path}")
     if payload.get("error"):
         print(f"  note: {payload['error']}", file=sys.stderr)
     return 0

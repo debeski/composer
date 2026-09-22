@@ -266,6 +266,42 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             ),
         )
 
+    # Resident roles and the subcommand each must name. Composer 1.3.13+ exits on
+    # the flat `agent --flag ...` form, so the service restart-loops.
+    RESIDENT_ROLE_COMMANDS = (("composer-agent", "agent"), ("composer-executor", "executor"))
+
+    def _check_resident_commands(self) -> Optional[Dict[str, Any]]:
+        """Flag resident services still started with the pre-nested flat command.
+
+        None when the resolved model cannot be read; `compose-config` already
+        reports that, and an unknown is not a finding.
+        """
+        ok, out, _err = self.run_docker_compose(["config", "--format", "json"], timeout=20)
+        if not ok:
+            return None
+        try:
+            services = json.loads(out).get("services") or {}
+        except (ValueError, AttributeError):
+            return None
+        stale = []
+        for service, role in self.RESIDENT_ROLE_COMMANDS:
+            command = (services.get(service) or {}).get("command")
+            if isinstance(command, str):
+                command = command.split()
+            if not isinstance(command, list) or not command or command[0] != role:
+                continue
+            if len(command) == 1 or str(command[1]).startswith("-"):
+                stale.append(service)
+        if not stale:
+            return _result(OK, "resident-commands", "Resident Composer services use the nested '<role> run' command.")
+        return _result(
+            FAIL,
+            "resident-commands",
+            ", ".join(stale) + " still use the flat '<role> --flag' command, which this Composer "
+            "rejects, so the service restart-loops and the stack has no update path.",
+            fix="Run 'composer check --fix' to insert the 'run' subcommand.",
+        )
+
     def _check_removed_services(self) -> Dict[str, Any]:
         present = sorted(OBSOLETE_SERVICES.intersection(self.services))
         if not present:
@@ -636,6 +672,9 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if self.services:
             results.append(self._check_required_vars())
             results.append(self._check_topology())
+            resident = self._check_resident_commands()
+            if resident is not None:
+                results.append(resident)
             results.append(self._check_removed_services())
             results.append(self._check_dlux_updater_executor())
             results.append(self._check_proxy_routes())
