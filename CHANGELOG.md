@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.4.0
+
+The stable release of the 1.4.0 line. Identical in scope to `1.4.0b4`, whose
+four betas are listed below: release channels and the DjangoLux channel policy,
+PEP 440 version handling, the `resident-commands` check, the check interval and
+check-now contract, and the two fixes that let a DjangoLux release carrying
+migrations install at all. Verified end to end on a reference deployment against
+DjangoLux 1.9.0b2 before this tag: install, rollback, re-install, channel
+opt-in/out, interval change and check-now.
+
+`:latest` moves to this release. No commands, flags or compatibility paths are
+removed in 1.4.0 (`release_channels_plan.md` §9 inventory is postponed to 1.5.0).
+
 ## v1.4.0b4
 - **The Recreated Service Gets The Deployment's Secrets**: b3 recreates the migration applier, and a recreated container is built from the *interpolated* compose config — but `dlux update` never resolved the project's secrets, so the new container came up on compose defaults with a placeholder `SECRET_KEY` and its `pre_start` migrate step died with `ImproperlyConfigured`. Compose then left the service `Created`, the health gate failed, and the rollback recreated it the same way: exit 3, "needs a human", on a stack that was fine. `_build_operations()` now calls `resolve_secrets()` (the executor mounts the project read-only and holds `DAC_READ_SEARCH` for exactly this), and refuses to recreate at all when they cannot be read — saying so, and leaving the release unactivated — rather than starting a service on defaults. A restart-only update is unaffected, because it reuses the existing container. Found on the decrees acceptance stack installing DjangoLux 1.9.0b2, which then installed in 35 s with migration `0022` applied. +1 test.
 

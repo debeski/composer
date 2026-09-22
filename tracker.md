@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- **v1.4.0b4** (2026-09-22): b4 completes the migration fix — recreating the applier also needs `resolve_secrets()`, or the new container starts on compose defaults with a placeholder SECRET_KEY and its pre_start dies; it now refuses rather than recreate blind. VERIFIED live: DjangoLux 1.9.0b2 installed in 35 s, migration 0022 applied, stack healthy. 1.4.0 also has: channel-aware resident checks, `check-policy.json` interval (900 s default), check-now, `check --fix` exit 0 + `fix:resident-block`, `resident-commands` check. No retirements (§9 postponed to 1.5.0).
+- **v1.4.0 (stable)** (2026-09-22): promoted from 1.4.0b4 after live pair acceptance with DjangoLux 1.9.0b2. Carries channels + channel-aware resident checks, `check-policy.json` interval (900 s default) and check-now, `resident-commands` check, `check --fix` exit 0 + `fix:resident-block`, and the migration-applier recreate (+ its secrets requirement). `:latest` moves to 1.4.0; no retirements (§9 postponed to 1.5.0).
 - Composer **v1.3.14b2 is tagged and published** (2026-09-10): `:v1.3.14b2` + `:beta` (amd64+arm64), `:latest` still 1.3.13, `v1.3.14b1` untouched, GitHub release prerelease with `latest` still v1.3.13. Carries the `:beta` alias-read fix and the beta-first gate. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
