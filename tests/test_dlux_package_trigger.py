@@ -217,6 +217,24 @@ class PackageAvailabilityPublicationTests(unittest.TestCase):
         self.assertEqual(published["version"], "1.9.0")
         self.assertTrue(published["available"])
 
+    def test_the_resident_check_resolves_the_deployment_channel(self):
+        # Seen live: every resident check resolved stable, so a deployment that
+        # opted in from Options was only offered a beta after a manual CLI check.
+        (self.state / "channel-policy.json").write_text(
+            json.dumps({"schema_version": 1, "channel": "beta"}), encoding="utf-8",
+        )
+        with self._describe(version="1.9.0b1") as describe:
+            self._runtime().maybe_check_package_availability()
+
+        self.assertEqual(describe.call_args.kwargs["channel"], "beta")
+        self.assertEqual(json.loads(self.report.read_text(encoding="utf-8"))["channel"], "beta")
+
+    def test_the_resident_check_stays_stable_without_a_policy(self):
+        with self._describe() as describe:
+            self._runtime().maybe_check_package_availability()
+
+        self.assertEqual(describe.call_args.kwargs["channel"], "stable")
+
     def test_a_failed_check_is_published_rather_than_swallowed(self):
         with patch("composer.dlux_release_source.describe", side_effect=RuntimeError("PyPI down")):
             self._runtime().maybe_check_package_availability()
@@ -240,6 +258,19 @@ class PackageAvailabilityPublicationTests(unittest.TestCase):
             runtime.maybe_check_package_availability(force=True)
 
         self.assertEqual(described.call_count, 2)
+
+    def test_a_channel_change_rechecks_without_waiting_for_the_interval(self):
+        runtime = self._runtime()
+        with self._describe() as described:
+            runtime.maybe_check_package_availability()
+            (self.state / "channel-policy.json").write_text(
+                json.dumps({"schema_version": 1, "channel": "beta"}), encoding="utf-8",
+            )
+            runtime.maybe_check_package_availability()
+            runtime.maybe_check_package_availability()
+
+        self.assertEqual(described.call_count, 2)
+        self.assertEqual(described.call_args.kwargs["channel"], "beta")
 
     def test_no_runtime_volume_means_no_publication(self):
         """A stack whose DjangoLux does not use the volume gets no stray file."""

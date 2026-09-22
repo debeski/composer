@@ -683,6 +683,13 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 results.append(self._run_deep(args.deep_service, args.deep_command))
 
         fixed = switched + (self._maybe_fix(args, results) if args.fix else [])
+        if args.fix:
+            # A repaired finding must not fail the run: report the file as it now stands.
+            for index, result in enumerate(results):
+                if result["name"] == "resident-commands" and result["level"] == FAIL:
+                    rechecked = self._check_resident_commands()
+                    if rechecked is not None:
+                        results[index] = rechecked
 
         if args.json:
             import json
@@ -1170,13 +1177,15 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 fixes.append(
                     _result(
                         OK,
-                        "fix:secrets-read-cap",
-                        "Added cap_add: DAC_READ_SEARCH to composer-executor. Recreate it to apply. Backup: "
+                        "fix:resident-block",
+                        "Normalized the Composer resident block: nested 'agent run'/'executor run' "
+                        "commands, and cap_add: DAC_READ_SEARCH on composer-executor where it was "
+                        "missing. Recreate the pair to apply. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )
                 )
             except AgentInstallError as exc:
-                fixes.append(_result(FAIL, "fix:secrets-read-cap", f"Capability repair failed: {exc}"))
+                fixes.append(_result(FAIL, "fix:resident-block", f"Resident block repair failed: {exc}"))
         if needs_updater_migration:
             from .agent_installer import AgentInstallError, migrate_dlux_updater
 

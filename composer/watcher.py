@@ -498,6 +498,7 @@ class WatchRuntime:
             "package-available.json"
         )
         self.next_package_check = 0.0
+        self.package_channel = None
         # The triggers live in <runtime root>/state/, and staging a wheel needs
         # the root itself (downloads/ sits beside state/).
         self.runtime_root = self.package_trigger.parent.parent
@@ -520,15 +521,23 @@ class WatchRuntime:
         the only reason to skip is a volume that is not there — a stack whose
         DjangoLux does not use the runtime volume at all.
         """
-        if not self.package_trigger.parent.is_dir():
+        from .dlux_channel import read_policy
+
+        state_dir = self.package_trigger.parent
+        if not state_dir.is_dir():
             return
-        if not force and time.monotonic() < self.next_package_check:
+        # An opt-in or opt-out must not wait out the interval: the report on
+        # disk was resolved for the previous channel.
+        channel = read_policy(state_dir)[0]
+        due = force or channel != self.package_channel or time.monotonic() >= self.next_package_check
+        if not due:
             return
         self.next_package_check = time.monotonic() + self.check_interval
+        self.package_channel = channel
         try:
             from .dlux_package_cli import build_availability_payload, write_availability
 
-            write_availability(None, build_availability_payload(),
+            write_availability(None, build_availability_payload(state_dir=state_dir),
                                self.package_availability_file)
         except Exception as exc:
             # Publication is best-effort; it must never take the watch loop down.

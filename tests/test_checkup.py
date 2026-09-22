@@ -479,6 +479,32 @@ class ResidentCommandTests(unittest.TestCase):
     def test_a_custom_command_is_not_second_guessed(self):
         self.assertEqual(self._check(agent=["python", "-m", "composer", "agent"])["level"], OK)
 
+    def _run(self, fix, after):
+        launcher = DockerComposeLauncher()
+        launcher.composer_version = "1.4.0"
+        failing = {"level": FAIL, "name": "resident-commands", "message": "flat"}
+        with (
+            patch.object(launcher, "run_command", return_value=(True, "27.0\n", "")),
+            patch.object(launcher, "discover_services", side_effect=lambda silent=False: setattr(launcher, "services", ["web", "composer-agent", "composer-executor"]) or True),
+            patch.object(launcher, "plaintext_env_candidates", return_value=["/x/.env"]),
+            patch.object(launcher, "parse_env_file", return_value={"SECRET_KEY": "x"}),
+            patch.object(launcher, "required_compose_vars", return_value=set()),
+            patch.object(launcher, "run_docker_compose", return_value=(True, "1.4.0\n", "")),
+            patch.object(launcher, "_check_resident_commands", side_effect=[failing, after]),
+            patch.object(launcher, "_maybe_fix", return_value=[{"level": OK, "name": "fix:resident-block", "message": "ok"}]),
+            patch("composer.checkup.os.path.exists", return_value=True),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            return launcher.run_checkup(_args(fix=fix))
+
+    def test_a_repaired_flat_command_does_not_fail_check_fix(self):
+        ok = {"level": OK, "name": "resident-commands", "message": "nested"}
+        self.assertEqual(self._run(fix=True, after=ok), 0)
+
+    def test_a_flat_command_the_fix_did_not_repair_still_fails(self):
+        still = {"level": FAIL, "name": "resident-commands", "message": "flat"}
+        self.assertEqual(self._run(fix=True, after=still), 1)
+
     def test_an_unreadable_model_reports_nothing(self):
         self.assertIsNone(self._check(compose_ok=False))
         with patch.object(self.launcher, "run_docker_compose", return_value=(True, "1.2.6\n", "")):
@@ -581,7 +607,7 @@ class CheckupRunTests(unittest.TestCase):
 
         self.assertIn(True, calls)  # applied the repair
         self.assertTrue(
-            any(f["name"] == "fix:secrets-read-cap" and f["level"] == OK for f in fixes)
+            any(f["name"] == "fix:resident-block" and f["level"] == OK for f in fixes)
         )
 
     def test_fix_adds_missing_restart_labels(self):

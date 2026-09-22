@@ -97,22 +97,27 @@ def write_availability(runtime, payload, path=None) -> Path:
     return target
 
 
-def build_availability_payload(target_version="", *, channel=None, runtime=None) -> dict:
+def build_availability_payload(target_version="", *, channel=None, runtime=None, state_dir=None) -> dict:
     """Resolve and verify the newest release, as a publishable report.
 
     A failure becomes a report too, never an exception: DjangoLux showing "could
     not check" is correct, and far better than it showing a stale "up to date"
     after PyPI became unreachable or an attestation stopped verifying.
+
+    Without an explicit ``channel`` the deployment's published policy decides,
+    read from ``runtime`` or ``state_dir``; with neither it is stable.
     """
     from . import dlux_channel
     from . import dlux_release_source as source
 
     policy_error = ""
     if channel is None:
-        if runtime is None:
+        if runtime is not None:
+            state_dir = runtime.state_dir
+        if state_dir is None:
             channel = dlux_channel.STABLE
         else:
-            channel, policy_error = dlux_channel.read_policy(runtime.state_dir)
+            channel, policy_error = dlux_channel.read_policy(state_dir)
     try:
         described = source.describe(target_version, channel=channel)
     except Exception as exc:
