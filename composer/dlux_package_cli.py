@@ -216,6 +216,11 @@ def _build_operations(args, services):
     launcher.restart_mode = True
     launcher.restart_service = None
     launcher.restart_services = list(services)
+    # A recreated container is built from the interpolated compose config, so it
+    # needs the deployment's secrets — a restart reuses the existing container
+    # and never did. Without them the new container would come up on compose
+    # defaults and a placeholder SECRET_KEY; refuse instead (see restart()).
+    secrets_ok, secrets_error = launcher.resolve_secrets()
 
     def restart():
         # The service whose pre_start applies migrations must be RECREATED, not
@@ -224,6 +229,11 @@ def _build_operations(args, services):
         # worker then wait for them for ever and the health gate rolls the
         # update back. Every other service is restarted as before.
         appliers = [name for name in launcher.migration_applier_services() if name in services]
+        if appliers and not secrets_ok:
+            return False, (
+                f"Refusing to recreate {', '.join(appliers)} without the deployment's "
+                f"secrets: {secrets_error} The release was not activated."
+            )
         ok, _out, err = launcher.recreate_containers(appliers)
         if not ok:
             return False, err or ""

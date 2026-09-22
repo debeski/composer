@@ -298,6 +298,9 @@ class MigrationApplierRestartTests(unittest.TestCase):
     acceptance stack, DjangoLux 1.9.0b2 with its migration 0022).
     """
 
+    secrets = True
+    secrets_error = ""
+
     def _launcher(self, config, calls):
         from composer.launcher import DockerComposeLauncher
 
@@ -306,6 +309,7 @@ class MigrationApplierRestartTests(unittest.TestCase):
         launcher.recreate_containers = lambda services: (calls.append(("recreate", list(services))) or (True, "", ""))
         launcher.restart_containers = lambda: (calls.append(("restart", list(launcher.restart_services))) or (True, "", ""))
         launcher.monitor_health = lambda: (True, "")
+        launcher.resolve_secrets = lambda: (self.secrets, self.secrets_error)
         return launcher
 
     def _restart(self, config, services=("web", "celery", "caddy")):
@@ -331,6 +335,25 @@ class MigrationApplierRestartTests(unittest.TestCase):
     def test_a_stack_without_pre_start_hooks_is_restarted_as_before(self):
         calls = self._restart({"services": {"web": {}, "celery": {}, "caddy": {}}})
         self.assertEqual(calls, [("recreate", []), ("restart", ["web", "celery", "caddy"])])
+
+    def test_without_secrets_the_applier_is_not_recreated_on_compose_defaults(self):
+        # A recreated container is built from the interpolated config: without
+        # the secrets it would come up on compose defaults and a placeholder
+        # SECRET_KEY, and its pre_start migrate step dies (seen live).
+        self.secrets, self.secrets_error = False, ".secrets/.env is missing variables."
+        self.addCleanup(lambda: setattr(self, "secrets", True))
+        config = {"services": {"celery": {"pre_start": [{"command": "python manage.py migrator"}]}}}
+        calls = []
+        launcher = self._launcher(config, calls)
+        from composer import dlux_package_cli
+
+        with unittest.mock.patch("composer.launcher.DockerComposeLauncher", return_value=launcher):
+            restart, _health = dlux_package_cli._build_operations(_RestartArgs(), ["web", "celery"])
+        ok, detail = restart()
+        self.assertFalse(ok)
+        self.assertIn("Refusing to recreate celery", detail)
+        self.assertIn("not activated", detail)
+        self.assertEqual(calls, [])
 
     def test_an_applier_outside_the_restart_set_is_left_alone(self):
         config = {"services": {"migrator-only": {"pre_start": [{"command": "python manage.py migrate"}]}}}
