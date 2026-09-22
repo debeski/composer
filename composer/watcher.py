@@ -274,7 +274,14 @@ def _check_update_images(args) -> List[str]:
 
 
 def run_agent_check(args) -> int:
-    images = _check_update_images(args)
+    from .agent_check_publication import deployment_publication
+
+    try:
+        publication = deployment_publication(args)
+    except (RuntimeError, ValueError) as exc:
+        print(f"✖ agent check: {exc}", file=sys.stderr)
+        return 1
+    images = publication.images if publication else _check_update_images(args)
     if not images:
         print(
             "✖ agent check: no image to check. Provide an IMAGE, set "
@@ -294,15 +301,15 @@ def run_agent_check(args) -> int:
 
     payload = availability_payload(images)
     output_path = getattr(args, "availability_file", None)
-    if output_path:
-        try:
+    publish_error = None
+    try:
+        if output_path:
             _write_availability_payload(output_path, payload)
-        except OSError as exc:
-            print(
-                f"✖ agent check could not write {output_path}: {exc}",
-                file=sys.stderr,
-            )
-            return 1
+        elif publication:
+            publication.publish(payload)
+    except (OSError, RuntimeError) as exc:
+        publish_error = exc
+        print(f"✖ agent check could not publish availability: {exc}", file=sys.stderr)
 
     if getattr(args, "json", False):
         print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
@@ -322,7 +329,7 @@ def run_agent_check(args) -> int:
             else:
                 print(f"✓ {image}: current ({remote})")
 
-    return 1 if any(not entry["remote_digest"] for entry in payload["images"]) else 0
+    return 1 if publish_error or any(not entry["remote_digest"] for entry in payload["images"]) else 0
 
 
 def _read_request_token(trigger: Path) -> Optional[str]:

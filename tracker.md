@@ -2,6 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
+- Working version **v1.3.14b3 (unreleased)**: manual deployment `agent check` publishes image availability through the resident service; production not updated.
 - Composer **v1.3.14b2 is tagged and published** (2026-09-10): `:v1.3.14b2` + `:beta` (amd64+arm64), `:latest` still 1.3.13, `v1.3.14b1` untouched, GitHub release prerelease with `latest` still v1.3.13. Carries the `:beta` alias-read fix and the beta-first gate. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
@@ -47,6 +48,7 @@
   - [ ] Drop pip/setuptools from the image AFTER the `pypi-attestations` install layer (it is now the only pip dependency; +95MB, 347->442MB) - clears 3 fixable HIGH from pip's vendor tree.
   - [ ] Add `provenance: mode=max` + `sbom: true` to the release build-push step (Scout attestation policy).
 - **Completed Recently:**
+  - [x] 2026-09-19: manual image check publication, resolved Compose image/path discovery, `--no-publish`, publication failure reporting, and regression tests.
   - [x] Beta-first gate (2026-09-10): `validate_beta_first()` in `composer.release_tag` refuses a stable `vX.Y.0` without a pushed `bN`/`rcN` image of that version in history; `classify` checks out with `fetch-depth: 0`. Ships in 1.3.14b2 with the `:beta` alias fix.
   - [x] BLOCKER: `KNOWN_REQUIREMENT_KEYS` lacked `migration_baseline`, and that allow-list fails closed — **every published Composer would have refused the Dlux 1.8.14 manifest outright**, so the release was uninstallable as written. Proven by a test run against the pre-fix module (2026-09-08).
   - [x] v1.3.14b1 channels: `versions.py` (real PEP 440 via `packaging`, now a declared image dep) replaces three hand-rolled regexes that each broke on prereleases — the candidate sort tied `b2`/`b10`, `version_sort_key` tied a beta with its own final (breaking rollback and prune), and `_version_at_least` let `1.3.14b1` satisfy `>=1.3.14`. Plus `dlux_channel.py` (read-only policy + request), `channel_config.py` + wrappers at marker 3, `dlux channel`, `check --beta|--stable` as one operation over wrapper *and* resident pair, and `release_tag.py` tag classification with the `:beta`-never-moves-backwards rule (2026-09-08).
@@ -60,23 +62,9 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (`agent update`). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
-- 2026-09-10: v1.3.14b2 published — the FIXED `:beta` read returns `1.3.14b2` from the live multi-arch manifest, `:beta` advanced, `:latest` unmoved.
-- 2026-09-10: beta-first gate — 8 new tests; live against real git + Docker Hub: `v1.3.14b1` served, a nonexistent `v1.3.14b9` rejected; `release_tag v1.3.14b2` classifies.
-- 2026-09-08: 1.3.14b1 — local arm64 `composer:release-1.3.14b1` build and `scripts/smoke-test.sh` passed (exit 0), including the real agent lifecycle and the new `dlux channel` help sweep; `packaging` 26.3 confirmed present in the image and `1.3.14b1 >= 1.3.14` correctly False inside it. GitHub amd64 smoke still runs on tag.
-- 2026-09-08: channels — 599 tests OK (43 new in `tests/test_channels.py`), 4 skips. Key tests confirmed failing against the pre-change modules: the `migration_baseline` refusal, `select_candidate(channel=…)`, and `1.3.14b1` satisfying `>=1.3.14`. No image build or smoke test run yet for 1.3.14b1.
-- Verified 2026-09-07: full unittest discovery ran 556 tests, OK (6 standalone Dlux interop skips); local arm64 `composer:release-1.3.13` build and `scripts/smoke-test.sh` passed, including real agent lifecycle. Logs under `.xpose/release-v1.3.13-*.log`.
-- Verified 2026-09-05: 185 targeted CLI/wrapper/DLUX/agent/checkup tests pass; rebuilt `composer:ci-test` and `./scripts/smoke-test.sh composer:ci-test` passes; full discovery blocked by missing PyYAML.
-- Verified 2026-09-05: 544 tests pass (4 new on release ordering); rollback target and prune verified against a staged 1.8.9/1.8.10 pair.
-- Verified 2026-09-04: 540 tests pass; real e2e in the built image — stage 1.8.7 from PyPI, offline apply activates it (`active.json` -> volume), a tampered wheel is refused; DLUX check/update worked from the sales project root.
-- Verified 2026-09-04: transformed `project-trademarks/compose.yml` candidate has no DLUX stack-contract drift except intentionally preserved `pgadmin_data`.
-- Verified 2026-08-29: 485 tests passed with 6 expected skips; local image smoke and the v1.3.8 GitHub release workflow passed.
-- Verified 2026-08-07: 333/333 tests; live project-archive compatibility discovery + `composer migrate -d -nm` exited 0 and replaced 171 static files with 172.
-- Verified 2026-08-07: missing-label `check --fix` dry-run against project-archive produces only the `web` label insertion.
-- Verified 2026-08-18: Docker Scout on published v1.3.6 digest = 4C/22H (2C/16H fixable); plain rebuild -> 3C/17H; +pip removal -> 3C/14H (1C/8H fixable) and smoke-test passes.
-- Verified 2026-08-18: residual fixable C/H all live in Docker's own `docker-ce-cli` 29.7.2 binary (Go stdlib 1.26.5, x/mod 0.38.0, docker/docker 28.5.2); alpine base is worse (docker-cli 29.5.3 = 9C/16H fixable).
+- 2026-09-19: full unittest suite passed (619 tests, 6 skips) using isolated CI dependencies; CLI version/help and diff checks passed. Log: `.xpose/manual-agent-check-tests.log`; no production or Docker image validation.
 ### One-line info about last time edited Docs:
-- 2026-09-07: README version-gate section documents `dlux_image_gate`, Dlux 1.8.12+, `COMPOSER_RUNTIME_GATE_SERVICE` and fail-closed behavior; concise v1.3.13 changelog prepared.
-- 2026-09-05: README, agent protocol, executor hardening, and release docs use nested `agent`/`dlux`/`self`/`executor` command paths.
+- 2026-09-19: README and agent protocol document manual image publication, opt-out, explicit paths/images, and failure behavior; v1.3.14b3 changelog opened after checking tags.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

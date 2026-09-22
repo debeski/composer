@@ -2,6 +2,12 @@
 
 `composer agent run` is one outbound-only deployment sidecar per Compose project. Composer owns Docker execution, durable command/event relay, registry discovery, reconnection, and redaction. DLUX owns backup, maintenance, monitoring, update locks, and application state. The control panel owns enrollment, authorization, fleet routing, batches, and current relayed snapshots.
 
+## Manual image availability refresh
+
+`composer agent check` from a deployment root checks the resident agent/updater's images from the resolved Compose configuration and publishes the same result to its configured availability file. Publication uses `compose exec -T` and a standard-library atomic writer inside the running Composer service, so the CLI does not need the runtime volume mounted and the resident service does not need this CLI upgrade. The UI can read the new result on its next refresh; no service restart is needed. Registry polling otherwise retains its configured cadence (default: one hour).
+
+`-f` and `-d` select Compose configuration using the normal launcher rules. Publication checks all configured `--check-image` entries together. Explicit image arguments are diagnostic and do not replace the deployment's document; `--no-publish` also opts out. `--availability-file PATH` overrides automatic publication and writes in the CLI's filesystem. Deployments without a configured image publisher keep diagnostic behavior. A stopped service or unwritable runtime file returns exit 1 and a stderr diagnostic; `--json` still prints the checked document when publication fails. This operation does not pull images, restart services, or send a control-plane command.
+
 ## Transport and authentication
 
 - The control URL must use HTTPS. Plain HTTP is accepted only for explicit localhost development.

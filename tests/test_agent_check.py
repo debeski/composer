@@ -125,7 +125,7 @@ class AgentCheckCommandTests(unittest.TestCase):
     @patch("composer.watcher.availability_payload")
     def test_compose_agent_block_is_the_deployment_default(self, build):
         build.return_value = payload()
-        args = parse_agent_check_args(["--json"])
+        args = parse_agent_check_args(["--json", "--no-publish"])
 
         with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir) as root:
             (root / "compose.yml").write_text(AGENT_COMPOSE, encoding="utf-8")
@@ -147,7 +147,7 @@ class AgentCheckCommandTests(unittest.TestCase):
             "    environment:\n"
             '      WEB_IMAGE: "${WEB_IMAGE:-registry.example/dlux/app:latest}"\n'
         )
-        args = parse_agent_check_args(["--json"])
+        args = parse_agent_check_args(["--json", "--no-publish"])
 
         with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir) as root:
             (root / "docker-compose.yml").write_text(compose, encoding="utf-8")
@@ -167,7 +167,7 @@ class AgentCheckCommandTests(unittest.TestCase):
             "    environment:\n"
             '      WEB_IMAGE: "${WEB_IMAGE}"\n'
         )
-        args = parse_agent_check_args([])
+        args = parse_agent_check_args(["--no-publish"])
         stderr = io.StringIO()
 
         with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir) as root:
@@ -184,7 +184,7 @@ class AgentCheckCommandTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir, workdir(temp_dir) as root:
             (root / "compose.prod.yml").write_text(AGENT_COMPOSE, encoding="utf-8")
-            args = parse_agent_check_args(["--json", "-f", "compose.prod.yml"])
+            args = parse_agent_check_args(["--json", "--no-publish", "-f", "compose.prod.yml"])
             with patch.dict("os.environ", {}, clear=True), redirect_stdout(
                 io.StringIO()
             ):

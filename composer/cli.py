@@ -310,8 +310,8 @@ def parse_agent_check_args(argv):
         prog="composer agent check",
         description=(
             "Check whether newer image tag digests are available without pulling "
-            "or changing the deployment. The JSON form uses the same availability "
-            "contract as composer-agent."
+            "or restarting services. Deployment checks publish availability for "
+            "the UI unless --no-publish is set."
         ),
     )
     parser.add_argument(
@@ -322,17 +322,22 @@ def parse_agent_check_args(argv):
     parser.add_argument(
         "--availability-file",
         metavar="PATH",
-        help="Also atomically write the availability document to PATH",
+        help="Write to PATH instead of publishing through the deployment agent",
+    )
+    parser.add_argument(
+        "--no-publish", action="store_true",
+        help="Only report availability; do not refresh the deployment UI",
     )
     parser.add_argument("-f", "--file", help="Specify an alternate compose file")
+    parser.add_argument("-d", "--dev", action="store_true", help="Use compose.dev.yml")
     parser.add_argument(
         "image",
         nargs="*",
         metavar="IMAGE",
         help=(
             "Tagged image reference to check; repeat for multiple images "
-            "(default: COMPOSER_CHECK_IMAGE, WEB_IMAGE, or the images the "
-            "compose file's composer agent watches)"
+            "(diagnostic only when explicit; default: deployment publisher's "
+            "watched images, then COMPOSER_CHECK_IMAGE, WEB_IMAGE, or Compose discovery)"
         ),
     )
     return parser.parse_args(argv)
