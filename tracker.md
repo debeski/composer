@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- **v1.4.0 (stable)** (2026-09-22): promoted from 1.4.0b4 after live pair acceptance with DjangoLux 1.9.0b2. Carries channels + channel-aware resident checks, `check-policy.json` interval (900 s default) and check-now, `resident-commands` check, `check --fix` exit 0 + `fix:resident-block`, and the migration-applier recreate (+ its secrets requirement). `:latest` moves to 1.4.0; no retirements (§9 postponed to 1.5.0).
+- **v1.4.1 (stable)** (2026-09-22): the 1.4.0 line's stable release. `v1.4.0` was tagged but NEVER published — its shallow test-job checkout left the beta-first gate with no tags, so the first stable X.Y.0 failed its own test; tags cannot be re-cut here, so 1.4.1 carries it plus `fetch-depth: 0` in both workflows. Carries channels, channel-aware resident checks, `check-policy.json` interval + check-now, `resident-commands`, `check --fix` exit 0, and the migration-applier recreate with secrets. No retirements (§9 postponed to 1.5.0).
 - Composer **v1.3.14b2 is tagged and published** (2026-09-10): `:v1.3.14b2` + `:beta` (amd64+arm64), `:latest` still 1.3.13, `v1.3.14b1` untouched, GitHub release prerelease with `latest` still v1.3.13. Carries the `:beta` alias-read fix and the beta-first gate. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
@@ -28,6 +28,7 @@
 - v1.2.7 pins the control origin, blocks credentialed redirects, and validates strict recovery booleans plus full Authorization redaction.
 
 ### Current Project's Unsolved Known Bugs:
+- A stable `vX.Y.0` tag fails its own unit tests unless the job checks out tags (fixed in 1.4.1 with `fetch-depth: 0`); the burned `v1.4.0` tag stays in the remote for ever, since this remote forbids deleting or moving tags.
 - A compromised networked agent can abuse the POST-enabled Docker proxy with host-root-equivalent impact.
 - Shared-volume temp paths permit symlink clobbering; spool, output, event, and command queues need effective bounds.
 - Version gating fails open on missing labels; mutable refs and Windows `shell=True` reconstruction widen risk.

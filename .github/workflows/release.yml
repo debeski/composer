@@ -88,7 +88,13 @@ jobs:
     needs: classify
     runs-on: ubuntu-latest
     steps:
+      # Tags and full history: the unit tests shell out to the real
+      # `composer.release_tag`, whose beta-first gate reads this repository's
+      # tags. A shallow checkout has none, so every stable X.Y.0 would fail the
+      # tests with "no vX.Y.0bN tag is in this commit's history".
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

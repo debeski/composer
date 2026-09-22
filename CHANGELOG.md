@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.4.1
+
+The stable release of the 1.4.0 line. `v1.4.0` was tagged and **never
+published**: its unit-test job checks out shallow, and the tests shell out to
+the real `composer.release_tag`, whose beta-first gate reads this repository's
+tags — with none present, the first stable `X.Y.0` tag failed its own gate.
+Tags cannot be deleted or moved on this remote, so the repair is a new version,
+as `1.3.14b2` was for `b1`.
+
+Scope is otherwise identical to `1.4.0b4`; the four betas are listed below.
+`:latest` moves to this release.
+
+- **CI Checks Out Tags Where The Tests Need Them**: the `Unit tests` job in `release.yml` and the test job in `ci.yml` now use `fetch-depth: 0`, like `classify` already did. Nothing in the product changed.
+
 ## v1.4.0
 
 The stable release of the 1.4.0 line. Identical in scope to `1.4.0b4`, whose

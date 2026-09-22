@@ -21,6 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The tests run the real release_tag CLI, whose beta-first gate reads tags.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
