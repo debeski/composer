@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -286,3 +287,57 @@ class PruneTests(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MigrationApplierRestartTests(unittest.TestCase):
+    """A release carrying migrations must reach a stack that applies them.
+
+    Compose runs `pre_start` on create only, so restarting the applier activates
+    a release whose migrations nobody runs: web and the worker then wait for them
+    for ever, and the health gate rolls the update back (seen on the decrees
+    acceptance stack, DjangoLux 1.9.0b2 with its migration 0022).
+    """
+
+    def _launcher(self, config, calls):
+        from composer.launcher import DockerComposeLauncher
+
+        launcher = DockerComposeLauncher()
+        launcher.compose_config_json = lambda: config
+        launcher.recreate_containers = lambda services: (calls.append(("recreate", list(services))) or (True, "", ""))
+        launcher.restart_containers = lambda: (calls.append(("restart", list(launcher.restart_services))) or (True, "", ""))
+        launcher.monitor_health = lambda: (True, "")
+        return launcher
+
+    def _restart(self, config, services=("web", "celery", "caddy")):
+        from composer import dlux_package_cli
+
+        calls = []
+        launcher = self._launcher(config, calls)
+        with unittest.mock.patch("composer.launcher.DockerComposeLauncher", return_value=launcher):
+            restart, _health = dlux_package_cli._build_operations(_RestartArgs(), list(services))
+        ok, _detail = restart()
+        self.assertTrue(ok)
+        return calls
+
+    def test_the_applier_is_recreated_and_the_rest_restarted(self):
+        config = {"services": {
+            "celery": {"pre_start": [{"command": ["sh", "-c", "python manage.py migrator"]}]},
+            "web": {}, "caddy": {},
+        }}
+        calls = self._restart(config)
+        self.assertEqual(calls[0], ("recreate", ["celery"]))
+        self.assertEqual(calls[1], ("restart", ["web", "caddy"]))
+
+    def test_a_stack_without_pre_start_hooks_is_restarted_as_before(self):
+        calls = self._restart({"services": {"web": {}, "celery": {}, "caddy": {}}})
+        self.assertEqual(calls, [("recreate", []), ("restart", ["web", "celery", "caddy"])])
+
+    def test_an_applier_outside_the_restart_set_is_left_alone(self):
+        config = {"services": {"migrator-only": {"pre_start": [{"command": "python manage.py migrate"}]}}}
+        calls = self._restart(config)
+        self.assertEqual(calls[0], ("recreate", []))
+
+
+class _RestartArgs:
+    file = None
+    dev = False

@@ -432,6 +432,39 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             progress_callback=lambda line: self.emit_progress("Restart", line),
         )
 
+    def recreate_containers(self, services: List[str]) -> Tuple[bool, str, str]:
+        """Recreate the named services, so Compose runs their `pre_start` steps.
+
+        `restart` reuses the existing container and Compose skips its lifecycle
+        hooks, which is how a DjangoLux release carrying migrations reached a
+        stack where nothing applied them.
+        """
+        self.last_progress_text = ""
+        self.last_progress_label = ""
+        if not services:
+            return True, "", ""
+        return self.run_docker_compose_streaming(
+            ["up", "-d", "--no-deps", "--force-recreate", *services],
+            progress_callback=lambda line: self.emit_progress("Recreate", line),
+        )
+
+    def migration_applier_services(self) -> List[str]:
+        """Services whose `pre_start` applies DjangoLux migrations."""
+        config = self.compose_config_json()
+        if not isinstance(config, dict):
+            return []
+        appliers = []
+        for name, definition in (config.get("services") or {}).items():
+            for hook in (definition or {}).get("pre_start") or []:
+                command = (hook or {}).get("command")
+                if isinstance(command, list):
+                    command = " ".join(str(part) for part in command)
+                text = str(command or "")
+                if "migrator" in text or "migrate" in text:
+                    appliers.append(name)
+                    break
+        return appliers
+
     def down_containers(self) -> Tuple[bool, str]:
         services = list(getattr(self, "down_services", []) or [])
         if services:

@@ -218,7 +218,21 @@ def _build_operations(args, services):
     launcher.restart_services = list(services)
 
     def restart():
+        # The service whose pre_start applies migrations must be RECREATED, not
+        # restarted: Compose runs lifecycle hooks on create only, so a restart
+        # activates a release whose migrations nobody applies — web and the
+        # worker then wait for them for ever and the health gate rolls the
+        # update back. Every other service is restarted as before.
+        appliers = [name for name in launcher.migration_applier_services() if name in services]
+        ok, _out, err = launcher.recreate_containers(appliers)
+        if not ok:
+            return False, err or ""
+        rest = [name for name in services if name not in appliers]
+        if not rest:
+            return True, ""
+        launcher.restart_services = list(rest)
         ok, _out, err = launcher.restart_containers()
+        launcher.restart_services = list(services)
         return ok, err or ""
 
     def health_check():
