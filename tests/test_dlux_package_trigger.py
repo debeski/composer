@@ -9,6 +9,7 @@ later update.
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -287,6 +288,64 @@ class PackageAvailabilityPublicationTests(unittest.TestCase):
             "composer.dlux_package_cli.write_availability", side_effect=OSError("read-only")
         ):
             runtime.maybe_check_package_availability()  # must not raise
+
+
+class CheckPolicyAndRequestTests(unittest.TestCase):
+    """DjangoLux sets the check interval and can ask for a check right now."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.runtime = WatchRuntime(_args(self.state / "image-update-request.json", check_interval=3600))
+
+    def _policy(self, **payload):
+        body = {"schema_version": 1, "interval_seconds": 300}
+        body.update(payload)
+        (self.state / "check-policy.json").write_text(json.dumps(body), encoding="utf-8")
+
+    def test_the_published_interval_replaces_the_command_line_one(self):
+        self._policy()
+        self.runtime.apply_check_policy()
+        self.assertEqual(self.runtime.check_interval, 300.0)
+
+    def test_a_shorter_interval_pulls_the_scheduled_check_forward(self):
+        self.runtime.next_package_check = time.monotonic() + 3600
+        self._policy()
+        self.runtime.apply_check_policy()
+        self.assertLessEqual(self.runtime.next_package_check, time.monotonic() + 300)
+
+    def test_an_unusable_policy_falls_back_to_the_command_line(self):
+        for bad in ({"interval_seconds": "300"}, {"interval_seconds": 0}, {"schema_version": 2}):
+            with self.subTest(bad=bad):
+                self._policy(**bad)
+                self.runtime.apply_check_policy()
+                self.assertEqual(self.runtime.check_interval, 3600.0)
+
+    def test_the_floor_still_applies(self):
+        self._policy(interval_seconds=5)
+        self.runtime.apply_check_policy()
+        self.assertEqual(self.runtime.check_interval, 60.0)
+
+    def test_a_check_request_forces_both_checks_and_is_acknowledged_once(self):
+        (self.state / "check-request.json").write_text(json.dumps({"token": "run-1"}), encoding="utf-8")
+        with patch.object(self.runtime, "maybe_check_availability") as images, \
+             patch.object(self.runtime, "maybe_check_package_availability") as packages:
+            self.runtime.maybe_answer_check_request()
+            self.runtime.maybe_answer_check_request()
+
+        images.assert_called_once_with(force=True)
+        packages.assert_called_once_with(force=True)
+        ack = json.loads((self.state / "check-request.json.ack").read_text(encoding="utf-8"))
+        self.assertEqual(ack["token"], "run-1")
+
+    def test_an_acknowledged_request_is_not_repeated_after_a_restart(self):
+        (self.state / "check-request.json").write_text(json.dumps({"token": "run-1"}), encoding="utf-8")
+        (self.state / "check-request.json.ack").write_text(json.dumps({"token": "run-1"}), encoding="utf-8")
+        restarted = WatchRuntime(_args(self.state / "image-update-request.json"))
+        with patch.object(restarted, "maybe_check_package_availability") as packages:
+            restarted.maybe_answer_check_request()
+        packages.assert_not_called()
 
 
 if __name__ == "__main__":

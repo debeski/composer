@@ -8,6 +8,10 @@
 
 `-f` and `-d` select Compose configuration using the normal launcher rules. Publication checks all configured `--check-image` entries together. Explicit image arguments are diagnostic and do not replace the deployment's document; `--no-publish` also opts out. `--availability-file PATH` overrides automatic publication and writes in the CLI's filesystem. Deployments without a configured image publisher keep diagnostic behavior. A stopped service or unwritable runtime file returns exit 1 and a stderr diagnostic; `--json` still prints the checked document when publication fails. This operation does not pull images, restart services, or send a control-plane command.
 
+## Check interval and check requests
+
+With DjangoLux 1.9.0b2+, the resident agent follows `state/check-policy.json` (`{"schema_version": 1, "interval_seconds": N}`, published by the DjangoLux worker from the administrator's Options choice) for both its registry and PyPI checks, re-read every loop tick with a 60-second floor; without it, `--check-interval` applies (default 900). A new token in `state/check-request.json` makes the agent re-check images and packages immediately and write `check-request.json.ack` with that token — once per token, including across restarts.
+
 ## Transport and authentication
 
 - The control URL must use HTTPS. Plain HTTP is accepted only for explicit localhost development.

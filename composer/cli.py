@@ -645,9 +645,9 @@ def parse_watch_args(argv):
     parser.add_argument(
         "--check-interval",
         type=float,
-        default=3600.0,
+        default=900.0,
         metavar="SECONDS",
-        help="Seconds between registry availability checks (default: 3600, min 60)",
+        help="Seconds between registry and PyPI checks (default: 900, min 60); DjangoLux 1.9.0+ overrides it from Options",
     )
     parser.add_argument(
         "--availability-file",
@@ -709,7 +709,7 @@ def parse_agent_args(argv):
     parser.add_argument("-f", "--file", help="Alternate compose file")
     parser.add_argument("-d", "--dev", action="store_true", help="Use compose.dev.yml")
     parser.add_argument("--check-image", action="append", metavar="IMAGE")
-    parser.add_argument("--check-interval", type=float, default=3600.0)
+    parser.add_argument("--check-interval", type=float, default=900.0)
     parser.add_argument("--availability-file")
     parser.add_argument(
         "--allow-http-localhost",

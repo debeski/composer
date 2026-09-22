@@ -200,7 +200,7 @@ def _agent_stack(project_slug: str, services: set[str], topology: Dict[str, Any]
       - --availability-file
       - /opt/dlux-runtime/state/image-available.json
       - --check-interval
-      - "3600"
+      - "900"
     environment:
       DOCKER_HOST: "tcp://docker-socket-proxy:2375"
       WEB_IMAGE: "{image}"
@@ -332,7 +332,7 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
       - --availability-file
       - /opt/dlux-runtime/state/image-available.json
       - --check-interval
-      - "3600"
+      - "900"
     environment:
       DOCKER_HOST: "tcp://docker-socket-proxy:2375"
       WEB_IMAGE: "{image}"

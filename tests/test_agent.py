@@ -611,6 +611,22 @@ class AgentOnlyPackageUpdateTests(unittest.TestCase):
         agent.watch.package_trigger.write_text(
             json.dumps({"token": "pkg-1", "payload": base}), encoding="utf-8")
 
+    def test_each_tick_follows_the_check_policy_and_answers_check_requests(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = self._agent(Path(temp_dir))
+            with patch.object(agent.watch, "apply_check_policy") as policy, \
+                 patch.object(agent.watch, "maybe_answer_check_request") as answer, \
+                 patch.object(agent.watch, "maybe_check_availability"), \
+                 patch.object(agent.watch, "maybe_check_package_availability"), \
+                 patch.object(agent, "process_enroll_request"), \
+                 patch.object(agent, "process_pending_rotation"), \
+                 patch.object(agent, "process_local_update"), \
+                 patch.object(agent, "process_bridge_results"), \
+                 patch.object(agent, "publish_snapshot"):
+                agent.run_once()
+            policy.assert_called_once()
+            answer.assert_called_once()
+
     def test_a_package_request_is_processed_when_no_executor_is_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             agent = self._agent(Path(temp_dir))

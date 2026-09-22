@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.0b2
+- **The Resident Agent Checks The Deployment's Channel**: the agent's scheduled package check called `build_availability_payload()` with no channel, so it always resolved **stable** — a deployment that opted into beta from DjangoLux Options was offered nothing until someone ran `composer dlux check` by hand, and every update or rollback re-published a stable report. `maybe_check_package_availability()` now reads the policy from the runtime state dir, and re-checks as soon as the published channel changes instead of waiting out the interval. Found on the decrees acceptance stack with 1.4.0b1; the new test fails on the previous code.
+- **Check Interval From DjangoLux, 15 Minutes By Default**: `--check-interval` defaults to 900 s (was 3600) in `agent run`/`watch` and in newly generated resident blocks. DjangoLux 1.9.0b2+ publishes the administrator's choice to `state/check-policy.json` (`{"schema_version": 1, "interval_seconds": N}`); `WatchRuntime.apply_check_policy()` follows it on every loop tick (floor 60 s), pulls an already-scheduled check forward when the interval shrinks, and falls back to `--check-interval` when the file is absent or unusable.
+- **Check Now**: DjangoLux's **Check for updates** writes `state/check-request.json` with a token; `maybe_answer_check_request()` forces the image and package checks and acknowledges in `check-request.json.ack`, once per token and across restarts. Both are wired into the agent's `run_once()` and the `watch` loop.
+- **`check --fix` Exits 0 After Repairing The Resident Block**: the `resident-commands` result is re-run after fixes, so a stack `--fix` repaired no longer fails the command; the fix is reported as `fix:resident-block` (nested run commands and the secrets read capability) instead of claiming a capability change it may not have made.
+
 ## v1.4.0b1
 
 The 1.3.14 line becomes 1.4.0; no stable 1.3.14 ships. Release channels, the

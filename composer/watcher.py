@@ -38,6 +38,13 @@ DEFAULT_RELEASE_MANIFEST_LABEL = "org.dlux.project.release-manifest"
 # How often the watched images' local digests are polled between scheduled
 # registry checks, so an update deployed elsewhere clears promptly.
 LOCAL_DIGEST_PROBE_SECONDS = 30.0
+# Registry and PyPI check cadence when neither --check-interval nor DjangoLux's
+# published check policy says otherwise.
+DEFAULT_CHECK_INTERVAL_SECONDS = 900.0
+# DjangoLux 1.9.0+ publishes the administrator's interval here, and asks for an
+# immediate check through the request file; both sit beside the package trigger.
+CHECK_POLICY_FILENAME = "check-policy.json"
+CHECK_REQUEST_FILENAME = "check-request.json"
 _MAX_MANIFEST_LABEL_BYTES = 16384
 _MAX_ENCODED_MANIFEST_LABEL_BYTES = 24576
 
@@ -365,6 +372,20 @@ def _read_ack_token(ack: Path) -> Optional[str]:
         return None
 
 
+def _read_check_policy_seconds(path: Path) -> Optional[float]:
+    """The interval DjangoLux published, or None when absent or unusable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        return None
+    seconds = data.get("interval_seconds")
+    if type(seconds) is not int or seconds <= 0:
+        return None
+    return float(seconds)
+
+
 def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = ""):
     payload = {
         "token": token,
@@ -482,8 +503,11 @@ class WatchRuntime:
         self.check_images = list(getattr(args, "check_image", None) or [])
         self.availability_file = getattr(args, "availability_file", None)
         self.check_interval = max(
-            60.0, float(getattr(args, "check_interval", 3600.0) or 3600.0)
+            60.0,
+            float(getattr(args, "check_interval", DEFAULT_CHECK_INTERVAL_SECONDS)
+                  or DEFAULT_CHECK_INTERVAL_SECONDS),
         )
+        self.base_check_interval = self.check_interval
         self.availability_enabled = bool(self.check_images and self.availability_file)
         self.next_check = 0.0
         self.local_digests: dict = {}
@@ -499,9 +523,38 @@ class WatchRuntime:
         )
         self.next_package_check = 0.0
         self.package_channel = None
+        self.check_policy_file = self.package_trigger.with_name(CHECK_POLICY_FILENAME)
+        self.check_request = self.package_trigger.with_name(CHECK_REQUEST_FILENAME)
+        self.check_request_ack = Path(f"{self.check_request}.ack")
+        self.last_check_request_token = _read_ack_token(self.check_request_ack)
         # The triggers live in <runtime root>/state/, and staging a wheel needs
         # the root itself (downloads/ sits beside state/).
         self.runtime_root = self.package_trigger.parent.parent
+
+    def apply_check_policy(self):
+        """Follow the interval DjangoLux publishes; --check-interval is the fallback.
+
+        A shorter interval takes effect now rather than after the check already
+        scheduled under the old one.
+        """
+        published = _read_check_policy_seconds(self.check_policy_file)
+        interval = max(60.0, published) if published else self.base_check_interval
+        if interval == self.check_interval:
+            return
+        self.check_interval = interval
+        latest = time.monotonic() + interval
+        self.next_check = min(self.next_check, latest)
+        self.next_package_check = min(self.next_package_check, latest)
+
+    def maybe_answer_check_request(self):
+        """Re-check images and packages now when DjangoLux asks, then acknowledge."""
+        token = _read_ack_token(self.check_request)
+        if not token or token == self.last_check_request_token:
+            return
+        self.maybe_check_availability(force=True)
+        self.maybe_check_package_availability(force=True)
+        _write_ack(self.check_request_ack, token, 0)
+        self.last_check_request_token = token
 
     def maybe_check_availability(self, force=False):
         if not self.availability_enabled:
@@ -557,7 +610,7 @@ class WatchRuntime:
         (`composer update` from the project root), the executor in the hardened
         topology, a manual `docker compose pull` — leaves the published document
         advertising an update that is already installed until the next scheduled
-        check (an hour by default). Polling the local digest turns that into a
+        check (15 minutes by default). Polling the local digest turns that into a
         few seconds. An unreadable digest is *unknown*, never a change: a
         transient Docker error must not trigger a re-publish.
         """
@@ -731,6 +784,8 @@ def run_watch(args) -> int:
     )
 
     while True:
+        runtime.apply_check_policy()
+        runtime.maybe_answer_check_request()
         runtime.maybe_check_availability()
         runtime.maybe_check_package_availability()
         request = runtime.pending_request()
