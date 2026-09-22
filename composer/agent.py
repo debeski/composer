@@ -705,6 +705,7 @@ class ComposerAgent:
     def run_once(self):
         self.watch.apply_check_policy()
         self.watch.maybe_answer_check_request()
+        self.watch.maybe_answer_ops_request()
         self.watch.maybe_check_availability()
         self.watch.maybe_check_package_availability()
         self.process_enroll_request()

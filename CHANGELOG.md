@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.0b1
+
+- **The Resident Composer Answers DjangoLux's Operations Card**: new `composer/ops.py`. DjangoLux writes `state/ops-request.json` naming ONE operation and a token; the agent (and `watch`) performs it and publishes `state/ops-result.json` plus `ops-request.json.ack` under that token, once per token and across restarts. Phase 1 ships `check` only, read-only: it runs the same checks as `composer check` through the new `collect_checkup()` — extracted from `run_checkup()` so the card and the CLI can never drift to two different lists — and never applies `--fix`. An operation outside the table is refused with a message rather than attempted; the request carries no command, path, service or flags, so the operation name is the entire input. Findings are redacted through `redact_text` and bounded (200 findings, 2000 characters each) because DjangoLux renders them in a browser, and a handler that raises, returns nothing usable, or cannot write its result is reported in the ack instead of reaching the watch loop. +14 tests.
+
 ## v1.4.1
 
 The stable release of the 1.4.0 line. `v1.4.0` was tagged and **never

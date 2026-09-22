@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import wrappers
 from .config import ConfigMixin
@@ -650,7 +650,14 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             detail += " The resident pair already ran that image."
         return [_result(OK, "composer-channel-switch", detail)]
 
-    def run_checkup(self, args) -> int:
+    def collect_checkup(self, args) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Run the checks (and any fixes ``args`` asks for) and return them.
+
+        Split out of ``run_checkup`` so a caller that is not a terminal — the
+        resident agent answering DjangoLux's Operations card — gets the same
+        results without the printing, and without a second list of checks that
+        could drift from this one.
+        """
         self.compose_file = args.file
         self.dev_mode = args.dev
         self.resolve_active_compose_files()
@@ -690,6 +697,11 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                     rechecked = self._check_resident_commands()
                     if rechecked is not None:
                         results[index] = rechecked
+
+        return results, fixed
+
+    def run_checkup(self, args) -> int:
+        results, fixed = self.collect_checkup(args)
 
         if args.json:
             import json

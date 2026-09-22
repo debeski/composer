@@ -12,6 +12,10 @@
 
 With DjangoLux 1.9.0b2+, the resident agent follows `state/check-policy.json` (`{"schema_version": 1, "interval_seconds": N}`, published by the DjangoLux worker from the administrator's Options choice) for both its registry and PyPI checks, re-read every loop tick with a 60-second floor; without it, `--check-interval` applies (default 900). A new token in `state/check-request.json` makes the agent re-check images and packages immediately and write `check-request.json.ack` with that token — once per token, including across restarts.
 
+## Operations requests from DjangoLux
+
+DjangoLux's Operations card asks the resident Composer to perform one **named** operation: it writes `state/ops-request.json` with a token and an operation name, and the agent (or `watch`) publishes `state/ops-result.json` and `ops-request.json.ack` under that token, once per token and across restarts. `composer/ops.py` owns the table of operations that exist; anything else is refused with a message rather than attempted, and the request carries no command, path, service or flag — the operation name is the entire input. Phase 1 is read-only: `check` runs the same checks as `composer check` (never `--fix`) through `collect_checkup()`, and its findings are redacted and bounded (200 findings, 2000 characters each) before publication, because DjangoLux renders them in a browser. A handler that raises, returns nothing usable, or cannot write its result is reported in the ack and never reaches the watch loop.
+
 ## Transport and authentication
 
 - The control URL must use HTTPS. Plain HTTP is accepted only for explicit localhost development.

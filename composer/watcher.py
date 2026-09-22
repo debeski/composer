@@ -527,6 +527,7 @@ class WatchRuntime:
         self.check_request = self.package_trigger.with_name(CHECK_REQUEST_FILENAME)
         self.check_request_ack = Path(f"{self.check_request}.ack")
         self.last_check_request_token = _read_ack_token(self.check_request_ack)
+        self._ops_responder = None
         # The triggers live in <runtime root>/state/, and staging a wheel needs
         # the root itself (downloads/ sits beside state/).
         self.runtime_root = self.package_trigger.parent.parent
@@ -555,6 +556,20 @@ class WatchRuntime:
         self.maybe_check_package_availability(force=True)
         _write_ack(self.check_request_ack, token, 0)
         self.last_check_request_token = token
+
+    def maybe_answer_ops_request(self):
+        """Perform one DjangoLux Operations request, if a new one is waiting."""
+        if not self.package_trigger.parent.is_dir():
+            return
+        if self._ops_responder is None:
+            from .ops import OpsResponder
+
+            self._ops_responder = OpsResponder(self)
+        try:
+            self._ops_responder.answer()
+        except Exception as exc:
+            # An operation must never take the watch loop down with it.
+            print(f"⚠ operations request failed: {redact_text(exc)}", flush=True)
 
     def maybe_check_availability(self, force=False):
         if not self.availability_enabled:
@@ -786,6 +801,7 @@ def run_watch(args) -> int:
     while True:
         runtime.apply_check_policy()
         runtime.maybe_answer_check_request()
+        runtime.maybe_answer_ops_request()
         runtime.maybe_check_availability()
         runtime.maybe_check_package_availability()
         request = runtime.pending_request()
