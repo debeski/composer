@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- Working version **v1.3.14b3 (unreleased)**: manual deployment `agent check` publishes image availability through the resident service; production not updated.
+- **v1.4.0b1** (2026-09-22): the 1.3.14 line promoted to 1.4.0 (no stable 1.3.14). Carries 1.3.14b1-b2 + agent-check publication + `resident-commands` check + `dlux check` up-to-date wording. No retirements in 1.4.0 (§9 inventory postponed to 1.5.0). Pairs with DjangoLux 1.9.0b1.
 - Composer **v1.3.14b2 is tagged and published** (2026-09-10): `:v1.3.14b2` + `:beta` (amd64+arm64), `:latest` still 1.3.13, `v1.3.14b1` untouched, GitHub release prerelease with `latest` still v1.3.13. Carries the `:beta` alias-read fix and the beta-first gate. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
 - Entrypoints: `python -m composer`, `python composer/main.py`, and Composer-owned `start.sh`/`start.ps1` wrappers.
 - Post-start is label-owned; init-container stacks strip updater-era native/label hooks and `check --fix` normalizes compatible legacy forms.
@@ -62,6 +62,7 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (`agent update`). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
+- 2026-09-22: 1.4.0b1 pre-tag — 630 tests OK (6 skips), `release_tag v1.4.0b1` -> beta/advance `:beta`, local `composer:release-1.4.0b1` build + `scripts/smoke-test.sh` exit 0; wrappers unchanged since b2. New `resident-commands` check verified read-only against project-decrees/v2 (flags both services).
 - 2026-09-19: full unittest suite passed (619 tests, 6 skips) using isolated CI dependencies; CLI version/help and diff checks passed. Log: `.xpose/manual-agent-check-tests.log`; no production or Docker image validation.
 ### One-line info about last time edited Docs:
 - 2026-09-19: README and agent protocol document manual image publication, opt-out, explicit paths/images, and failure behavior; v1.3.14b3 changelog opened after checking tags.

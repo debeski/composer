@@ -1,6 +1,15 @@
 # Changelog
 
-## v1.3.14b3
+## v1.4.0b1
+
+The 1.3.14 line becomes 1.4.0; no stable 1.3.14 ships. Release channels, the
+`dlux channel` command, the `check --beta|--stable` switch and PEP 440 version
+handling are a feature set, so 1.4.0 carries everything in 1.3.14b1–b2 below plus
+the changes here. `1.4.0b1` sorts above `1.3.14b2`, so `:beta` moves up
+normally. Paired with DjangoLux 1.9.0b1, whose manifest requires Composer
+`>=1.3.14b1`.
+
+- **No Retirements In 1.4.0**: `release_channels_plan.md` §9 asks for a 1.4.0 retirement inventory (legacy flat CLI references, per-change enable helpers, the legacy `composer-updater` topology, local-tools compatibility) and none exists yet. 1.4.0 removes nothing; every repair path supported stable deployments migrate through stays. The inventory is postponed to 1.5.0.
 - **Manual Image Checks Refresh The UI**: `agent check` publishes its result through the running Composer agent/updater to the configured shared availability file. Resolved Compose configuration supplies the watched images and path, including `-f`/`-d` selection; publication failures return exit 1. Explicit image checks remain diagnostic, `--no-publish` opts out, and `--availability-file` retains explicit local output.
 - **`check` Catches Resident Services Started With The Flat Command**: a stack whose `composer-agent`/`composer-executor` still run `agent --trigger-file ...` / `executor --socket ...` restart-loops on every Composer since 1.3.13 (the nested CLI requires `agent run` / `executor run`), so it has no update path — yet `composer check` reported "no blocking problems" while `--fix` quietly repaired it. New `_check_resident_commands()` reads the resolved `docker compose config` and FAILs `resident-commands` for either service whose command is its bare role or role plus a flag, pointing at `check --fix`. An unreadable model reports nothing, since `compose-config` already covers it. Found on project-decrees, whose committed `compose.yml` still has the flat form. +6 tests.
 - **`dlux check` No Longer Announces An Older Release**: `composer dlux check` printed "DjangoLux 1.8.13 available" to a deployment running 1.8.14b1 — the newest stable release, but not an update, and DjangoLux itself correctly reported "up to date". New `availability_summary()` compares against the installed release (`runtime.read_active()`) with PEP 440 and says "Up to date: DjangoLux 1.8.14b1 is newer than 1.8.13, the newest release on the stable channel"; a newer release keeps the "available" line. The published `package-available.json` is unchanged. +5 tests.
