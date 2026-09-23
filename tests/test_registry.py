@@ -1,9 +1,12 @@
+import email.message
 import threading
 import unittest
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
-from composer.registry import _bearer_token, _open
+from composer import registry
+from composer.registry import _bearer_token, _fetch_bytes, _open
 
 
 class RegistryTransportTests(unittest.TestCase):
@@ -51,9 +54,63 @@ class RegistryTransportTests(unittest.TestCase):
             target.shutdown()
             target_thread.join()
 
+
     def test_bearer_challenge_rejects_non_https_realm(self):
         challenge = 'Bearer realm="http://tokens.example.test",service="registry"'
         self.assertIsNone(_bearer_token(challenge, 1))
+
+class BlobRedirectTests(unittest.TestCase):
+    """A blob read follows the registry's storage hop; nothing else does.
+
+    Docker Hub answers a blob GET with a 307 to a pre-signed CDN URL, so the
+    image config — and the version label in it — is unreadable without this one
+    hop. It is still a hop to https only, and still without our credentials.
+    """
+
+    @staticmethod
+    def _redirect(location, code=307):
+        headers = email.message.Message()
+        headers["Location"] = location
+        return urllib.error.HTTPError("https://registry.test/v2/x/blobs/sha256:a", code, "redirect", headers, None)
+
+    def _fetch(self, error, **kwargs):
+        seen = []
+
+        class Response:
+            def __enter__(self_inner): return self_inner
+            def __exit__(self_inner, *_): return False
+            def read(self_inner): return b"{}"
+
+        def fake_open(url, headers, *, method="GET", timeout=15):
+            if not seen:
+                seen.append((url, headers))
+                raise error
+            seen.append((url, headers))
+            return Response()
+
+        with patch.object(registry, "_open", fake_open):
+            body = _fetch_bytes("https://registry.test/v2/x/blobs/sha256:a", "application/json",
+                                "registry-secret", 5, **kwargs)
+        return body, seen
+
+    def test_a_blob_follows_the_storage_redirect(self):
+        body, seen = self._fetch(self._redirect("https://cdn.test/blob"), follow=True)
+        self.assertEqual(body, b"{}")
+        self.assertEqual(seen[1][0], "https://cdn.test/blob")
+
+    def test_the_registry_token_is_not_handed_to_the_storage_host(self):
+        _body, seen = self._fetch(self._redirect("https://cdn.test/blob"), follow=True)
+        self.assertNotIn("Authorization", seen[1][1])
+
+    def test_a_plaintext_redirect_is_refused(self):
+        body, seen = self._fetch(self._redirect("http://cdn.test/blob"), follow=True)
+        self.assertIsNone(body)
+        self.assertEqual(len(seen), 1, "nothing may be fetched over http")
+
+    def test_a_manifest_read_does_not_follow_it(self):
+        body, seen = self._fetch(self._redirect("https://cdn.test/blob"))
+        self.assertIsNone(body)
+        self.assertEqual(len(seen), 1)
 
 
 if __name__ == "__main__":

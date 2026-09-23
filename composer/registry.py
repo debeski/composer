@@ -103,9 +103,47 @@ def _bearer_token(challenge: str, timeout: float) -> Optional[str]:
     return data.get("token") or data.get("access_token")
 
 
-def _fetch_bytes(url: str, accept: str, token: Optional[str], timeout: float) -> Optional[bytes]:
+#: Redirect codes a registry answers a blob GET with.
+_REDIRECTS = (301, 302, 303, 307, 308)
+
+
+def _follow_to_storage(exc, accept: str, timeout: float, hops: int = 3) -> Optional[bytes]:
+    """Read the storage URL a registry redirects a blob GET to, or None.
+
+    Docker Hub (and GHCR, and ECR) do not serve blobs themselves: they answer
+    with a 307 to a pre-signed CDN URL, so the image config — where the version
+    label lives — is unreadable unless that one hop is followed. It is followed
+    only to https, and never with the registry's Authorization header attached:
+    the pre-signed URL carries its own credentials, and handing a registry the
+    ability to forward ours to a host of its choosing is exactly what
+    ``RejectRedirects`` exists to prevent. It still does.
+    """
+    while hops > 0:
+        if exc.code not in _REDIRECTS:
+            return None
+        location = exc.headers.get("Location") or ""
+        if not location.lower().startswith("https://"):
+            return None
+        hops -= 1
+        try:
+            with _open(location, {"Accept": accept}, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as nested:  # type: ignore[attr-defined]
+            exc = nested
+        except Exception:
+            return None
+    return None
+
+
+def _fetch_bytes(
+    url: str, accept: str, token: Optional[str], timeout: float, *, follow: bool = False
+) -> Optional[bytes]:
     """GET ``url`` (with the same 401 Bearer-challenge retry as
-    ``remote_tag_digest``) and return the response body, or None. Never raises."""
+    ``remote_tag_digest``) and return the response body, or None. Never raises.
+
+    ``follow`` permits the storage redirect a blob read needs; a manifest read
+    leaves it off, because there the redirect is not part of the protocol.
+    """
     headers = {"Accept": accept}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -113,6 +151,8 @@ def _fetch_bytes(url: str, accept: str, token: Optional[str], timeout: float) ->
         with _open(url, headers, timeout=timeout) as response:
             return response.read()
     except urllib.error.HTTPError as exc:  # type: ignore[attr-defined]
+        if exc.code in _REDIRECTS:
+            return _follow_to_storage(exc, accept, timeout) if follow else None
         if exc.code != 401 or token:
             return None
         bearer = _bearer_token(exc.headers.get("Www-Authenticate", ""), timeout)
@@ -122,6 +162,8 @@ def _fetch_bytes(url: str, accept: str, token: Optional[str], timeout: float) ->
         try:
             with _open(url, headers, timeout=timeout) as response:
                 return response.read()
+        except urllib.error.HTTPError as exc:  # type: ignore[attr-defined]
+            return _follow_to_storage(exc, accept, timeout) if follow else None
         except Exception:
             return None
     except Exception:
@@ -164,7 +206,7 @@ def remote_image_labels(
         config_digest = (manifest.get("config") or {}).get("digest")
         if not config_digest:
             return None
-        raw = _fetch_bytes(f"{base}/blobs/{config_digest}", _CONFIG_ACCEPT, token, timeout)
+        raw = _fetch_bytes(f"{base}/blobs/{config_digest}", _CONFIG_ACCEPT, token, timeout, follow=True)
         if not raw:
             return None
         blob = json.loads(raw.decode("utf-8"))

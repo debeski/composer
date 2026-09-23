@@ -7,6 +7,7 @@ exactly once — including across a restart of this process.
 """
 
 import json
+import uuid
 import os
 import sys
 import unittest
@@ -343,6 +344,11 @@ class ResidentUpdateTests(unittest.TestCase):
         self.responder = OpsResponder(self.runtime)
         (self.state / "ops-request.json").write_text(
             json.dumps({"schema_version": 1, "token": "run-7", "operation": "agent-update"}), encoding="utf-8")
+        # Every update first asks the registry whether there is one; pin that
+        # answer so no test here reaches the network for it.
+        published = patch("composer.registry.remote_image_version", return_value="99.0.0")
+        published.start()
+        self.addCleanup(published.stop)
 
     def test_the_update_is_delegated_and_left_unacked(self):
         with patch("composer.executor_client.executor_configured", return_value=True), \
@@ -389,6 +395,96 @@ class ResidentUpdateTests(unittest.TestCase):
             self.responder.answer()
         ack = json.loads((self.state / "ops-request.json.ack").read_text(encoding="utf-8"))
         self.assertIn("executor is down", ack["error"])
+
+
+class ResidentCheckTests(unittest.TestCase):
+    """`agent-check` answers "is there one?" without touching the deployment."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.runtime = WatchRuntime(_args(self.state / "image-update-request.json"))
+        self.responder = OpsResponder(self.runtime)
+        (self.state / "ops-request.json").write_text(
+            json.dumps({"schema_version": 1, "token": "run-9", "operation": "agent-check"}), encoding="utf-8")
+
+    def _answer(self, published, current="1.5.2"):
+        # A fresh token each time: one responder answers a token once, so a
+        # second question asked under the first would read the first's answer.
+        token = f"run-{uuid.uuid4().hex[:8]}"
+        (self.state / "ops-request.json").write_text(
+            json.dumps({"schema_version": 1, "token": token, "operation": "agent-check"}), encoding="utf-8")
+        with patch("composer.registry.remote_image_version", return_value=published), \
+             patch("composer.version.read_composer_version", return_value=current):
+            self.responder.answer()
+        return json.loads((self.state / "ops-result.json").read_text(encoding="utf-8"))
+
+    def test_a_newer_published_version_is_an_available_update(self):
+        result = self._answer("1.6.0")
+        self.assertTrue(result["resident"]["update_available"])
+        self.assertEqual(result["resident"]["published_version"], "1.6.0")
+        self.assertEqual(result["exit_code"], 0, "a pending update is news, not a failure")
+
+    def test_the_same_version_is_not_an_update(self):
+        self.assertFalse(self._answer("1.5.2")["resident"]["update_available"])
+
+    def test_an_older_published_version_is_not_an_update(self):
+        # A pin or a channel switch can leave the resident pair AHEAD of the tag.
+        self.assertFalse(self._answer("1.5.1")["resident"]["update_available"])
+
+    def test_prereleases_order_by_pep440_not_by_string(self):
+        self.assertFalse(self._answer("1.5.2b1")["resident"]["update_available"])
+        self.assertTrue(self._answer("1.5.3b1")["resident"]["update_available"])
+
+    def test_a_pair_ahead_of_its_channel_is_not_called_current(self):
+        # A pin, or a channel switched after an update, leaves the resident pair
+        # ahead of the tag; calling that "the channel's current version" is false.
+        message = self._answer("1.5.1")["findings"][0]["message"]
+        self.assertIn("channel publishes 1.5.1", message)
+        self.assertNotIn("current version", message)
+
+    def test_a_registry_it_cannot_read_is_unknown_not_latest(self):
+        resident = self._answer(None)["resident"]
+        self.assertFalse(resident["checked"])
+        self.assertFalse(resident["update_available"], "unknown must never be offered as an update")
+
+    def test_nothing_is_run_against_the_deployment(self):
+        with patch("composer.executor_client.run_operation") as delegated, \
+             patch("composer.registry.remote_image_version", return_value="1.6.0"):
+            self.responder.answer()
+        delegated.assert_not_called()
+
+
+class ResidentUpToDateTests(unittest.TestCase):
+    """An update with nothing to update is refused before the executor runs."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.responder = OpsResponder(WatchRuntime(_args(self.state / "image-update-request.json")))
+        (self.state / "ops-request.json").write_text(
+            json.dumps({"schema_version": 1, "token": "run-8", "operation": "agent-update"}), encoding="utf-8")
+
+    def test_an_up_to_date_pair_is_not_recreated(self):
+        with patch("composer.version.read_composer_version", return_value="1.5.2"), \
+             patch("composer.registry.remote_image_version", return_value="1.5.2"), \
+             patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation") as delegated:
+            self.responder.answer()
+        delegated.assert_not_called()
+        ack = json.loads((self.state / "ops-request.json.ack").read_text(encoding="utf-8"))
+        self.assertIn("Nothing to update", ack["error"])
+
+    def test_an_unreadable_registry_does_not_block_the_update(self):
+        # Refusing here would strand a deployment whose registry is unreachable
+        # but whose pair genuinely needs replacing.
+        with patch("composer.registry.remote_image_version", return_value=None), \
+             patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation", return_value=(0, "")) as delegated:
+            self.responder.answer()
+        delegated.assert_called_once()
 
 
 class HelperScriptTests(unittest.TestCase):

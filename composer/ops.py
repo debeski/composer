@@ -235,6 +235,74 @@ def _apply_fixes(runtime, request) -> dict:
 
 
 
+def _resident_update_status(runtime=None) -> dict:
+    """Is a newer resident Composer published on this project's Composer channel?
+
+    Read-only, and registry-only: the version label on the channel tag against
+    the version this process already is. DjangoLux asks this *before* offering
+    the update, because being made to type a password only to be told the pair
+    is already current is a bad way to learn it.
+
+    Never raises. A registry that cannot be reached is reported as "unknown",
+    which the card shows as "could not check" — not as an update, and not as
+    being on the latest.
+    """
+    from . import channel_config, registry
+    from .version import read_composer_version
+    from .versions import try_parse
+
+    current = read_composer_version()
+    image = channel_config.resolve_self_image()
+    channel = channel_config.read_channel()
+    published = registry.remote_image_version(image) or ""
+    known = bool(published)
+    here, there = try_parse(current), try_parse(published)
+    available = bool(known and here and there and there > here)
+    return {
+        "version": current,
+        "image": image,
+        "channel": channel,
+        "published_version": published,
+        "update_available": available,
+        "checked": known,
+    }
+
+
+def _check_resident(runtime) -> dict:
+    """The `agent-check` operation: resident Composer version vs its channel."""
+    resident = _resident_update_status(runtime)
+    if not resident["checked"]:
+        message = (
+            f"Composer {resident['version']} is resident. The published version of "
+            f"{resident['image']} could not be read, so whether an update exists is unknown."
+        )
+        level = "warn"
+    elif resident["update_available"]:
+        message = (
+            f"Composer {resident['published_version']} is published on the "
+            f"{resident['channel']} channel; {resident['version']} is resident."
+        )
+        level = "warn"
+    elif resident["published_version"] == resident["version"]:
+        message = f"Composer {resident['version']} is the {resident['channel']} channel's current version."
+        level = "ok"
+    else:
+        # A pin, or a channel switched after an update, leaves the pair AHEAD of
+        # the tag. That is not an update, and saying "current version" for a
+        # version the channel does not publish would be false.
+        message = (
+            f"Composer {resident['version']} is resident; the {resident['channel']} "
+            f"channel publishes {resident['published_version']}."
+        )
+        level = "ok"
+    return {
+        "exit_code": 0,
+        "composer_version": resident["version"],
+        "findings": _trim([{"name": "resident-composer", "level": level, "message": message}]),
+        "resident": resident,
+    }
+
+
 def _update_resident_pair(runtime, request, self_request_path=None) -> dict:
     """Update composer-agent and composer-executor to the channel's image.
 
@@ -246,6 +314,12 @@ def _update_resident_pair(runtime, request, self_request_path=None) -> dict:
     from . import executor_client
 
     token = str(request.get("token") or "")
+    resident = _resident_update_status(runtime)
+    if resident["checked"] and not resident["update_available"]:
+        raise ValueError(
+            f"The resident Composer is already {resident['version']}, the current "
+            f"version on the {resident['channel']} channel. Nothing to update."
+        )
     if not executor_client.executor_configured():
         raise ValueError(
             "Updating the resident Composer needs composer-executor, which this "
@@ -274,6 +348,7 @@ def _update_resident_pair(runtime, request, self_request_path=None) -> dict:
 #: operation name -> callable. Nothing outside this table can run.
 HANDLERS = {
     "check": lambda runtime, request: _run_check(runtime),
+    "agent-check": lambda runtime, request: _check_resident(runtime),
     "check-fix-preview": lambda runtime, request: _preview_fixes(runtime),
     "check-fix-apply": _apply_fixes,
     "agent-update": lambda runtime, request: _update_resident_pair(
