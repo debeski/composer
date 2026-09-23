@@ -284,6 +284,96 @@ class FixPreviewAndApplyTests(unittest.TestCase):
         self.assertNotEqual(before, compose_digest(launcher))
 
 
+class CheckCarriesTheRepairPreviewTests(unittest.TestCase):
+    """One operation answers "what is wrong" and "what would fix it"."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.runtime = WatchRuntime(_args(self.state / "image-update-request.json"))
+        self.responder = OpsResponder(self.runtime)
+        (self.state / "ops-request.json").write_text(
+            json.dumps({"schema_version": 1, "token": "run-1", "operation": "check"}), encoding="utf-8")
+
+    def _answer(self, repairs_diff="--- a/compose.yml\n+++ b/compose.yml\n+      - run\n"):
+        launcher = SimpleNamespace(
+            active_compose_files=[], composer_version="1.5.2",
+            collect_checkup=lambda args: ([{"level": "fail", "name": "resident-commands", "message": "flat"}], []),
+        )
+        with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
+             patch("composer.agent_installer.enable_agent", return_value={"files": ["compose.yml"], "diff": repairs_diff}), \
+             patch("composer.agent_installer.enable_executor", return_value={"files": []}), \
+             patch("composer.agent_installer.enable_post_start_label", return_value={"files": []}), \
+             patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": []}), \
+             patch("composer.agent_installer.normalize_restart_labels", return_value={"files": []}):
+            self.responder.answer()
+        return json.loads((self.state / "ops-result.json").read_text(encoding="utf-8"))
+
+    def test_the_check_returns_findings_and_the_repairs_together(self):
+        result = self._answer()
+        self.assertEqual(result["findings"][0]["name"], "resident-commands")
+        self.assertIn("+      - run", result["repairs"][0]["diff"])
+        self.assertEqual(len(result["compose_digest"]), 64, "the apply needs this digest")
+
+    def test_a_clean_stack_offers_no_repairs(self):
+        launcher = SimpleNamespace(
+            active_compose_files=[], composer_version="1.5.2",
+            collect_checkup=lambda args: ([{"level": "ok", "name": "docker", "message": "fine"}], []),
+        )
+        with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
+             patch("composer.agent_installer.enable_agent", return_value={"files": []}), \
+             patch("composer.agent_installer.enable_executor", return_value={"files": []}), \
+             patch("composer.agent_installer.enable_post_start_label", return_value={"files": []}), \
+             patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": []}), \
+             patch("composer.agent_installer.normalize_restart_labels", return_value={"files": []}):
+            self.responder.answer()
+        result = json.loads((self.state / "ops-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["repairs"], [])
+
+
+class ResidentUpdateTests(unittest.TestCase):
+    """Updating the pair ends this process; the helper answers the run."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.runtime = WatchRuntime(_args(self.state / "image-update-request.json"))
+        self.responder = OpsResponder(self.runtime)
+        (self.state / "ops-request.json").write_text(
+            json.dumps({"schema_version": 1, "token": "run-7", "operation": "agent-update"}), encoding="utf-8")
+
+    def test_the_update_is_delegated_and_left_unacked(self):
+        with patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation", return_value=(0, "")) as delegated:
+            self.assertEqual(self.responder.answer(), "run-7")
+        self.assertEqual(delegated.call_args[0][0], "agent_update")
+        self.assertEqual(delegated.call_args[0][1], {"token": "run-7"})
+        # The helper writes the ack after it has recreated this container.
+        self.assertFalse((self.state / "ops-request.json.ack").exists())
+
+    def test_it_is_not_started_twice_while_the_helper_runs(self):
+        with patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation", return_value=(0, "")) as delegated:
+            self.responder.answer()
+            self.responder.answer()
+        self.assertEqual(delegated.call_count, 1)
+
+    def test_a_stack_without_an_executor_is_told_to_use_the_host(self):
+        with patch("composer.executor_client.executor_configured", return_value=False):
+            self.responder.answer()
+        ack = json.loads((self.state / "ops-request.json.ack").read_text(encoding="utf-8"))
+        self.assertIn("./start.sh agent update", ack["error"])
+
+    def test_a_delegation_failure_is_reported(self):
+        with patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation", return_value=(1, "executor is down")):
+            self.responder.answer()
+        ack = json.loads((self.state / "ops-request.json.ack").read_text(encoding="utf-8"))
+        self.assertIn("executor is down", ack["error"])
+
+
 class ResultTrimmingTests(unittest.TestCase):
     def test_findings_are_bounded(self):
         trimmed = _trim([{"level": "ok", "name": f"n{i}", "message": "m"} for i in range(MAX_FINDINGS + 50)])

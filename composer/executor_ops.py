@@ -154,6 +154,64 @@ def _run_check_fix(operation_id: str, payload: Dict) -> Tuple[int, str]:
     return _run(argv, _op_env(operation_id))
 
 
+# The helper runs `composer agent update` and then writes the DjangoLux run's
+# ack and result itself. It has to: that update recreates composer-agent AND
+# composer-executor, so neither process survives to report the outcome.
+_AGENT_UPDATE_SCRIPT = """
+python -m composer agent update
+code=$?
+python - "$OPS_TOKEN" "$code" <<'PYEOF'
+import datetime, json, os, sys
+
+token, code = sys.argv[1], int(sys.argv[2])
+state = "/opt/dlux-runtime/state"
+now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+error = "" if code == 0 else f"The resident Composer update failed (exit {code})."
+result = {
+    "schema_version": 1, "token": token, "operation": "agent-update",
+    "exit_code": code, "error": error, "findings": [], "finished_at": now,
+}
+ack = {
+    "token": token, "operation": "agent-update",
+    "exit_code": code, "error": error, "finished_at": now,
+}
+for name, payload in (("ops-result.json", result), ("ops-request.json.ack", ack)):
+    target = os.path.join(state, name)
+    tmp = os.path.join(state, "." + name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    os.replace(tmp, target)
+PYEOF
+"""
+
+
+def _run_agent_update(operation_id: str, payload: Dict) -> Tuple[int, str]:
+    """Start the detached helper that replaces the resident pair.
+
+    Returns as soon as the helper is running: this process is one of the two
+    containers it is about to recreate, so waiting for it would mean waiting to
+    be killed. `--volumes-from` gives the helper this container's mounts (the
+    project and the runtime volume) without widening anything.
+    """
+    import socket
+
+    from .dlux_runtime_access import self_image
+
+    ok, out, err = _capture([
+        "docker", "run", "-d", "--rm",
+        "--volumes-from", socket.gethostname(),
+        "-v", "/var/run/docker.sock:/var/run/docker.sock",
+        "-w", os.getcwd(),
+        "-e", f"OPS_TOKEN={payload['token']}",
+        "-e", "COMPOSER_ASSUME_YES=1",
+        "--entrypoint", "sh",
+        self_image(_capture), "-c", _AGENT_UPDATE_SCRIPT,
+    ])
+    if not ok:
+        return 1, (err or out or "The resident Composer update could not be started.").strip()[:1000]
+    return 0, ""
+
+
 def default_operation_handler(request: Dict) -> Dict:
     """Map a validated executor request to a redacted typed result."""
     operation_id = request["operation_id"]
@@ -169,6 +227,8 @@ def default_operation_handler(request: Dict) -> Dict:
         exit_code, detail = _run_dlux_package_rollback(operation_id)
     elif op == "check_fix":
         exit_code, detail = _run_check_fix(operation_id, payload)
+    elif op == "agent_update":
+        exit_code, detail = _run_agent_update(operation_id, payload)
     else:  # unreachable: validate_executor_request already rejected unknown ops
         return proto.build_result(operation_id, "rejected", exit_code=2, detail=f"Unsupported op: {op}")
     state = "succeeded" if exit_code == 0 else "failed"

@@ -73,7 +73,12 @@ def _trim(findings) -> list:
 
 
 def _run_check(runtime) -> dict:
-    """`composer check`, as a document. Read-only: never `--fix`."""
+    """`composer check` plus the repairs it would apply. Read-only: never `--fix`.
+
+    One operation on purpose. Splitting "what is wrong" from "what would fix it"
+    made the card ask the operator to run two things to learn one answer, and the
+    apply needs the preview's digest anyway.
+    """
     from types import SimpleNamespace
 
     from .launcher import DockerComposeLauncher
@@ -87,10 +92,13 @@ def _run_check(runtime) -> dict:
         json=True, beta=False, stable=False,
     )
     results, _fixed = launcher.collect_checkup(args)
+    repairs, digest = _dry_run_repairs(launcher, args)
     return {
         "exit_code": 1 if any(r.get("level") == "fail" for r in results) else 0,
         "composer_version": launcher.composer_version,
         "findings": _trim(results),
+        "repairs": repairs,
+        "compose_digest": digest,
     }
 
 
@@ -138,13 +146,14 @@ def _checkup_args(runtime, *, fix=False):
 
 
 def _preview_fixes(runtime) -> dict:
-    """What `check --fix` would change, as diffs. Writes nothing."""
-    from . import agent_installer
-    from .launcher import DockerComposeLauncher
+    """Kept for DjangoLux 1.9.2, whose card asks for the preview separately."""
+    return _run_check(runtime)
 
-    launcher = DockerComposeLauncher()
-    args = _checkup_args(runtime)
-    results, _fixed = launcher.collect_checkup(args)
+
+def _dry_run_repairs(launcher, args):
+    """(repairs, compose digest) — what `check --fix` would change. Writes nothing."""
+    from . import agent_installer
+
     compose_file = args.file or ""
     repairs = []
     seen_diffs = set()
@@ -171,13 +180,7 @@ def _preview_fixes(runtime) -> dict:
             "diff": diff,
             "note": "; ".join(str(w) for w in outcome.get("warnings") or [])[:MAX_MESSAGE_CHARS],
         })
-    return {
-        "exit_code": 0,
-        "composer_version": launcher.composer_version,
-        "findings": _trim(results),
-        "repairs": repairs,
-        "compose_digest": compose_digest(launcher),
-    }
+    return repairs, compose_digest(launcher)
 
 
 def _apply_fixes(runtime, request) -> dict:
@@ -231,11 +234,41 @@ def _apply_fixes(runtime, request) -> dict:
     }
 
 
+
+def _update_resident_pair(runtime, request) -> dict:
+    """Update composer-agent and composer-executor to the channel's image.
+
+    This operation ends by replacing the very processes that would report it, so
+    the executor starts a DETACHED helper from the current image that runs
+    `composer agent update` and then writes this run's ack and result itself.
+    The pair can be recreated underneath it; the answer still lands.
+    """
+    from . import executor_client
+
+    token = str(request.get("token") or "")
+    if not executor_client.executor_configured():
+        raise ValueError(
+            "Updating the resident Composer needs composer-executor, which this "
+            "deployment does not define. Run './start.sh agent update' on the host."
+        )
+    import uuid
+
+    exit_code, detail = executor_client.run_operation(
+        "agent_update", {"token": token}, operation_id=str(uuid.uuid4()),
+    )
+    if exit_code != 0:
+        raise ValueError(detail or f"The resident Composer update could not start (exit {exit_code}).")
+    # Deliberately no ack here: the helper writes it when the update finishes,
+    # which is after this process may no longer exist.
+    return {"deferred": True}
+
+
 #: operation name -> callable. Nothing outside this table can run.
 HANDLERS = {
     "check": lambda runtime, request: _run_check(runtime),
     "check-fix-preview": lambda runtime, request: _preview_fixes(runtime),
     "check-fix-apply": _apply_fixes,
+    "agent-update": _update_resident_pair,
 }
 
 
@@ -286,6 +319,11 @@ class OpsResponder:
                 else:
                     error = f"The operation {operation!r} returned no usable result."
 
+        if isinstance(result, dict) and result.pop("deferred", False) and not error:
+            # The helper container owns this answer. Remember the token so the
+            # loop does not start it twice while it runs.
+            self.last_token = token
+            return token
         payload = {
             "schema_version": 1,
             "token": token,

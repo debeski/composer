@@ -35,7 +35,7 @@ _LENGTH_PREFIX_BYTES = 4
 # absence of image_update (file-triggered), backup (DLUX-side), and
 # rotate_credentials (agent-local) — none of them belong on this surface.
 EXECUTOR_OPS = frozenset(
-    {"restart", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback", "check_fix"}
+    {"restart", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback", "check_fix", "agent_update"}
 )
 
 REQUEST_FIELDS = frozenset({"protocol_version", "operation_id", "op", "payload"})
@@ -47,6 +47,7 @@ _SERVICE_RE = re.compile(r"[A-Za-z0-9_-]+")
 # the protocol itself rather than by the code that later reads it.
 _WHEEL_RE = re.compile(r"^django_lux-[0-9][A-Za-z0-9._+-]{0,96}\.whl$")
 _PACKAGE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[.-]?(?:a|b|rc|post|dev)[0-9]+)?$")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -129,6 +130,15 @@ def validate_executor_request(value: Any) -> Dict[str, Any]:
     elif op == "dlux_package_rollback":
         _require_payload_fields(payload, set())
         payload = {}
+    elif op == "agent_update":
+        # The DjangoLux run token, so the detached helper can answer that run.
+        _require_payload_fields(payload, {"token"})
+        # Not clipped: a truncated token would acknowledge a DIFFERENT run, so
+        # anything that is not exactly a token is refused.
+        token = str(payload.get("token") or "").strip()
+        if not _TOKEN_RE.fullmatch(token):
+            raise ProtocolError("The operation token is invalid.")
+        payload = {"token": token}
     elif op == "check_fix":
         # The digest of the deployment files DjangoLux previewed. It is the only
         # input: the repair itself is whatever `check --fix` decides, and the

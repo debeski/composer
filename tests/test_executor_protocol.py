@@ -155,3 +155,28 @@ class CheckFixProtocolTests(unittest.TestCase):
             proto.validate_executor_request(
                 self._request({"compose_digest": "a" * 64, "command": ["rm", "-rf", "/"]})
             )
+
+
+class AgentUpdateProtocolTests(unittest.TestCase):
+    """The resident update carries the run token and nothing else."""
+
+    def _request(self, payload):
+        return {
+            "protocol_version": proto.EXECUTOR_PROTOCOL_VERSION,
+            "operation_id": str(uuid.uuid4()),
+            "op": "agent_update",
+            "payload": payload,
+        }
+
+    def test_a_token_is_accepted(self):
+        validated = proto.validate_executor_request(self._request({"token": "A1_b2-c3d4"}))
+        self.assertEqual(validated["payload"], {"token": "A1_b2-c3d4"})
+
+    def test_a_token_that_could_be_a_path_or_a_flag_is_rejected(self):
+        for bad in ("", "short", "../../etc/passwd", "tok en", "--force", "x" * 65):
+            with self.subTest(bad=bad), self.assertRaises(proto.ProtocolError):
+                proto.validate_executor_request(self._request({"token": bad}))
+
+    def test_no_other_payload_field_is_accepted(self):
+        with self.assertRaises(proto.ProtocolError):
+            proto.validate_executor_request(self._request({"token": "abcdefgh", "image": "evil:latest"}))
