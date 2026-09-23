@@ -35,7 +35,7 @@ _LENGTH_PREFIX_BYTES = 4
 # absence of image_update (file-triggered), backup (DLUX-side), and
 # rotate_credentials (agent-local) — none of them belong on this surface.
 EXECUTOR_OPS = frozenset(
-    {"restart", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback"}
+    {"restart", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback", "check_fix"}
 )
 
 REQUEST_FIELDS = frozenset({"protocol_version", "operation_id", "op", "payload"})
@@ -129,6 +129,15 @@ def validate_executor_request(value: Any) -> Dict[str, Any]:
     elif op == "dlux_package_rollback":
         _require_payload_fields(payload, set())
         payload = {}
+    elif op == "check_fix":
+        # The digest of the deployment files DjangoLux previewed. It is the only
+        # input: the repair itself is whatever `check --fix` decides, and the
+        # digest is what keeps that from being a repair nobody was shown.
+        _require_payload_fields(payload, {"compose_digest"})
+        digest = _clip(payload.get("compose_digest"), 64).lower()
+        if not _SHA256_RE.fullmatch(digest):
+            raise ProtocolError("The compose digest must be a SHA-256 hex string.")
+        payload = {"compose_digest": digest}
 
     return {
         "protocol_version": EXECUTOR_PROTOCOL_VERSION,

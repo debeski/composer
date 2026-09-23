@@ -1,8 +1,17 @@
 # Changelog
 
-## v1.6.0b1
+## v1.5.1
 
-- **Previewing And Applying `check --fix` From DjangoLux**: two operations join the Operations table. `check-fix-preview` runs each guarded transform in its dry-run mode and returns a unified diff per file plus a SHA-256 digest of the deployment files it read, writing nothing; a transform that refuses is reported as a note on that repair instead of failing the operation, and a repair reachable through two helpers is listed once. `check-fix-apply` runs the real `check --fix`, but first re-computes that digest and refuses when the files no longer match — the repair that lands is the one the operator was shown, not whatever the file says by the time they click. A malformed or missing digest is refused outright, so an apply cannot be pointed at a state nobody previewed. Diffs are redacted and capped at 20000 characters. The handler table now receives the request, which may carry exactly one value: that digest. +7 tests.
+Stays on the 1.5 line: this finishes the Operations card that 1.5.0 started, so
+it is a patch. A `v1.6.0b1` tag was cut from this work before the read-only
+mount below was found — it cannot apply repairs at all — and has been withdrawn:
+the tag and its GitHub release are deleted. Its Docker Hub images (`:v1.6.0b1`,
+and the `:beta` alias still pointing at them) are removed separately, because a
+moving alias never travels backwards on its own.
+
+
+- **Previewing And Applying `check --fix` From DjangoLux**: two operations join the Operations table. `check-fix-preview` runs each guarded transform in its dry-run mode and returns a unified diff per file plus a SHA-256 digest of the deployment files it read, writing nothing; a transform that refuses is reported as a note on that repair instead of failing the operation, and a repair reachable through two helpers is listed once. `check-fix-apply` runs the real `check --fix`, but first re-computes that digest and refuses when the files no longer match — the repair that lands is the one the operator was shown, not whatever the file says by the time they click. A malformed or missing digest is refused outright, so an apply cannot be pointed at a state nobody previewed. Diffs are redacted and capped at 20000 characters. The handler table now receives the request, which may carry exactly one value: that digest.
+- **The Repair Is Written By A Container That Can Write**: both resident services mount the project **read-only** by design, so the first cut of the apply failed with `EROFS` against a deployment it was supposed to repair — found on the decrees stack, not in a unit test. The executor holds the Docker socket, so `check-fix-apply` is now delegated to it as a typed `check_fix` op (its payload is the digest and nothing else), and the executor starts a short-lived container from its own image with the project mounted read-write — the shape `composer dlux update` already uses for the runtime volume. It re-checks the digest from its own read-only view *before* starting that container. An agent-only stack, where this process does hold Docker authority, still applies in place. +12 tests.
 
 ## v1.5.0
 

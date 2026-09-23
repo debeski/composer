@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from composer.ops import MAX_FINDINGS, OpsResponder, _compose_digest, _trim
+from composer.ops import MAX_FINDINGS, OpsResponder, _trim, compose_digest
 from composer.watcher import WatchRuntime
 
 
@@ -178,7 +178,7 @@ class FixPreviewAndApplyTests(unittest.TestCase):
             collect_checkup=lambda args: ([], []),
         )
         with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
-             patch.object(ops_module, "_compose_digest", return_value="b" * 64):
+             patch.object(ops_module, "compose_digest", return_value="b" * 64):
             self.responder.answer()
         self.assertIn("changed since the preview", self._ack()["error"])
         self.assertEqual(self._result()["findings"], [], "nothing was applied")
@@ -195,11 +195,50 @@ class FixPreviewAndApplyTests(unittest.TestCase):
             collect_checkup=lambda args: (applied.append(args.fix) or ([], [{"name": "fix:resident-block", "message": "done"}])),
         )
         with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
-             patch.object(ops_module, "_compose_digest", return_value="c" * 64):
+             patch("composer.executor_client.executor_configured", return_value=False), \
+             patch.object(ops_module, "compose_digest", return_value="c" * 64):
             self.responder.answer()
         self.assertEqual(applied, [True], "the apply must run check --fix, not a dry run")
         self.assertEqual(self._ack()["error"], "")
         self.assertEqual(self._result()["repairs"][0]["name"], "fix:resident-block")
+
+    def test_the_apply_is_delegated_to_the_executor_when_there_is_one(self):
+        # Both resident services mount the project read-only; only the executor
+        # can start a container that writes it.
+        from composer import ops as ops_module
+
+        self._request("check-fix-apply", compose_digest="d" * 64)
+        launcher = SimpleNamespace(
+            active_compose_files=["compose.yml"], composer_version="1.6.0",
+            compose_file=None, dev_mode=False,
+            resolve_active_compose_files=lambda: None,
+            collect_checkup=lambda args: ([], []),
+        )
+        with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
+             patch.object(ops_module, "compose_digest", return_value="d" * 64), \
+             patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation", return_value=(0, "")) as delegated:
+            self.responder.answer()
+        self.assertEqual(delegated.call_args[0][0], "check_fix")
+        self.assertEqual(delegated.call_args[0][1], {"compose_digest": "d" * 64})
+        self.assertEqual(self._ack()["error"], "")
+
+    def test_a_failing_executor_apply_is_reported_not_swallowed(self):
+        from composer import ops as ops_module
+
+        self._request("check-fix-apply", compose_digest="e" * 64)
+        launcher = SimpleNamespace(
+            active_compose_files=["compose.yml"], composer_version="1.6.0",
+            compose_file=None, dev_mode=False,
+            resolve_active_compose_files=lambda: None,
+            collect_checkup=lambda args: ([], []),
+        )
+        with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
+             patch.object(ops_module, "compose_digest", return_value="e" * 64), \
+             patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation", return_value=(2, "executor said no")):
+            self.responder.answer()
+        self.assertIn("executor said no", self._ack()["error"])
 
     def test_a_preview_writes_nothing_and_carries_a_digest(self):
         self._request("check-fix-preview")
@@ -240,9 +279,9 @@ class FixPreviewAndApplyTests(unittest.TestCase):
         first = self.state / "compose.yml"
         first.write_text("services: {}\n", encoding="utf-8")
         launcher = SimpleNamespace(active_compose_files=[str(first)])
-        before = _compose_digest(launcher)
+        before = compose_digest(launcher)
         first.write_text("services: {web: {}}\n", encoding="utf-8")
-        self.assertNotEqual(before, _compose_digest(launcher))
+        self.assertNotEqual(before, compose_digest(launcher))
 
 
 class ResultTrimmingTests(unittest.TestCase):

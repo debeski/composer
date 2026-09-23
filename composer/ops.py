@@ -95,7 +95,7 @@ def _run_check(runtime) -> dict:
 
 
 
-def _compose_digest(launcher) -> str:
+def compose_digest(launcher) -> str:
     """Fingerprint of the deployment files a preview was computed from.
 
     An apply must not write a diff nobody saw: DjangoLux hands this value back,
@@ -176,7 +176,7 @@ def _preview_fixes(runtime) -> dict:
         "composer_version": launcher.composer_version,
         "findings": _trim(results),
         "repairs": repairs,
-        "compose_digest": _compose_digest(launcher),
+        "compose_digest": compose_digest(launcher),
     }
 
 
@@ -194,13 +194,30 @@ def _apply_fixes(runtime, request) -> dict:
     launcher.compose_file = args.file
     launcher.dev_mode = args.dev
     launcher.resolve_active_compose_files()
-    actual = _compose_digest(launcher)
+    actual = compose_digest(launcher)
     if actual != expected:
         raise ValueError(
             "The deployment files changed since the preview, so the repair was not "
             "applied. Run the preview again and review the new changes."
         )
-    results, fixed = launcher.collect_checkup(args)
+    # Both resident services mount the project read-only; the executor is the
+    # only one that can start a container able to write it. Delegate when it is
+    # there, and fall back to applying in-process on a legacy agent-only stack
+    # (where this process IS the one with Docker authority).
+    from . import executor_client
+
+    if executor_client.executor_configured():
+        import uuid
+
+        exit_code, detail = executor_client.run_operation(
+            "check_fix", {"compose_digest": expected}, operation_id=str(uuid.uuid4()),
+        )
+        if exit_code != 0:
+            raise ValueError(detail or f"The repair could not be applied (exit {exit_code}).")
+        launcher = DockerComposeLauncher()
+        results, fixed = launcher.collect_checkup(_checkup_args(runtime))
+    else:
+        results, fixed = launcher.collect_checkup(args)
     return {
         "exit_code": 1 if any(r.get("level") == "fail" for r in results) else 0,
         "composer_version": launcher.composer_version,
@@ -210,7 +227,7 @@ def _apply_fixes(runtime, request) -> dict:
              "note": redact_text(str(f.get("message") or ""))[:MAX_MESSAGE_CHARS]}
             for f in fixed
         ],
-        "compose_digest": _compose_digest(launcher),
+        "compose_digest": compose_digest(launcher),
     }
 
 

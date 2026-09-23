@@ -106,6 +106,54 @@ def _run_dlux_package_rollback(operation_id: str) -> Tuple[int, str]:
     return _run(argv, _op_env(operation_id))
 
 
+def _capture(argv) -> Tuple[bool, str, str]:
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "", str(exc)
+    return proc.returncode == 0, proc.stdout, proc.stderr
+
+
+def _run_check_fix(operation_id: str, payload: Dict) -> Tuple[int, str]:
+    """Apply `check --fix` in a sibling container that can write the project.
+
+    Both resident services mount the project read-only — deliberately, and this
+    does not change that. The executor holds the Docker socket, so it starts a
+    short-lived container from its own image with the project mounted rw, the
+    same shape `composer dlux update` already uses to reach the runtime volume.
+
+    The digest DjangoLux previewed is re-checked HERE, from this process's
+    read-only view, before anything is started: a repair must never be written
+    against files the operator did not see.
+    """
+    import os
+
+    from .dlux_runtime_access import secret_flags, self_image
+    from .launcher import DockerComposeLauncher
+    from .ops import compose_digest
+
+    launcher = DockerComposeLauncher()
+    launcher.compose_file = None
+    launcher.dev_mode = False
+    launcher.resolve_active_compose_files()
+    if compose_digest(launcher) != payload["compose_digest"]:
+        return 2, (
+            "The deployment files changed since the preview, so the repair was not "
+            "applied. Run the preview again and review the new changes."
+        )
+
+    project_dir = os.getcwd()
+    argv = [
+        "docker", "run", "--rm",
+        "-v", f"{project_dir}:{project_dir}:rw",
+        "-v", "/var/run/docker.sock:/var/run/docker.sock",
+        "-w", project_dir,
+        *secret_flags(project_dir=project_dir),
+        self_image(_capture), "check", "--fix", "-y",
+    ]
+    return _run(argv, _op_env(operation_id))
+
+
 def default_operation_handler(request: Dict) -> Dict:
     """Map a validated executor request to a redacted typed result."""
     operation_id = request["operation_id"]
@@ -119,6 +167,8 @@ def default_operation_handler(request: Dict) -> Dict:
         exit_code, detail = _run_dlux_package_apply(operation_id, payload)
     elif op == "dlux_package_rollback":
         exit_code, detail = _run_dlux_package_rollback(operation_id)
+    elif op == "check_fix":
+        exit_code, detail = _run_check_fix(operation_id, payload)
     else:  # unreachable: validate_executor_request already rejected unknown ops
         return proto.build_result(operation_id, "rejected", exit_code=2, detail=f"Unsupported op: {op}")
     state = "succeeded" if exit_code == 0 else "failed"

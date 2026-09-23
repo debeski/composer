@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- **v1.6.0b1 (in development)**: Operations phase 2 — `check-fix-preview` (dry-run diffs + compose digest, writes nothing) and `check-fix-apply` (real `check --fix`, refused unless the digest still matches what the preview showed). Not released; needs a live pair test with DjangoLux 1.9.2b1.
+- **v1.5.1 (ready, unpublished)**: Operations phase 2 — `check-fix-preview` (dry-run diffs + compose digest) and `check-fix-apply`, delegated to the executor as a typed `check_fix` op because both residents mount the project read-only; the executor re-checks the digest and starts a short-lived container that can write. Withdrawn `v1.6.0b1` (wrong line, and it cannot apply repairs): git tag and GitHub release deleted; its Docker Hub tags and the `:beta` alias still need removing by hand.
 - **v1.5.0 (stable)** (2026-09-23): promoted from 1.5.0b1 after live acceptance with DjangoLux 1.9.1b1. `composer/ops.py` answers the Operations card — one named operation per request, token-matched result, read-only `check` via `collect_checkup()`. `:latest` moves to 1.5.0; no retirements (§9 inventory carries to 1.6.0).
 - **v1.4.1 (stable)** (2026-09-22): the 1.4.0 line's stable release. `v1.4.0` was tagged but NEVER published — its shallow test-job checkout left the beta-first gate with no tags, so the first stable X.Y.0 failed its own test; the tag was burned instead of being deleted and re-cut (it could have been — see Known Bugs), so 1.4.1 carries it plus `fetch-depth: 0` in both workflows. Carries channels, channel-aware resident checks, `check-policy.json` interval + check-now, `resident-commands`, `check --fix` exit 0, and the migration-applier recreate with secrets. No retirements (§9 postponed to 1.5.0).
 - Composer **v1.3.14b2 is tagged and published** (2026-09-10): `:v1.3.14b2` + `:beta` (amd64+arm64), `:latest` still 1.3.13, `v1.3.14b1` untouched, GitHub release prerelease with `latest` still v1.3.13. Carries the `:beta` alias-read fix and the beta-first gate. `preflight_version_gate()` accepts only a `keep` verdict from `dlux_image_gate` for the older-image exception.
@@ -30,6 +30,7 @@
 - v1.2.7 pins the control origin, blocks credentialed redirects, and validates strict recovery booleans plus full Authorization redaction.
 
 ### Current Project's Unsolved Known Bugs:
+- Docker Hub `:beta` points at the withdrawn `1.6.0b1` image. A stable release never moves `:beta` backwards, so it stays there until the tag is deleted or repointed in Docker Hub by hand.
 - A stable `vX.Y.0` tag fails its own unit tests unless the job checks out tags (fixed in 1.4.1 with `fetch-depth: 0`). `v1.4.0` was burned needlessly: nothing had been published, and the owner's admin bypass can delete a tag (`git push origin :refs/tags/vX.Y.Z`), so it should have been re-cut as 1.4.0. Do that next time a release fails before publication; only a published version is unrecoverable.
 - A compromised networked agent can abuse the POST-enabled Docker proxy with host-root-equivalent impact.
 - Shared-volume temp paths permit symlink clobbering; spool, output, event, and command queues need effective bounds.

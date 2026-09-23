@@ -128,3 +128,30 @@ class ExecutorFramingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckFixProtocolTests(unittest.TestCase):
+    """The repair op carries one value: the digest its preview read."""
+
+    def _request(self, payload):
+        return {
+            "protocol_version": proto.EXECUTOR_PROTOCOL_VERSION,
+            "operation_id": str(uuid.uuid4()),
+            "op": "check_fix",
+            "payload": payload,
+        }
+
+    def test_a_sha256_digest_is_accepted(self):
+        validated = proto.validate_executor_request(self._request({"compose_digest": "A" * 64}))
+        self.assertEqual(validated["payload"], {"compose_digest": "a" * 64})
+
+    def test_anything_that_is_not_a_digest_is_rejected(self):
+        for bad in ("", "nope", "z" * 64, "../../etc/passwd", "a" * 63):
+            with self.subTest(bad=bad), self.assertRaises(proto.ProtocolError):
+                proto.validate_executor_request(self._request({"compose_digest": bad}))
+
+    def test_no_other_payload_field_is_accepted(self):
+        with self.assertRaises(proto.ProtocolError):
+            proto.validate_executor_request(
+                self._request({"compose_digest": "a" * 64, "command": ["rm", "-rf", "/"]})
+            )
