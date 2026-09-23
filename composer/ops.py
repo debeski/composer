@@ -235,7 +235,7 @@ def _apply_fixes(runtime, request) -> dict:
 
 
 
-def _update_resident_pair(runtime, request) -> dict:
+def _update_resident_pair(runtime, request, self_request_path=None) -> dict:
     """Update composer-agent and composer-executor to the channel's image.
 
     This operation ends by replacing the very processes that would report it, so
@@ -258,8 +258,16 @@ def _update_resident_pair(runtime, request) -> dict:
     )
     if exit_code != 0:
         raise ValueError(detail or f"The resident Composer update could not start (exit {exit_code}).")
-    # Deliberately no ack here: the helper writes it when the update finishes,
-    # which is after this process may no longer exist.
+    # The helper owns this request now, so take it off the volume: the update
+    # recreates THIS container, and the agent that comes up in its place would
+    # otherwise find the request still pending and answer it — which is exactly
+    # what happened on the first live run, where the new (older) agent replied
+    # "does not perform the operation" over a run that was proceeding fine.
+    # DjangoLux matches the ack by token and needs no request file to wait.
+    try:
+        os.unlink(self_request_path)
+    except OSError:
+        pass
     return {"deferred": True}
 
 
@@ -268,7 +276,9 @@ HANDLERS = {
     "check": lambda runtime, request: _run_check(runtime),
     "check-fix-preview": lambda runtime, request: _preview_fixes(runtime),
     "check-fix-apply": _apply_fixes,
-    "agent-update": _update_resident_pair,
+    "agent-update": lambda runtime, request: _update_resident_pair(
+        runtime, request, Path(runtime.package_trigger.parent) / REQUEST_FILENAME,
+    ),
 }
 
 

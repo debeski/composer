@@ -353,6 +353,23 @@ class ResidentUpdateTests(unittest.TestCase):
         # The helper writes the ack after it has recreated this container.
         self.assertFalse((self.state / "ops-request.json.ack").exists())
 
+    def test_the_request_is_taken_off_the_volume_for_the_helper(self):
+        # The update recreates this container. Whatever agent comes up next must
+        # not find the request still pending and answer it — a 1.5.1 agent did
+        # exactly that on the first live run, replying "does not perform the
+        # operation" over a run that was proceeding normally.
+        with patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation", return_value=(0, "")):
+            self.responder.answer()
+        self.assertFalse((self.state / "ops-request.json").exists())
+        restarted = OpsResponder(WatchRuntime(_args(self.state / "image-update-request.json")))
+        self.assertIsNone(restarted.pending(), "a fresh agent must find nothing to answer")
+
+    def test_a_refused_update_leaves_the_request_alone(self):
+        with patch("composer.executor_client.executor_configured", return_value=False):
+            self.responder.answer()
+        self.assertTrue((self.state / "ops-request.json").exists())
+
     def test_it_is_not_started_twice_while_the_helper_runs(self):
         with patch("composer.executor_client.executor_configured", return_value=True), \
              patch("composer.executor_client.run_operation", return_value=(0, "")) as delegated:
@@ -372,6 +389,36 @@ class ResidentUpdateTests(unittest.TestCase):
             self.responder.answer()
         ack = json.loads((self.state / "ops-request.json.ack").read_text(encoding="utf-8"))
         self.assertIn("executor is down", ack["error"])
+
+
+class HelperScriptTests(unittest.TestCase):
+    """The helper's script is source for a CHILD process, not for this file.
+
+    Written as a plain string, `"\\n"` became a real newline inside a Python
+    string literal, and the helper died with a SyntaxError *after* updating the
+    pair — so the run it was supposed to answer hung until its timeout.
+    """
+
+    def test_escapes_survive_into_the_child(self):
+        from composer.executor_ops import _AGENT_UPDATE_SCRIPT as script
+
+        self.assertIn("\\n", script, "the newline escape must reach the child verbatim")
+        self.assertNotIn('+ "\n', script, "a raw newline here breaks the child's string literal")
+
+    def test_the_script_is_valid_python_for_the_child(self):
+        import ast
+
+        from composer.executor_ops import _AGENT_UPDATE_SCRIPT as script
+
+        body = script.split("<<'PY" + "EOF'", 1)[1].rsplit("PY" + "EOF", 1)[0]
+        ast.parse(body)
+
+    def test_the_child_writes_both_documents_under_the_token(self):
+        from composer.executor_ops import _AGENT_UPDATE_SCRIPT as script
+
+        self.assertIn("ops-result.json", script)
+        self.assertIn("ops-request.json.ack", script)
+        self.assertIn("os.replace", script)
 
 
 class ResultTrimmingTests(unittest.TestCase):

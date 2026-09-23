@@ -157,7 +157,7 @@ def _run_check_fix(operation_id: str, payload: Dict) -> Tuple[int, str]:
 # The helper runs `composer agent update` and then writes the DjangoLux run's
 # ack and result itself. It has to: that update recreates composer-agent AND
 # composer-executor, so neither process survives to report the outcome.
-_AGENT_UPDATE_SCRIPT = """
+_AGENT_UPDATE_SCRIPT = r"""
 python -m composer agent update
 code=$?
 python - "$OPS_TOKEN" "$code" <<'PYEOF'
