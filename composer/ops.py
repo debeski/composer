@@ -32,6 +32,8 @@ RESULT_FILENAME = "ops-result.json"
 #: multi-megabyte payload on the runtime volume.
 MAX_FINDINGS = 200
 MAX_MESSAGE_CHARS = 2000
+#: A diff is shown in a browser and stored on the volume; cap it hard.
+MAX_DIFF_CHARS = 20000
 
 
 def _now() -> str:
@@ -92,9 +94,131 @@ def _run_check(runtime) -> dict:
     }
 
 
-#: operation name -> callable(runtime) -> result dict. Nothing else can run.
+
+def _compose_digest(launcher) -> str:
+    """Fingerprint of the deployment files a preview was computed from.
+
+    An apply must not write a diff nobody saw: DjangoLux hands this value back,
+    and a file edited in between makes the digests disagree and the apply refuse.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for name in sorted(launcher.active_compose_files or []):
+        digest.update(name.encode("utf-8"))
+        try:
+            digest.update(Path(name).read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+    return digest.hexdigest()
+
+
+#: The guarded transforms `check --fix` runs that can also be previewed. Each is
+#: dry-run first by contract (`apply=False` computes the candidate and diffs it).
+_PREVIEWABLE = (
+    ("agent-enable", "enable_agent"),
+    ("executor-enable", "enable_executor"),
+    ("resident-block", "enable_executor"),
+    ("post-start-label", "enable_post_start_label"),
+    ("dlux-runtime", "migrate_dlux_updater"),
+    ("restart-labels", "normalize_restart_labels"),
+)
+
+
+def _checkup_args(runtime, *, fix=False):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        file=getattr(runtime.args, "file", None),
+        dev=getattr(runtime.args, "dev", False),
+        fix=fix, yes=True, deep=False,
+        deep_service="web", deep_command="python manage.py dlux_doctor",
+        json=True, beta=False, stable=False,
+    )
+
+
+def _preview_fixes(runtime) -> dict:
+    """What `check --fix` would change, as diffs. Writes nothing."""
+    from . import agent_installer
+    from .launcher import DockerComposeLauncher
+
+    launcher = DockerComposeLauncher()
+    args = _checkup_args(runtime)
+    results, _fixed = launcher.collect_checkup(args)
+    compose_file = args.file or ""
+    repairs = []
+    seen_diffs = set()
+    for name, helper in _PREVIEWABLE:
+        function = getattr(agent_installer, helper, None)
+        if function is None:
+            continue
+        try:
+            outcome = function(".", compose_file=compose_file, apply=False, include_diff=True)
+        except Exception as exc:  # a transform that refuses is not a crash
+            repairs.append({"name": name, "files": [], "diff": "", "note": redact_text(str(exc))[:MAX_MESSAGE_CHARS]})
+            continue
+        if not outcome.get("files"):
+            continue
+        diff = redact_text(str(outcome.get("diff") or ""))[:MAX_DIFF_CHARS]
+        if diff and diff in seen_diffs:
+            # Two helpers can produce the same repair (the resident block is
+            # reached through executor enable); show it once.
+            continue
+        seen_diffs.add(diff)
+        repairs.append({
+            "name": name,
+            "files": [str(f) for f in outcome.get("files") or []],
+            "diff": diff,
+            "note": "; ".join(str(w) for w in outcome.get("warnings") or [])[:MAX_MESSAGE_CHARS],
+        })
+    return {
+        "exit_code": 0,
+        "composer_version": launcher.composer_version,
+        "findings": _trim(results),
+        "repairs": repairs,
+        "compose_digest": _compose_digest(launcher),
+    }
+
+
+def _apply_fixes(runtime, request) -> dict:
+    """Run `check --fix` for real, but only against the files the preview saw."""
+    from .launcher import DockerComposeLauncher
+
+    expected = str(request.get("compose_digest") or "").strip().lower()
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise ValueError("This repair must be previewed before it is applied.")
+    launcher = DockerComposeLauncher()
+    args = _checkup_args(runtime, fix=True)
+    # resolve_active_compose_files() is what fills the file list the digest is
+    # taken over; collect_checkup does it too, but the guard has to come first.
+    launcher.compose_file = args.file
+    launcher.dev_mode = args.dev
+    launcher.resolve_active_compose_files()
+    actual = _compose_digest(launcher)
+    if actual != expected:
+        raise ValueError(
+            "The deployment files changed since the preview, so the repair was not "
+            "applied. Run the preview again and review the new changes."
+        )
+    results, fixed = launcher.collect_checkup(args)
+    return {
+        "exit_code": 1 if any(r.get("level") == "fail" for r in results) else 0,
+        "composer_version": launcher.composer_version,
+        "findings": _trim(results),
+        "repairs": [
+            {"name": str(f.get("name") or ""), "files": [], "diff": "",
+             "note": redact_text(str(f.get("message") or ""))[:MAX_MESSAGE_CHARS]}
+            for f in fixed
+        ],
+        "compose_digest": _compose_digest(launcher),
+    }
+
+
+#: operation name -> callable. Nothing outside this table can run.
 HANDLERS = {
-    "check": _run_check,
+    "check": lambda runtime, request: _run_check(runtime),
+    "check-fix-preview": lambda runtime, request: _preview_fixes(runtime),
+    "check-fix-apply": _apply_fixes,
 }
 
 
@@ -133,7 +257,10 @@ class OpsResponder:
             )
         else:
             try:
-                answer = handler(self.runtime)
+                answer = handler(self.runtime, request)
+            except ValueError as exc:
+                # A refusal: the operator is told why, and nothing was written.
+                error = redact_text(str(exc))[:MAX_MESSAGE_CHARS]
             except Exception as exc:  # noqa: BLE001 - reported, never raised at the loop
                 error = f"The operation failed: {redact_text(str(exc))}"[:MAX_MESSAGE_CHARS]
             else:

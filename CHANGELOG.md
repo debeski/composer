@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.0b1
+
+- **Previewing And Applying `check --fix` From DjangoLux**: two operations join the Operations table. `check-fix-preview` runs each guarded transform in its dry-run mode and returns a unified diff per file plus a SHA-256 digest of the deployment files it read, writing nothing; a transform that refuses is reported as a note on that repair instead of failing the operation, and a repair reachable through two helpers is listed once. `check-fix-apply` runs the real `check --fix`, but first re-computes that digest and refuses when the files no longer match — the repair that lands is the one the operator was shown, not whatever the file says by the time they click. A malformed or missing digest is refused outright, so an apply cannot be pointed at a state nobody previewed. Diffs are redacted and capped at 20000 characters. The handler table now receives the request, which may carry exactly one value: that digest. +7 tests.
+
 ## v1.5.0
 
 The stable release of the 1.5.0 line, identical in scope to `1.5.0b1` below:
