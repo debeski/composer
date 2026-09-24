@@ -264,6 +264,13 @@ class ComposerAgent:
             # the stack. agent_version stays as a back-compat alias.
             "composer_version": self.composer_version,
             "agent_version": self.composer_version,
+            # The Composer that last deployed this stack, as it injected it into
+            # every service's environment. DjangoLux showed it straight from its
+            # own environment and lost it whenever web was recreated by anything
+            # but a deploy — the variable lives only in containers a Composer
+            # run created. Published here it survives that, because the agent is
+            # recreated by the deploy itself.
+            "deployer_version": os.environ.get("COMPOSER_VERSION", "").strip(),
             "enrolled_at": str(self.store.get_meta("enrolled_at") or ""),
             "last_contact_at": str(self.store.get_meta("last_contact_at") or ""),
             "revoked": bool(self.store.get_meta("revoked")),

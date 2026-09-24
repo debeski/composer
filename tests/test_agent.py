@@ -484,6 +484,26 @@ class AgentPairingTests(unittest.TestCase):
             self.assertEqual(status["last_enroll"]["state"], "ok")
             self.assertEqual(status["last_enroll"]["operation_id"], op)
 
+    def test_the_status_carries_the_version_of_the_composer_that_deployed(self):
+        # DjangoLux read this from its own environment, where it survives only
+        # until something other than a deploy recreates the container. The agent
+        # is recreated BY the deploy, so its copy is the one that keeps.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = ComposerAgent(agent_args(Path(temp_dir)))
+            with patch.dict(os.environ, {"COMPOSER_VERSION": "1.5.2"}):
+                agent.publish_agent_status(force=True)
+            status = json.loads(agent.agent_status_path.read_text())
+            self.assertEqual(status["deployer_version"], "1.5.2")
+            self.assertEqual(status["composer_version"], agent.composer_version,
+                             "the agent's own version is a separate fact")
+
+    def test_an_unknown_deployer_is_empty_not_guessed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = ComposerAgent(agent_args(Path(temp_dir)))
+            with patch.dict(os.environ, {}, clear=True):
+                agent.publish_agent_status(force=True)
+            self.assertEqual(json.loads(agent.agent_status_path.read_text())["deployer_version"], "")
+
     def test_persisted_control_url_rebuilds_client_after_restart(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             first = ComposerAgent(agent_args(Path(temp_dir)))
