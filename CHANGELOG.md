@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.5.2
+## v1.5.2b1
 
 - **The Check Carries Its Own Repair Preview**: `check` now returns the dry-run repairs and their compose digest alongside the findings, so DjangoLux's card runs one operation to learn both what is wrong and what would fix it — and the apply already has the digest it must match. `check-fix-preview` remains as an alias for a deployment still on DjangoLux 1.9.2.
 - **Updating The Resident Pair From DjangoLux**: new `agent-update` operation. It cannot answer for itself — the update recreates composer-agent *and* composer-executor — so the executor starts a **detached** helper from the current image (`--volumes-from` its own container, so no mount is widened) that runs `composer agent update` and then writes that run's ack and result to the runtime volume itself. The request carries the DjangoLux run token and nothing else; an over-long token is refused rather than truncated, since a truncated token would acknowledge a different run. A stack with no `composer-executor` is told to run `./start.sh agent update` on the host instead.
