@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.3b1
+
+- **Manual First-Deploy Setup**: `--skip-config` on start/update injects `DLUX_SKIP_CONFIG_IMPORT=True` into service environments, including migrator init containers and web requests. DjangoLux 1.9.4+ skips automatic `config.json` bootstrap while keeping migrations, static collection, manual import, and the original file intact.
+
 ## v1.5.2
 
 The stable release of the 1.5.2 line, identical in scope to `1.5.2b1` below.

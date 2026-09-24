@@ -5,6 +5,11 @@ Env. Docker. Silence.
 Composer resolves secrets from a plaintext env file and orchestrates Docker Compose. No local Python setup. Just Docker.
 
 ## setup
+
+To leave DjangoLux's initial setup wizard available even when the image contains
+`config.json`, use `./start.sh --skip-config` (or `./start.sh -d --skip-config`).
+This requires DjangoLux 1.9.4+; see [manual first-deploy setup](docs/first-deploy.md).
+
 Put `start.sh` or `start.ps1` in your project root.
 
 ## deployment

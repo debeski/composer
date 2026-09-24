@@ -35,6 +35,8 @@ class RenderingMixin:
             active_flags.append(f"\033[93m🔓 PLAINTEXT {self.secrets_source}\033[0m")
         if self.no_migrate:
             active_flags.append("\033[93m⏭️  SKIP MIGRATIONS (STATIC STILL COLLECTED)\033[0m")
+        if getattr(self, "skip_config", False):
+            active_flags.append("SKIP CONFIG IMPORT (MANUAL SETUP)")
         if self.force_makemigrations:
             active_flags.append("\033[93m🔄 FORCE MIGRATIONS\033[0m")
         if self.target_app:

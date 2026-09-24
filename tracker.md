@@ -2,6 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
+- **v1.5.3b1, unreleased; `feat/skip-config`**: start/update `--skip-config` injects `DLUX_SKIP_CONFIG_IMPORT=True` into runtime service environments (DjangoLux 1.9.4b1+, whose manifest requires `>=1.5.3b1` and which Composer enforces before installing); migrations and manual imports continue. Repeat on redeploy until setup completes. Live-verified on the decrees rig: the variable reached web/celery/composer-agent, dlux answered `skipped`, and a plain deploy left it unset. Not published.
 - **v1.5.2 (stable, released 2026-09-24)**: `:latest` and `:beta` both on it. `check` returns the repair preview + digest with its findings, so DjangoLux's card runs one operation; `agent-update` replaces the resident pair through a detached helper that writes the run's ack after recreating both containers, and refuses when the pair already runs the channel's version; new read-only `agent-check` reports resident vs published so the panel offers the update only when there is one; `agent-status.json` carries `deployer_version` so DjangoLux stops losing its deployer row when web is recreated; `remote_image_version()` now follows Docker Hub's blob redirect (it returned `None` for every Hub image before). Not released.
 - **v1.5.1 (stable, released 2026-09-23)**: Operations phase 2 — `check-fix-apply` delegated to the executor as a typed `check_fix` op because both residents mount the project read-only; the executor re-checks the preview digest and starts a short-lived container that can write. `:latest` and `:beta` are on it.
 - **v1.5.0 (stable)** (2026-09-23): promoted from 1.5.0b1 after live acceptance with DjangoLux 1.9.1b1. `composer/ops.py` answers the Operations card — one named operation per request, token-matched result, read-only `check` via `collect_checkup()`. `:latest` moves to 1.5.0; no retirements (§9 inventory carries to 1.6.0).
@@ -20,6 +21,7 @@
 - Preserve deployment originals under `.xclude/` before guarded rewrites.
 
 ### Adopted Standards' rules and policies:
+- **Beta first, every release, no exceptions** (2026-09-24): `requires_beta_first()` now covers patches too, in this repo and in django-lux. Tag `vX.Y.ZbN`, test it on `:beta`, then tag the stable.
 - Secrets are plaintext-only: `.env` -> `secrets/.env` -> `.secrets/.env`.
 - Destructive flags require typed confirmation unless `-y` or `COMPOSER_ASSUME_YES=1`; non-TTY fails closed.
 - `update` deploys, `pull` only downloads, `self update` updates Composer, and `-u` is the sole compact update argument.
@@ -67,6 +69,7 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (`agent update`). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
+- 2026-09-24: `--skip-config` live on the decrees rig from a locally built 1.5.3b1 image — `./start.sh --skip-config` put `DLUX_SKIP_CONFIG_IMPORT=True` into web, celery and composer-agent, DjangoLux returned `skipped` with `config.json` byte-identical, and a plain `./start.sh` left the variable unset. 704 tests OK (beta-first now gates patches too).
 - 2026-09-24: the card-driven `agent-update` ran against PUBLISHED images for the first time — rig on 1.5.2b1, card offered 1.5.2 from `:beta`, the executor's detached helper pulled and recreated both containers and wrote its own ack (exit 0, 164s). Resident is 1.5.2, `deployer_version` reads 1.5.2b1 (the helper that performed it), and a re-check answers "the beta channel's current version".
 - 2026-09-24: 1.5.2b1 published to `:beta`; the decrees rig was put back on published 1.5.1, then host-updated to `:beta` from the registry (resident 1.5.2b1, deployer 1.5.1 published in agent-status). From there DjangoLux's card ran `agent-check` (tick: resident == the beta channel's current version) and the deployment check (15/15 OK). 701 tests OK.
 - 2026-09-23: 1.5.2 review round — 699 tests OK (18 new): `agent-check` orders versions by PEP 440, reports an unreadable registry as unknown rather than as latest or as an update, names a pair ahead of its tag correctly, and touches nothing on the deployment; an up-to-date pair is not recreated; blob reads follow an https redirect without forwarding the registry token and refuse a plaintext one, manifests still refuse every redirect. Live on decrees: the label read that had always returned `None` now reports 1.5.1 from `debeski/composer:latest`.
@@ -78,9 +81,9 @@
 - 2026-09-22: 1.4.0b3 pre-tag — 645 tests OK; the 3 new applier-recreate tests fail on the previous restart path. Live on decrees with 1.4.0b2: pair updated, resident check published the BETA channel with no manual CLI, DjangoLux 1.9.0b2 apply rolled back cleanly when its migration could not be applied (the bug b3 fixes).
 - 2026-09-22: 1.4.0b1 live on decrees: pair updated via `agent update`, `check` all-pass, `resident-commands` FAIL + `--fix` repair on a flat copy, `dlux check` wording, `agent check` publication, rollback 1.9.0b1->1.8.14b2 in 20 s. Found: resident check always stable; `--fix` exit 1 after repair. 1.4.0b2 pre-tag: 642 tests OK.
 - 2026-09-22: 1.4.0b1 pre-tag — 630 tests OK (6 skips), `release_tag v1.4.0b1` -> beta/advance `:beta`, local `composer:release-1.4.0b1` build + `scripts/smoke-test.sh` exit 0; wrappers unchanged since b2. New `resident-commands` check verified read-only against project-decrees/v2 (flags both services).
-- 2026-09-19: full unittest suite passed (619 tests, 6 skips) using isolated CI dependencies; CLI version/help and diff checks passed. Log: `.xpose/manual-agent-check-tests.log`; no production or Docker image validation.
+- 2026-09-24 skip-config: full suite 703 tests OK (6 skips), CLI help and diff checks pass; `.xclude/skip-config/tests.log`. New tests cover start/update opt-in and runtime injection into all services; DjangoLux separately verifies bootstrap/setup/manual import.
 ### One-line info about last time edited Docs:
-- 2026-09-19: README and agent protocol document manual image publication, opt-out, explicit paths/images, and failure behavior; v1.3.14b3 changelog opened after checking tags.
+- 2026-09-24: README and `docs/first-deploy.md` document --skip-config, compatibility and lifetime; 1.5.3 changelog/version opened after verifying 1.5.2 tag.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

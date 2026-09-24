@@ -399,7 +399,7 @@ class ChangelogSectionTests(unittest.TestCase):
 
 
 class BetaFirstGateTests(unittest.TestCase):
-    """A new minor or major must never first appear as stable (plan §1)."""
+    """No stable release may first appear as stable — patches included."""
 
     @staticmethod
     def _published(*tags):
@@ -436,11 +436,22 @@ class BetaFirstGateTests(unittest.TestCase):
 
         self.assertIn("Could not confirm", validate_beta_first("1.4.0", tags=["v1.4.0b1"], fetch_published=broken)[0])
 
-    def test_patches_and_prereleases_consult_nothing(self):
-        def must_not_be_called(_betas):
-            raise AssertionError("the gate consulted the registry for a release it does not cover")
+    def test_a_patch_is_gated_exactly_like_a_minor(self):
+        # The exemption is gone: beta first, every release. The 1.5.2 patch beta
+        # is what proved the resident-pair update against a published image.
+        errors = validate_beta_first(
+            "1.4.1", tags=["v1.4.0", "v1.4.0b1"], fetch_published=self._published("v1.4.0b1"),
+        )
+        self.assertIn("must be published as a beta first", errors[0])
+        self.assertEqual(validate_beta_first(
+            "1.4.1", tags=["v1.4.1b1"], fetch_published=self._published("v1.4.1b1"),
+        ), [])
 
-        for version in ("1.3.15", "1.4.1", "1.4.0b1", "1.4.0rc2"):
+    def test_a_prerelease_consults_nothing(self):
+        def must_not_be_called(_betas):
+            raise AssertionError("the gate consulted the registry for a prerelease")
+
+        for version in ("1.4.0b1", "1.4.0rc2", "1.4.1b3"):
             with self.subTest(version=version):
                 self.assertEqual(validate_beta_first(version, tags=None, fetch_published=must_not_be_called), [])
 

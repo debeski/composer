@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from composer.docker_compose_manager import DockerComposeMixin
+from composer.cli import parse_args
+from composer.launcher import DockerComposeLauncher
 
 
 class RuntimeOverrideHarness(DockerComposeMixin):
@@ -18,6 +20,31 @@ class RuntimeOverrideHarness(DockerComposeMixin):
 
 
 class RuntimeOverrideTests(unittest.TestCase):
+    def test_skip_config_reaches_every_service_without_changing_project_files(self):
+        import yaml
+
+        launcher = RuntimeOverrideHarness()
+        launcher.services = ["web", "celery", "composer-agent"]
+        launcher.skip_config = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            launcher.compose_runtime_override = Path(tmpdir) / "override.yml"
+            self.assertTrue(launcher.sync_runtime_compose_override())
+            services = yaml.safe_load(launcher.compose_runtime_override.read_text())["services"]
+            for service in launcher.services:
+                self.assertEqual(services[service]["environment"]["DLUX_SKIP_CONFIG_IMPORT"], "True")
+
+    def test_skip_config_is_opt_in_for_start_and_update(self):
+        with patch("sys.argv", ["composer", "--skip-config", "-d"]):
+            self.assertTrue(parse_args().skip_config)
+        with patch("sys.argv", ["composer"]):
+            self.assertFalse(parse_args().skip_config)
+        launcher = DockerComposeLauncher()
+        with patch.dict(os.environ, {}, clear=True):
+            launcher.configure_update(["--skip-config"])
+            self.assertTrue(launcher.skip_config)
+            launcher.configure_update([])
+            self.assertFalse(launcher.skip_config)
+
     def test_override_does_not_require_a_writable_project_directory(self):
         original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as project_dir:

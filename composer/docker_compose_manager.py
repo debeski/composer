@@ -260,6 +260,8 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
                 # project's compose files declare for the service.
                 service_env.append(f"      DEBUG: {json.dumps('True')}")
                 service_env.append(f"      DEBUG_STATUS: {json.dumps('True')}")
+            if getattr(self, "skip_config", False):
+                service_env.append('      DLUX_SKIP_CONFIG_IMPORT: "True"')
             lines.extend(
                 [
                     f"  {service}:",

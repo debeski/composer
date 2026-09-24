@@ -69,6 +69,10 @@ def parse_args():
         action="store_true",
         help="Development mode: also load the compose.dev.yml override (two compose files)",
     )
+    parser.add_argument(
+        "--skip-config", action="store_true",
+        help="Skip automatic config.json import and leave initial setup available (DjangoLux 1.9.4+)",
+    )
     migrations = parser.add_mutually_exclusive_group()
     migrations.add_argument(
         "-nm",
@@ -170,6 +174,10 @@ def parse_update_args(argv):
         "--force",
         action="store_true",
         help="Bypass the preflight version gate (allow updating onto an older image version)",
+    )
+    parser.add_argument(
+        "--skip-config", action="store_true",
+        help="Skip automatic config.json import and leave initial setup available (DjangoLux 1.9.4+)",
     )
     migrations = parser.add_mutually_exclusive_group()
     migrations.add_argument(

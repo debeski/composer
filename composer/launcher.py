@@ -126,6 +126,7 @@ class DockerComposeLauncher(
         # still collects static. Distinct from skip_post_start, which suppresses
         # the hook entirely for runs that do not target the application service.
         self.no_migrate = False
+        self.skip_config = False
         self.skip_post_start = False
         self.force_makemigrations = False
         self.secrets_source = None
@@ -308,6 +309,7 @@ class DockerComposeLauncher(
         self.build_images = update_args.build
         self.force = update_args.force
         self.no_migrate = update_args.no_migrate
+        self.skip_config = update_args.skip_config
         self.force_makemigrations = update_args.make_migrations
         self.target_app = update_args.app
         self.resolve_active_compose_files()
@@ -598,6 +600,7 @@ class DockerComposeLauncher(
                         print(f"composer {self.composer_version}")
                         return
                     self.no_migrate = args.no_migrate
+                    self.skip_config = args.skip_config
                     self.force_makemigrations = args.make_migrations
                     self.dev_mode = args.dev
                     self.compose_file = args.file

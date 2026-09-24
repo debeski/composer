@@ -106,16 +106,16 @@ IMAGE_REPOSITORY = "debeski/composer"
 
 
 def requires_beta_first(version) -> bool:
-    """True for a stable release that opens a new line: X.Y.0.
+    """True for every stable release. There is no direct-to-stable path.
 
-    A patch may still ship stable directly — a hotfix held back for a beta cycle
-    is usually worse than the risk it avoids. What must never happen is a new
-    minor or major reaching :latest before anyone ran it as a beta.
+    This gate used to exempt patches, on the theory that a hotfix held back for a
+    beta cycle is worse than the risk it avoids. The 1.5.2 cycle settled it the
+    other way: a *patch* beta caught a DjangoLux floor that excluded its own
+    prerelease, and proved the resident-pair update against a published image for
+    the first time — neither reachable from a unit test, both headed for
+    :latest. Beta first, every release, both repositories.
     """
-    parsed = Version(str(version))
-    if parsed.is_prerelease:
-        return False
-    return (tuple(parsed.release) + (0, 0, 0))[2] == 0
+    return not Version(str(version)).is_prerelease
 
 
 def prerelease_tags_for(version, tags) -> list:
@@ -174,7 +174,7 @@ def validate_beta_first(version, *, tags=None, fetch_published=published_image_t
     betas = prerelease_tags_for(version, tags)
     if not betas:
         return [
-            f"v{version} opens a new release line and must be published as a beta first: "
+            f"v{version} must be published as a beta first — every release is: "
             f"no v{version}bN or v{version}rcN tag is in this commit's history."
         ]
     try:
