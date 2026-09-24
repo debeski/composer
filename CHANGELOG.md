@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.5.2
+
+The stable release of the 1.5.2 line, identical in scope to `1.5.2b1` below.
+Accepted on a reference deployment before this tag: the rig was put back on the
+published 1.5.1 (DjangoLux's card refused all four operations and named
+`./start.sh agent update`), updated to `:beta` from the registry, and from there
+answered `agent-check` with "resident is the beta channel's current version" and
+a deployment check with 15/15 OK. The beta also found a DjangoLux bug worth
+keeping in mind here: an operation floor written as `1.5.2` excludes `1.5.2b1`,
+because PEP 440 orders a prerelease below its release.
+
 ## v1.5.2b1
 
 - **The Check Carries Its Own Repair Preview**: `check` now returns the dry-run repairs and their compose digest alongside the findings, so DjangoLux's card runs one operation to learn both what is wrong and what would fix it — and the apply already has the digest it must match. `check-fix-preview` remains as an alias for a deployment still on DjangoLux 1.9.2.
