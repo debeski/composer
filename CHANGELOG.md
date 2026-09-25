@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.3
+
+The stable release of the 1.5.3 line, identical in scope to `1.5.3b2` below.
+Accepted on `testbed-dlux` before this tag: `--skip-config` against DjangoLux
+1.9.4b1 (every runtime service received the flag, a plain deploy dropped it),
+the published beta pair pulled with `self update` and `agent update`, and an
+unpinned `dlux update` on the beta channel installing 1.9.4b1 over 1.9.3 — the
+case `1.5.3b1` got wrong — with the deployment check passing and deployer and
+resident on the same version.
+
 ## v1.5.3b2
 
 - **Unpinned `dlux update` Follows the Deployment Channel**: `apply_package_update()` now reads `state/channel-policy.json` (an unreadable policy stays stable) and passes the channel to the release source, so `composer dlux update` without `--version` installs the newest release on the channel `dlux check` just reported. It always resolved stable before, installing 1.9.3 on a beta-channel deployment that had been offered 1.9.4b1. The Options card was unaffected: it sends an explicit version. `StagedRelease.obtain()` accepts the channel too (a staged wheel is already one exact version), which also stops `--dry-run --staged-wheel` from failing on the unexpected keyword.
