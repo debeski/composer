@@ -124,7 +124,9 @@ class StagedRelease:
         # future caller skips that validation.
         return self.runtime.downloads / Path(self.filename).name
 
-    def obtain(self, target_version="", *, workdir=None):
+    def obtain(self, target_version="", *, channel=None, workdir=None):
+        # `channel` is accepted for parity with `dlux_release_source.obtain` and
+        # ignored: a staged release is already one exact, verified version.
         version = str(target_version or self.version)
         if version != self.version:
             raise release_source.ReleaseSourceError(

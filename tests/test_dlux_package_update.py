@@ -200,6 +200,53 @@ class ApplyFailureTests(_Base):
         self.assertEqual(self.runtime.read_active()["version"], "1.7.1")
 
 
+
+class _ChannelRecordingSource(_FakeSource):
+    """Remembers which channel each unpinned resolve was asked for."""
+
+    def __init__(self, root: Path):
+        super().__init__(root, version="1.9.4b1")
+        self.channels = []
+
+    def obtain(self, target_version="", *, workdir=None, channel=None, **kwargs):
+        self.channels.append(channel)
+        return super().obtain(target_version, workdir=workdir, **kwargs)
+
+
+class ChannelTests(_Base):
+    """An unpinned update resolves on the deployment's channel, as `dlux check` does.
+
+    Before 1.5.3b2 the apply path passed no channel, so a beta-channel deployment
+    that `dlux check` had just offered 1.9.4b1 installed the newest stable instead.
+    """
+
+    def _update(self, **kwargs):
+        source = _ChannelRecordingSource(self.root)
+        ops = _Ops()
+        result = apply_package_update(self.runtime, restart=ops.restart, health_check=ops.health,
+                                      source=source, workdir=self.root / "work", **kwargs)
+        self.assertTrue(result.ok, result.message)
+        return source.channels
+
+    def _write_policy(self, text):
+        self.runtime.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.runtime.state_dir / "channel-policy.json").write_text(text, encoding="utf-8")
+
+    def test_a_beta_policy_resolves_on_the_beta_channel(self):
+        self._write_policy(json.dumps({"schema_version": 1, "channel": "beta"}))
+        self.assertEqual(self._update(), ["beta"])
+
+    def test_no_policy_resolves_on_stable(self):
+        self.assertEqual(self._update(), ["stable"])
+
+    def test_a_malformed_policy_resolves_on_stable(self):
+        self._write_policy("{not json")
+        self.assertEqual(self._update(), ["stable"])
+
+    def test_an_explicit_channel_wins_over_the_policy(self):
+        self._write_policy(json.dumps({"schema_version": 1, "channel": "beta"}))
+        self.assertEqual(self._update(channel="stable"), ["stable"])
+
 class RollbackTests(_Base):
     def test_rolls_back_to_the_previous_staged_release(self):
         self._stage("1.7.1")

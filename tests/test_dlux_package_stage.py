@@ -65,6 +65,12 @@ class StagedReleaseTests(unittest.TestCase):
         self.assertEqual(candidate.url, "", "nothing was fetched, so there is no source URL")
         self.assertTrue((unpacked / "dlux" / "release-manifest.json").is_file())
 
+    def test_a_channel_is_accepted_and_changes_nothing(self):
+        """`apply_package_update` passes the deployment channel to every source."""
+        staged = self._stage()
+        candidate, _unpacked = staged.obtain(channel="beta", workdir=Path(self._tmp.name) / "work")
+        self.assertEqual(candidate.version, "1.8.7")
+
     def test_bytes_that_do_not_match_the_agents_digest_are_refused(self):
         """The volume is writable by celery; the digest arrived over the socket."""
         staged = self._stage()

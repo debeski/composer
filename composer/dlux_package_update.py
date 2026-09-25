@@ -23,6 +23,7 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
+from . import dlux_channel
 from . import dlux_release_source as release_source
 from .dlux_runtime import DluxRuntime, DluxRuntimeError, version_sort_key
 
@@ -89,10 +90,14 @@ def apply_package_update(
     progress: Optional[Callable[[str], None]] = None,
     keep_releases: int = DEFAULT_KEEP_RELEASES,
     workdir=None,
+    channel: Optional[str] = None,
 ) -> PackageUpdateResult:
     """Fetch, stage, activate, restart, health-check — and undo if unhealthy.
 
-    `restart` and `health_check` each return ``(ok, detail)``.
+    `restart` and `health_check` each return ``(ok, detail)``. Without an
+    explicit ``channel`` the deployment's published policy decides which
+    releases an unpinned update may pick, exactly as `dlux check` does; an
+    unreadable policy reads as stable.
     """
     say = progress or _noop
     steps: List[str] = []
@@ -103,7 +108,9 @@ def apply_package_update(
 
     try:
         step("resolving", "Resolving the DjangoLux release")
-        candidate, unpacked = source.obtain(target_version, workdir=workdir)
+        if channel is None:
+            channel, _policy_error = dlux_channel.read_policy(runtime.state_dir)
+        candidate, unpacked = source.obtain(target_version, channel=channel, workdir=workdir)
     except Exception as exc:
         return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
 

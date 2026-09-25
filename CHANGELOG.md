@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.3b2
+
+- **Unpinned `dlux update` Follows the Deployment Channel**: `apply_package_update()` now reads `state/channel-policy.json` (an unreadable policy stays stable) and passes the channel to the release source, so `composer dlux update` without `--version` installs the newest release on the channel `dlux check` just reported. It always resolved stable before, installing 1.9.3 on a beta-channel deployment that had been offered 1.9.4b1. The Options card was unaffected: it sends an explicit version. `StagedRelease.obtain()` accepts the channel too (a staged wheel is already one exact version), which also stops `--dry-run --staged-wheel` from failing on the unexpected keyword.
+
 ## v1.5.3b1
 
 - **Manual First-Deploy Setup**: `--skip-config` on start/update injects `DLUX_SKIP_CONFIG_IMPORT=True` into service environments, including migrator init containers and web requests. DjangoLux 1.9.4+ skips automatic `config.json` bootstrap while keeping migrations, static collection, manual import, and the original file intact.
