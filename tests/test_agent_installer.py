@@ -120,16 +120,20 @@ class AgentInstallerTests(unittest.TestCase):
             self.assertTrue(result["applied"])
             self.assertNotIn("composer-updater:", updated)
             self.assertIn("composer-agent:", updated)
-            # The agent-only topology deploys from the agent itself, so it must
-            # keep the read-only file override to read the project's 0600 secrets.
+            # Straight to the hardened topology: the executor deploys, so it alone
+            # carries the secrets read capability, and the proxy is read-only.
+            self.assertIn("composer-executor:", updated)
             self.assertIn("cap_drop:\n      - ALL", updated)
-            self.assertIn("cap_add:\n      - DAC_READ_SEARCH", updated)
+            self.assertIn("cap_add:\n      - DAC_OVERRIDE", updated)
+            self.assertNotIn("DAC_READ_SEARCH", updated)
+            self.assertNotIn("POST: 1", updated)
             self.assertIn("composer_agent_state:", updated)
             self.assertIn('COMPOSER_AGENT_RESTART_SERVICES: "web,celery,caddy"', updated)
             self.assertIn(
-                'COMPOSER_EXCLUDE_SERVICES: "composer-agent,docker-socket-proxy,db,redis"',
+                'COMPOSER_EXCLUDE_SERVICES: "composer-agent,composer-executor,docker-socket-proxy,db,redis"',
                 updated,
             )
+            self.assertIn("composer-executor", result["command"])
             self.assertEqual((root / "compose.yml").stat().st_mode & 0o777, 0o600)
             backup = Path(result["backup_root"]) / "compose.yml"
             self.assertEqual(backup.read_text(encoding="utf-8"), COMPOSE)

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.5.4b1
+
+- **`agent enable` Always Hardens**: `_transform_compose()` writes the hardened trio (read-only `docker-socket-proxy`, `composer-executor`, `composer-agent`) from a legacy `composer-updater` block, and routes an existing agent-only block through `_transform_to_hardened()`. The agent-only template with `POST`/`EXEC`/`VOLUMES`/`NETWORKS: 1` on the proxy (`_agent_stack()`) is gone; its redeploy command now recreates `composer-executor` too, and `check --fix` no longer chains `executor enable` after it.
+- **`docker-proxy` Check**: `composer check` reads the resolved `docker-socket-proxy` environment and FAILs when `POST` or `EXEC` is on, since either lets a client start a privileged container. `check --fix` re-checks it after repairing, like `resident-commands`.
+- **`DAC_OVERRIDE` Replaces `DAC_READ_SEARCH`**: the deploying role reads the 0600 `.secrets/.env` with `DAC_OVERRIDE`, part of Docker's default set. `DAC_READ_SEARCH` also unlocks `open_by_handle_at`, which escapes the `${PWD}` bind mount onto the host filesystem. `_ensure_deployer_read_cap()` swaps it on the deployer and drops it from every other role.
+- **Pinned `docker-socket-proxy`**: generated blocks use `tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b5…` (`DOCKER_SOCKET_PROXY_IMAGE`) instead of `:latest`. `_ensure_proxy_read_only()` repins an unpinned tag and turns the proxy's write switches off on hardened stacks during `check --fix`; an operator's own digest pin is kept.
+- **Pinned Build Inputs**: GitHub Actions in `ci.yml`/`release.yml` are pinned by commit SHA and the Dockerfile base by digest (`python:3.14-slim@sha256:51dafde8…`); `.github/dependabot.yml` refreshes both weekly. `debeski/composer` stays on its channel tags, which `agent update` and channel switching follow by design.
+
 ## v1.5.3
 
 The stable release of the 1.5.3 line, identical in scope to `1.5.3b2` below.

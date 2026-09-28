@@ -90,15 +90,35 @@ authority (defense in depth — never trust the caller).
 Both roles run `cap_drop: ALL` with `no-new-privileges:true`. But the deploying
 role runs `docker compose up`, which reads the project's `0600` `.secrets/.env`
 locally to resolve secrets before handing the config to dockerd. `cap_drop: ALL`
-strips `CAP_DAC_READ_SEARCH`, so even UID 0 cannot read a file it does not own —
+strips `CAP_DAC_OVERRIDE`, so even UID 0 cannot read a file it does not own —
 the deploy then fails the secrets guard with a Permission-denied error, and the
 only workaround is a manual per-host `setfacl`, which defeats unattended inline
-updates. The deploying role therefore carries `cap_add: [DAC_READ_SEARCH]` — a
-**read-only** file/dir override (no write, exec, or setuid bypass). In the
-hardened topology that is `composer-executor` only; the network-facing
-`composer-agent` never deploys and keeps no file caps. In the agent-only
-topology the agent is the deployer and carries the cap. Regressing this (dropping
-the `cap_add`) breaks every inline deploy — it is asserted in the stack tests.
+updates. The deploying role therefore carries `cap_add: [DAC_OVERRIDE]`, which is
+part of Docker's default capability set. The project mount is `:ro`, so it grants
+no write there. In the hardened topology that is `composer-executor` only; the
+network-facing `composer-agent` never deploys and keeps no file caps. Regressing
+this (dropping the `cap_add`) breaks every inline deploy — it is asserted in the
+stack tests.
+
+Never `DAC_READ_SEARCH`, which stacks generated through 1.5.3 carried. Docker
+leaves it out of the default set because it also unlocks `open_by_handle_at`,
+which can reach any file on the host filesystem behind a bind mount (the
+"Shocker" escape; the default seccomp profile allows the call once the cap is
+granted). `composer check --fix` swaps it for `DAC_OVERRIDE` on every role.
+
+### The proxy is read-only and pinned
+
+`docker-socket-proxy` runs with `POST: 0` and `EXEC: 0`: any write endpoint lets
+a client start a privileged container, which is root on the host. `composer
+check` reports a write-enabled proxy as a `docker-proxy` FAIL. Its image is
+pinned by version and digest (`DOCKER_SOCKET_PROXY_IMAGE` in
+`composer/agent_installer.py`), because it mounts `docker.sock`. `composer check
+--fix` repins an unpinned tag and switches the write endpoints off in the
+generated block; an image the operator already pinned by digest is kept.
+
+`agent enable` no longer produces the agent-only topology: from a legacy
+`composer-updater` block or an existing agent-only block it writes the hardened
+trio directly.
 
 ---
 

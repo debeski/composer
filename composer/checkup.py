@@ -302,6 +302,44 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             fix="Run 'composer check --fix' to insert the 'run' subcommand.",
         )
 
+    # The switches that make docker-socket-proxy a Docker write path. Any one of
+    # them lets a client that reaches the proxy start a privileged container.
+    PROXY_WRITE_SWITCHES = ("POST", "EXEC")
+
+    def _check_docker_proxy(self) -> Optional[Dict[str, Any]]:
+        """FAIL when docker-socket-proxy accepts writes. None when unreadable."""
+        if "docker-socket-proxy" not in set(self.services):
+            return None
+        ok, out, _err = self.run_docker_compose(["config", "--format", "json"], timeout=20)
+        if not ok:
+            return None
+        try:
+            proxy = (json.loads(out).get("services") or {}).get("docker-socket-proxy") or {}
+        except (ValueError, AttributeError):
+            return None
+        environment = proxy.get("environment") or {}
+        if isinstance(environment, list):
+            environment = dict(item.split("=", 1) for item in environment if "=" in item)
+        enabled = [
+            name for name in self.PROXY_WRITE_SWITCHES
+            if str(environment.get(name, "0")).strip().strip("'\"").lower()
+            not in {"0", "false", "no", "off", ""}
+        ]
+        if not enabled:
+            return _result(OK, "docker-proxy", "docker-socket-proxy is read-only (POST and EXEC off).")
+        return _result(
+            FAIL,
+            "docker-proxy",
+            "docker-socket-proxy accepts writes (" + ", ".join(f"{name}=1" for name in enabled)
+            + "): anything that reaches it can start a privileged container, which is root "
+            "on this host.",
+            fix=(
+                "Run 'composer check --fix': it hardens the stack so composer-executor holds "
+                "Docker authority and the proxy stays read-only. A proxy outside the generated "
+                "Composer block must be edited by hand."
+            ),
+        )
+
     def _check_removed_services(self) -> Dict[str, Any]:
         present = sorted(OBSOLETE_SERVICES.intersection(self.services))
         if not present:
@@ -682,6 +720,9 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             resident = self._check_resident_commands()
             if resident is not None:
                 results.append(resident)
+            proxy = self._check_docker_proxy()
+            if proxy is not None:
+                results.append(proxy)
             results.append(self._check_removed_services())
             results.append(self._check_dlux_updater_executor())
             results.append(self._check_proxy_routes())
@@ -692,9 +733,13 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         fixed = switched + (self._maybe_fix(args, results) if args.fix else [])
         if args.fix:
             # A repaired finding must not fail the run: report the file as it now stands.
+            rechecks = {
+                "resident-commands": self._check_resident_commands,
+                "docker-proxy": self._check_docker_proxy,
+            }
             for index, result in enumerate(results):
-                if result["name"] == "resident-commands" and result["level"] == FAIL:
-                    rechecked = self._check_resident_commands()
+                if result["name"] in rechecks and result["level"] == FAIL:
+                    rechecked = rechecks[result["name"]]()
                     if rechecked is not None:
                         results[index] = rechecked
 
@@ -933,9 +978,9 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if legacy:
             consequences.extend(
                 [
-                    "Migrate composer-updater to composer-agent.",
-                    "Create or refresh docker-socket-proxy and composer-agent.",
-                    "Then harden that agent topology into composer-executor in the same run.",
+                    "Migrate composer-updater to the hardened topology: composer-agent, "
+                    "composer-executor (sole Docker-write authority) and a read-only, "
+                    "digest-pinned docker-socket-proxy.",
                 ]
             )
         if needs_init_containers:
@@ -972,9 +1017,10 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if needs_agent_block_migration:
             consequences.append(
                 "Normalize the generated Composer resident block: use nested "
-                "agent/executor run commands and add cap_add: DAC_READ_SEARCH to "
-                "composer-executor when missing so it can read the project's 0600 "
-                ".secrets/.env to deploy."
+                "agent/executor run commands; give composer-executor cap_add: "
+                "DAC_OVERRIDE (replacing DAC_READ_SEARCH) so it can read the project's "
+                "0600 .secrets/.env to deploy; pin docker-socket-proxy by digest and "
+                "switch off its write endpoints."
             )
         if needs_updater_migration:
             consequences.append(
@@ -1147,25 +1193,15 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             try:
                 outcome = enable_agent(".", compose_file=args.file or "", apply=True)
                 fixes.append(
-                    _result(OK, "fix:agent-enable", "Migrated to composer-agent. Backup: " + (outcome.get("backup_root") or "n/a"))
+                    _result(
+                        OK,
+                        "fix:agent-enable",
+                        "Migrated composer-updater to the hardened composer-agent + "
+                        "composer-executor topology. Backup: " + (outcome.get("backup_root") or "n/a"),
+                    )
                 )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:agent-enable", f"Migration failed: {exc}"))
-            else:
-                from .agent_installer import enable_executor
-
-                try:
-                    outcome = enable_executor(".", compose_file=args.file or "", apply=True)
-                    fixes.append(
-                        _result(
-                            OK,
-                            "fix:executor-enable",
-                            "Hardened migrated composer-agent into the executor topology. Backup: "
-                            + (outcome.get("backup_root") or "n/a"),
-                        )
-                    )
-                except AgentInstallError as exc:
-                    fixes.append(_result(FAIL, "fix:executor-enable", f"Hardening failed: {exc}"))
         if needs_hardening:
             from .agent_installer import AgentInstallError, enable_executor
 
@@ -1191,8 +1227,9 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                         OK,
                         "fix:resident-block",
                         "Normalized the Composer resident block: nested 'agent run'/'executor run' "
-                        "commands, and cap_add: DAC_READ_SEARCH on composer-executor where it was "
-                        "missing. Recreate the pair to apply. Backup: "
+                        "commands, DAC_OVERRIDE as composer-executor's only added capability, and a "
+                        "digest-pinned read-only docker-socket-proxy. Recreate docker-socket-proxy, "
+                        "composer-executor and composer-agent to apply. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )
                 )

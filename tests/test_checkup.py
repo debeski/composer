@@ -511,6 +511,40 @@ class ResidentCommandTests(unittest.TestCase):
             self.assertIsNone(self.launcher._check_resident_commands())
 
 
+class DockerProxyCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web", "composer-agent", "docker-socket-proxy"]
+
+    def _check(self, environment, compose_ok=True):
+        model = json.dumps({"services": {"docker-socket-proxy": {"environment": environment}}})
+        with patch.object(self.launcher, "run_docker_compose", return_value=(compose_ok, model, "")):
+            return self.launcher._check_docker_proxy()
+
+    def test_the_agent_only_proxy_fails(self):
+        result = self._check({"CONTAINERS": "1", "POST": "1", "EXEC": "1"})
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("POST=1", result["message"])
+        self.assertIn("EXEC=1", result["message"])
+        self.assertIn("--fix", result["fix"])
+
+    def test_the_hardened_proxy_is_ok(self):
+        result = self._check({"CONTAINERS": "1", "POST": "0", "EXEC": "0"})
+        self.assertEqual(result["level"], OK)
+
+    def test_unset_switches_are_off(self):
+        self.assertEqual(self._check({"CONTAINERS": "1"})["level"], OK)
+
+    def test_list_form_and_word_values_are_read(self):
+        self.assertEqual(self._check(["POST=true", "EXEC=0"])["level"], FAIL)
+        self.assertEqual(self._check(["POST=false", "EXEC=no"])["level"], OK)
+
+    def test_no_proxy_or_unreadable_model_reports_nothing(self):
+        self.assertIsNone(self._check({"POST": "1"}, compose_ok=False))
+        self.launcher.services = ["web"]
+        self.assertIsNone(self._check({"POST": "1"}))
+
+
 class CheckupRunTests(unittest.TestCase):
     def test_failing_docker_yields_nonzero_exit(self):
         launcher = DockerComposeLauncher()
@@ -554,7 +588,8 @@ class CheckupRunTests(unittest.TestCase):
         ):
             launcher.run_checkup(_args(fix=True))
         enable.assert_called_once()
-        harden.assert_called_once()
+        # agent enable lands on the hardened topology itself.
+        harden.assert_not_called()
 
     def test_fix_hardens_agent_topology_through_enable_executor(self):
         launcher = DockerComposeLauncher()
