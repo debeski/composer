@@ -22,6 +22,19 @@ COMPOSER_EXEC_SOCKET_DIR = "/run/composer-exec"
 COMPOSER_EXEC_SOCKET_PATH = "/run/composer-exec/composer-exec.sock"
 COMPOSER_EXEC_SOCKET_VOLUME = "composer_exec_sock"
 MINIMUM_DLUX_VERSION = (1, 5, 0)
+# Pinned by digest: this image holds the host's docker.sock, so whoever can move
+# its tag is root on every deployment. Bump both parts together, deliberately.
+DOCKER_SOCKET_PROXY_IMAGE = (
+    "tecnativa/docker-socket-proxy:v0.5.0"
+    "@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
+)
+# Lets the deploying role read the project's 0600 .secrets/.env. DAC_OVERRIDE is
+# in Docker's default set; DAC_READ_SEARCH is not, because it also unlocks
+# open_by_handle_at, which walks out of any bind mount onto the host filesystem.
+DEPLOYER_READ_CAP = "DAC_OVERRIDE"
+RETIRED_DEPLOYER_READ_CAP = "DAC_READ_SEARCH"
+# Socket-proxy switches that grant Docker write authority.
+PROXY_WRITE_SWITCHES = ("POST", "EXEC", "NETWORKS", "VOLUMES")
 SAFE_RESTART_CANDIDATES = ("web", "celery", "smtp-relay", "caddy", "nginx")
 RESTART_LABELS = {
     "web": "safe",
@@ -136,95 +149,6 @@ def _networks_block(names: list[str]) -> str:
     return f"\n    networks:\n{entries}"
 
 
-def _agent_stack(project_slug: str, services: set[str], topology: Dict[str, Any]) -> str:
-    restart_services = [name for name in SAFE_RESTART_CANDIDATES if name in services]
-    excluded_services = ["composer-agent", "docker-socket-proxy"]
-    excluded_services.extend(name for name in PROTECTED_SERVICE_NAMES if name in services)
-    restart_value = ",".join(restart_services)
-    exclusion_value = ",".join(excluded_services)
-    image = topology["web_image"]
-    version_label = topology["version_label"]
-    proxy_networks = _networks_block(topology["proxy_networks"])
-    agent_networks = _networks_block(topology["agent_networks"])
-    return f'''{COMPOSER_AGENT_START}
-  docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:latest
-    restart: always
-    labels:
-      org.dlux.restart: "protected"
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    environment:
-      CONTAINERS: 1
-      IMAGES: 1
-      NETWORKS: 1
-      VOLUMES: 1
-      EVENTS: 1
-      EXEC: 1
-      POST: 1
-      INFO: 1
-      PING: 1
-      VERSION: 1
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro{proxy_networks}
-
-  composer-agent:
-    image: debeski/composer:latest
-    restart: unless-stopped
-    labels:
-      org.dlux.restart: "protected"
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    # Read-only file override so this uncapped UID-0 process can read the
-    # project's 0600 .secrets/.env to deploy. No write/exec/setuid bypass.
-    cap_add:
-      - DAC_READ_SEARCH
-    working_dir: "${{PWD}}"
-    command:
-      - agent
-      - run
-      - --trigger-file
-      - /opt/dlux-runtime/state/image-update-request.json
-      - --status-file
-      - /opt/dlux-runtime/state/deploy-status.json
-      - --bridge-dir
-      - /opt/dlux-runtime/state/agent
-      - --interval
-      - "2"
-      - --check-image
-      - {image}
-      - --availability-file
-      - /opt/dlux-runtime/state/image-available.json
-      - --check-interval
-      - "900"
-    environment:
-      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
-      WEB_IMAGE: "{image}"
-      COMPOSER_CONTROL_URL: "${{COMPOSER_CONTROL_URL:-}}"
-      COMPOSER_ENROLLMENT_TOKEN: "${{COMPOSER_ENROLLMENT_TOKEN:-}}"
-      COMPOSER_AGENT_STATE_DIR: "/var/lib/composer-agent"
-      COMPOSER_VERSION_LABEL: "{version_label}"
-      COMPOSER_RELEASE_MANIFEST_LABEL: "org.dlux.project.release-manifest"
-      COMPOSER_ACTIVE_VERSION_FILE: "/opt/dlux-runtime/state/active.json"
-      COMPOSER_ACTIVE_VERSION_KEY: "version"
-      COMPOSER_STATUS_FILE: "/opt/dlux-runtime/state/deploy-status.json"
-      COMPOSER_WATCH_SELF_SERVICE: "composer-agent"
-      COMPOSER_EXCLUDE_SERVICES: "{exclusion_value}"
-      COMPOSER_AGENT_RESTART_SERVICES: "{restart_value}"
-    volumes:
-      - "${{PWD}}:${{PWD}}:ro"
-      - dlux_runtime:/opt/dlux-runtime:rw
-      - composer_agent_state:/var/lib/composer-agent:rw
-    depends_on:
-      docker-socket-proxy:
-        condition: service_started{agent_networks}
-{COMPOSER_AGENT_END}'''
-
-
 def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, Any]) -> str:
     """The hardened topology block: a read-only docker-socket-proxy, a
     composer-executor holding the real docker.sock (the sole write authority), and
@@ -242,7 +166,7 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
     agent_networks = _networks_block(topology["agent_networks"])
     return f'''{COMPOSER_AGENT_START}
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:latest
+    image: {DOCKER_SOCKET_PROXY_IMAGE}
     restart: always
     labels:
       org.dlux.restart: "protected"
@@ -273,10 +197,10 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # Read-only file override so this uncapped UID-0 process can read the
-    # project's 0600 .secrets/.env to deploy. No write/exec/setuid bypass.
+    # Lets this UID-0 process read the project's 0600 .secrets/.env to deploy;
+    # the project mount is read-only, so it gains no write there.
     cap_add:
-      - DAC_READ_SEARCH
+      - {DEPLOYER_READ_CAP}
     working_dir: "${{PWD}}"
     command:
       - executor
@@ -361,38 +285,91 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
 {COMPOSER_AGENT_END}'''
 
 
+def _generated_block_span(contents: str):
+    """(start, end) of the generated Composer resident block, or None."""
+    if COMPOSER_AGENT_START not in contents or COMPOSER_AGENT_END not in contents:
+        return None
+    start = contents.index(COMPOSER_AGENT_START)
+    return start, contents.index(COMPOSER_AGENT_END, start) + len(COMPOSER_AGENT_END)
+
+
 def _ensure_deployer_read_cap(contents: str, project_slug: str) -> str:
-    """Add ``cap_add: DAC_READ_SEARCH`` to the deploying role when missing.
+    """Give the deploying role ``cap_add: DAC_OVERRIDE`` and nothing broader.
 
     The deployer runs ``docker compose up``, which reads the project's 0600
-    ``.secrets/.env``; under ``cap_drop: ALL`` a UID-0 process without
-    ``CAP_DAC_READ_SEARCH`` cannot read a file it does not own, so the deploy
-    fails the secrets guard. Stacks generated before the capability was required
-    self-heal here. Targeted insert rather than a full block re-render, because
-    the dlux scaffold and the composer generator emit slightly different blocks;
-    a scoped edit is safe for both. No-op when the cap is already present.
+    ``.secrets/.env``; under ``cap_drop: ALL`` a UID-0 process cannot read a
+    file it does not own, so the deploy fails the secrets guard. Stacks from
+    before the capability was required gain it here, and stacks that carry the
+    retired ``DAC_READ_SEARCH`` have it swapped out on every role. Targeted edit
+    rather than a full block re-render, because the dlux scaffold and the
+    composer generator emit slightly different blocks.
     """
-    if COMPOSER_AGENT_START not in contents:
+    span = _generated_block_span(contents)
+    if span is None:
         return contents
-    start = contents.index(COMPOSER_AGENT_START)
-    end = contents.index(COMPOSER_AGENT_END, start) + len(COMPOSER_AGENT_END)
+    start, end = span
     block = contents[start:end]
     bodies = _block_bodies(block)
     deployer = "composer-executor" if "composer-executor" in bodies else (
         "composer-agent" if "composer-agent" in bodies else "")
     if not deployer:
         return contents
-    body = bodies[deployer]
-    if "DAC_READ_SEARCH" in body:
+    retired = re.compile(rf"(?m)^      - {RETIRED_DEPLOYER_READ_CAP}[ \t]*\n")
+    granted = re.compile(rf"(?m)^      - {DEPLOYER_READ_CAP}[ \t]*$")
+    for service, body in bodies.items():
+        healed = body
+        if service == deployer:
+            if retired.search(healed):
+                replacement = "" if granted.search(healed) else f"      - {DEPLOYER_READ_CAP}\n"
+                healed = retired.sub(replacement, healed, count=1)
+            if not granted.search(healed):
+                cap_drop = re.compile(r"(?m)^    cap_drop:\n      - ALL\n")
+                if not cap_drop.search(healed):
+                    raise AgentInstallError(
+                        f"Cannot add the secrets read capability: {deployer} has no recognized cap_drop block."
+                    )
+                healed = cap_drop.sub(
+                    f"    cap_drop:\n      - ALL\n    cap_add:\n      - {DEPLOYER_READ_CAP}\n",
+                    healed,
+                    count=1,
+                )
+        else:
+            healed = retired.sub("", healed)
+            healed = re.sub(r"(?m)^    cap_add:[ \t]*\n(?!      - )", "", healed)
+        if healed != body:
+            block = block.replace(body, healed, 1)
+    return contents[:start] + block + contents[end:]
+
+
+def _ensure_proxy_read_only(contents: str, project_slug: str) -> str:
+    """Pin the generated docker-socket-proxy and switch off its write endpoints.
+
+    Only for the hardened topology, where composer-executor holds the socket
+    and the proxy is the agent's read-only view. An image already pinned by
+    digest is the operator's choice and is left alone.
+    """
+    span = _generated_block_span(contents)
+    if span is None:
         return contents
-    cap_drop = re.compile(r"(?m)^    cap_drop:\n      - ALL\n")
-    if not cap_drop.search(body):
-        raise AgentInstallError(
-            f"Cannot add the secrets read capability: {deployer} has no recognized cap_drop block."
-        )
-    healed = cap_drop.sub(
-        "    cap_drop:\n      - ALL\n    cap_add:\n      - DAC_READ_SEARCH\n", body, count=1
+    start, end = span
+    block = contents[start:end]
+    body = _block_bodies(block).get("docker-socket-proxy")
+    if not body:
+        return contents
+    healed = re.sub(
+        r"(?m)^(    image:[ \t]*)tecnativa/docker-socket-proxy(?::[A-Za-z0-9._-]+)?[ \t]*$",
+        lambda match: match.group(1) + DOCKER_SOCKET_PROXY_IMAGE,
+        body,
     )
+
+    def _off(match):
+        value = match.group(2).strip().strip("'\"").lower()
+        return match.group(0) if value in {"0", "false", "no", "off"} else f"      {match.group(1)}: 0"
+
+    switches = "|".join(PROXY_WRITE_SWITCHES)
+    healed = re.sub(rf"(?m)^      ({switches}):[ \t]*(.*?)[ \t]*$", _off, healed)
+    if healed == body:
+        return contents
     return contents[:start] + block.replace(body, healed, 1) + contents[end:]
 
 
@@ -427,7 +404,9 @@ def _transform_compose(contents: str, project_slug: str) -> str:
             raise AgentInstallError("The project contains both agent and legacy updater services.")
         if not re.search(r"(?m)^  composer_agent_state:\s*$", contents):
             raise AgentInstallError("The existing Composer agent has no dedicated state volume.")
-        return _ensure_nested_role_commands(_ensure_deployer_read_cap(contents, project_slug))
+        # An agent-only block keeps Docker authority on the network-facing agent
+        # through a write-enabled proxy; `agent enable` never leaves one behind.
+        return _transform_to_hardened(contents, project_slug)
     if contents.count(COMPOSER_UPDATER_START) != 1 or contents.count(COMPOSER_UPDATER_END) != 1:
         raise AgentInstallError("No single recognized generated composer-updater block was found.")
     services = _service_names(contents)
@@ -445,11 +424,13 @@ def _transform_compose(contents: str, project_slug: str) -> str:
         raise AgentInstallError(
             "The legacy updater references undeclared networks: " + ", ".join(missing)
         )
-    updated = contents[:start] + _agent_stack(project_slug, services, topology) + contents[end:]
+    updated = contents[:start] + _hardened_stack(project_slug, services, topology) + contents[end:]
     volume_anchor = re.compile(r"(?m)^  dlux_runtime:\s*$")
     if len(volume_anchor.findall(updated)) != 1:
         raise AgentInstallError("Expected one generated dlux_runtime volume anchor.")
-    updated = volume_anchor.sub("  dlux_runtime:\n  composer_agent_state:", updated, count=1)
+    updated = volume_anchor.sub(
+        f"  dlux_runtime:\n  composer_agent_state:\n  {COMPOSER_EXEC_SOCKET_VOLUME}:", updated, count=1
+    )
     return updated.replace(
         "  # Isolated path from composer-updater to the docker-socket-proxy only.",
         "  # Isolated path from composer-agent to the docker-socket-proxy only.",
@@ -730,7 +711,8 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
     if "composer-executor" in services:
         if "  composer-executor:\n" not in contents:
             raise AgentInstallError("An unmarked composer-executor service already exists.")
-        return _ensure_nested_role_commands(_ensure_deployer_read_cap(contents, project_slug))
+        normalized = _ensure_proxy_read_only(_ensure_deployer_read_cap(contents, project_slug), project_slug)
+        return _ensure_nested_role_commands(normalized)
     if "composer-agent" not in services or "docker-socket-proxy" not in services:
         raise AgentInstallError("The marked agent block is not a recognized topology.")
     if COMPOSER_UPDATER_START in contents or "  composer-updater:\n" in contents:
@@ -1215,7 +1197,10 @@ def enable_agent(
         project_dir,
         compose_file=compose_file,
         transform=_transform_compose,
-        redeploy_command="docker compose up -d --force-recreate docker-socket-proxy composer-agent",
+        redeploy_command=(
+            "docker compose up -d --force-recreate "
+            "docker-socket-proxy composer-executor composer-agent"
+        ),
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,

@@ -1,0 +1,119 @@
+name: demo_project
+
+services:
+  db:
+    image: postgres:17
+    networks:
+      - internal
+  web:
+    image: ${WEB_IMAGE:-registry.example/demo:latest}
+    networks:
+      - internal
+  celery:
+    image: ${WEB_IMAGE:-registry.example/demo:latest}
+    networks:
+      - egress
+      - internal
+  caddy:
+    image: caddy:latest
+    networks:
+      - frontend
+  # DjangoLux Composer agent start
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: always
+    labels:
+      org.dlux.restart: "protected"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      EVENTS: 1
+      EXEC: 1
+      POST: 1
+      INFO: 1
+      PING: 1
+      VERSION: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy
+
+  composer-agent:
+    image: debeski/composer:latest
+    restart: unless-stopped
+    labels:
+      org.dlux.restart: "protected"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Read-only file override so this uncapped UID-0 process can read the
+    # project's 0600 .secrets/.env to deploy. No write/exec/setuid bypass.
+    cap_add:
+      - DAC_READ_SEARCH
+    working_dir: "${PWD}"
+    command:
+      - agent
+      - run
+      - --trigger-file
+      - /opt/dlux-runtime/state/image-update-request.json
+      - --status-file
+      - /opt/dlux-runtime/state/deploy-status.json
+      - --bridge-dir
+      - /opt/dlux-runtime/state/agent
+      - --interval
+      - "2"
+      - --check-image
+      - ${WEB_IMAGE:-registry.example/demo:latest}
+      - --availability-file
+      - /opt/dlux-runtime/state/image-available.json
+      - --check-interval
+      - "900"
+    environment:
+      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
+      WEB_IMAGE: "${WEB_IMAGE:-registry.example/demo:latest}"
+      COMPOSER_CONTROL_URL: "${COMPOSER_CONTROL_URL:-}"
+      COMPOSER_ENROLLMENT_TOKEN: "${COMPOSER_ENROLLMENT_TOKEN:-}"
+      COMPOSER_AGENT_STATE_DIR: "/var/lib/composer-agent"
+      COMPOSER_VERSION_LABEL: "org.example.dlux_baked_version"
+      COMPOSER_RELEASE_MANIFEST_LABEL: "org.dlux.project.release-manifest"
+      COMPOSER_ACTIVE_VERSION_FILE: "/opt/dlux-runtime/state/active.json"
+      COMPOSER_ACTIVE_VERSION_KEY: "version"
+      COMPOSER_STATUS_FILE: "/opt/dlux-runtime/state/deploy-status.json"
+      COMPOSER_WATCH_SELF_SERVICE: "composer-agent"
+      COMPOSER_EXCLUDE_SERVICES: "composer-agent,docker-socket-proxy,db"
+      COMPOSER_AGENT_RESTART_SERVICES: "web,celery,caddy"
+    volumes:
+      - "${PWD}:${PWD}:ro"
+      - dlux_runtime:/opt/dlux-runtime:rw
+      - composer_agent_state:/var/lib/composer-agent:rw
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
+    networks:
+      - egress
+      - docker_proxy
+  # DjangoLux Composer agent end
+
+volumes:
+  postgres_data:
+  dlux_runtime:
+  composer_agent_state:
+  caddy_data:
+
+networks:
+  frontend:
+    driver: bridge
+  egress:
+    driver: bridge
+  internal:
+    internal: true
+  # Isolated path from composer-agent to the docker-socket-proxy only.
+  docker_proxy:
+    internal: true

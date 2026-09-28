@@ -4,6 +4,7 @@ from composer.agent_installer import (
     COMPOSER_AGENT_END,
     COMPOSER_AGENT_START,
     COMPOSER_EXEC_SOCKET_PATH,
+    DOCKER_SOCKET_PROXY_IMAGE,
     _hardened_stack,
 )
 
@@ -61,38 +62,50 @@ class HardenedStackTests(unittest.TestCase):
 
     def test_executor_can_read_the_projects_secrets_to_deploy(self):
         # The executor runs the deploy (docker compose up), which reads the
-        # project's 0600 .secrets/.env. cap_drop:ALL strips CAP_DAC_READ_SEARCH,
-        # so UID 0 can't read a file it doesn't own; the read cap must be added
-        # back or every inline deploy fails on the secrets guard.
+        # project's 0600 .secrets/.env. cap_drop:ALL strips DAC_OVERRIDE, so UID 0
+        # can't read a file it doesn't own; the read cap must be added back or
+        # every inline deploy fails on the secrets guard. Never DAC_READ_SEARCH:
+        # it unlocks open_by_handle_at, an escape from the project bind mount.
         ex = _section(self.block, "composer-executor")
         self.assertIn("cap_drop:\n      - ALL", ex)
-        self.assertIn("cap_add:\n      - DAC_READ_SEARCH", ex)
+        self.assertIn("cap_add:\n      - DAC_OVERRIDE\n", ex)
+        self.assertNotIn("DAC_READ_SEARCH", self.block)
+
+    def test_proxy_image_is_pinned_by_digest(self):
+        proxy = _section(self.block, "docker-socket-proxy")
+        self.assertIn(f"image: {DOCKER_SOCKET_PROXY_IMAGE}\n", proxy)
+        self.assertRegex(DOCKER_SOCKET_PROXY_IMAGE, r"^tecnativa/docker-socket-proxy:v[\d.]+@sha256:[0-9a-f]{64}$")
 
     def test_agent_stays_read_only_without_the_file_override(self):
         # The network-facing agent never deploys, so it must NOT carry the read
         # override — least privilege for the internet-reachable role.
         agent = _section(self.block, "composer-agent")
         self.assertIn("cap_drop:\n      - ALL", agent)
-        self.assertNotIn("DAC_READ_SEARCH", agent)
+        self.assertNotIn("cap_add", agent)
 
     def test_missing_read_cap_is_healed_on_the_executor_only(self):
         from composer.agent_installer import _ensure_deployer_read_cap
 
-        stripped = self.block.replace("    cap_add:\n      - DAC_READ_SEARCH\n", "")
-        self.assertNotIn("DAC_READ_SEARCH", stripped)
+        stripped = self.block.replace("    cap_add:\n      - DAC_OVERRIDE\n", "")
+        self.assertNotIn("cap_add", stripped)
         healed = _ensure_deployer_read_cap(stripped, "decrees")
-        self.assertIn("DAC_READ_SEARCH", _section(healed, "composer-executor"))
-        self.assertNotIn("DAC_READ_SEARCH", _section(healed, "composer-agent"))
+        self.assertIn("cap_add:\n      - DAC_OVERRIDE\n", _section(healed, "composer-executor"))
+        self.assertNotIn("cap_add", _section(healed, "composer-agent"))
         # Idempotent once the cap is present.
         self.assertEqual(_ensure_deployer_read_cap(healed, "decrees"), healed)
 
-    def test_agent_only_deployer_is_healed(self):
-        from composer.agent_installer import _agent_stack, _ensure_deployer_read_cap
+    def test_retired_read_cap_is_swapped_on_every_role(self):
+        from composer.agent_installer import _ensure_deployer_read_cap
 
-        block = _agent_stack("decrees", {"web", "celery", "db", "redis"}, _topology())
-        stripped = block.replace("    cap_add:\n      - DAC_READ_SEARCH\n", "")
-        healed = _ensure_deployer_read_cap(stripped, "decrees")
-        self.assertIn("DAC_READ_SEARCH", _section(healed, "composer-agent"))
+        old = self.block.replace("      - DAC_OVERRIDE\n", "      - DAC_READ_SEARCH\n").replace(
+            "    cap_drop:\n      - ALL\n    working_dir",
+            "    cap_drop:\n      - ALL\n    cap_add:\n      - DAC_READ_SEARCH\n    working_dir",
+        )
+        self.assertIn("DAC_READ_SEARCH", _section(old, "composer-agent"))
+
+        healed = _ensure_deployer_read_cap(old, "decrees")
+
+        self.assertEqual(healed, self.block)
 
     def test_agent_keeps_readonly_proxy_and_delegates_writes(self):
         agent = _section(self.block, "composer-agent")

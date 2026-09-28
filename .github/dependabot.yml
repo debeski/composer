@@ -1,0 +1,18 @@
+# Actions and the Dockerfile base are pinned by commit SHA / digest, so a moved
+# tag cannot change what runs. These updates keep the pins from going stale.
+# The docker-socket-proxy pin lives in composer/agent_installer.py
+# (DOCKER_SOCKET_PROXY_IMAGE), which Dependabot cannot see; bump it by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

@@ -4,14 +4,15 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 
 from composer.agent_installer import (
+    DOCKER_SOCKET_PROXY_IMAGE,
     AgentInstallError,
     _transform_compose,
     _transform_to_hardened,
     enable_executor,
 )
 
-# A legacy composer-updater stack; _transform_compose turns it into the current
-# composer-agent topology, which is the starting point executor enable hardens.
+# A legacy composer-updater stack. `agent enable` (_transform_compose) takes it
+# straight to the hardened topology.
 LEGACY_COMPOSE = """name: demo_project
 
 services:
@@ -72,8 +73,16 @@ networks:
 """
 
 
+# The agent-only topology `agent enable` produced through 1.5.3 (write-enabled
+# proxy, DAC_READ_SEARCH on the agent). Deployments still run it, and it is
+# what executor enable hardens.
+AGENT_ONLY_COMPOSE = (Path(__file__).parent / "fixtures" / "agent-only-compose.yml").read_text(
+    encoding="utf-8"
+)
+
+
 def _agent_compose():
-    return _transform_compose(LEGACY_COMPOSE, "demo_project")
+    return AGENT_ONLY_COMPOSE
 
 
 class TransformToHardenedTests(unittest.TestCase):
@@ -115,9 +124,47 @@ class TransformToHardenedTests(unittest.TestCase):
         self.assertIn("    command:\n      - agent\n      - run\n", updated)
         self.assertIn("    command:\n      - executor\n      - run\n", updated)
 
+    def test_hardened_output_has_no_retired_cap_or_mutable_proxy(self):
+        self.assertNotIn("DAC_READ_SEARCH", self.hardened)
+        self.assertNotIn("tecnativa/docker-socket-proxy:latest", self.hardened)
+        self.assertIn(f"image: {DOCKER_SOCKET_PROXY_IMAGE}", self.hardened)
+
+    def test_already_hardened_stack_is_normalized(self):
+        old = self.hardened.replace(
+            f"image: {DOCKER_SOCKET_PROXY_IMAGE}", "image: tecnativa/docker-socket-proxy:latest"
+        ).replace("      - DAC_OVERRIDE\n", "      - DAC_READ_SEARCH\n").replace(
+            "      POST: 0\n", "      POST: 1\n"
+        ).replace("      EXEC: 0\n", '      EXEC: "1"\n')
+        self.assertNotEqual(old, self.hardened)
+
+        self.assertEqual(_transform_to_hardened(old, "demo_project"), self.hardened)
+
+    def test_an_operator_digest_pin_is_kept(self):
+        pinned = "tecnativa/docker-socket-proxy:v0.4.1@sha256:" + "a" * 64
+        old = self.hardened.replace(f"image: {DOCKER_SOCKET_PROXY_IMAGE}", f"image: {pinned}")
+
+        self.assertIn(f"image: {pinned}", _transform_to_hardened(old, "demo_project"))
+
     def test_refuses_a_legacy_updater_stack(self):
         with self.assertRaises(AgentInstallError):
             _transform_to_hardened(LEGACY_COMPOSE, "demo_project")
+
+
+class AgentEnableHardensTests(unittest.TestCase):
+    """`agent enable` never leaves a write-enabled proxy behind."""
+
+    def test_legacy_updater_goes_straight_to_hardened(self):
+        updated = _transform_compose(LEGACY_COMPOSE, "demo_project")
+        self.assertIn("  composer-executor:\n", updated)
+        self.assertIn("  composer_agent_state:\n  composer_exec_sock:", updated)
+        self.assertNotIn("POST: 1", updated)
+        self.assertNotIn("EXEC: 1", updated)
+        self.assertEqual(_transform_to_hardened(updated, "demo_project"), updated)
+
+    def test_an_agent_only_block_is_hardened(self):
+        updated = _transform_compose(AGENT_ONLY_COMPOSE, "demo_project")
+        self.assertEqual(updated, _transform_to_hardened(AGENT_ONLY_COMPOSE, "demo_project"))
+        self.assertNotIn("POST: 1", updated)
 
 
 class HardenedComposeValidityTests(unittest.TestCase):
