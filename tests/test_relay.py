@@ -387,6 +387,15 @@ class SealedSecretTests(unittest.TestCase):
         private = json.loads((self.dir / "relay-keys.json").read_text())["keys"][0]["private"]
         self.assertNotIn(private, json.dumps(self.doc))
 
+    def test_a_sample_sealed_by_djangolux_opens_here(self):
+        """Frozen output of `dlux.relay.seal`: Composer's opener must keep accepting it."""
+        fixture = json.loads((FIXTURES / "relay_sealed_dlux.json").read_text())
+        key = json.loads((FIXTURES / "relay_sealed.json").read_text())
+        store = KeyStore(self.dir / "fixture-dlux.json")
+        store._keys = {key["key_id"]: base64.b64decode(key["private_key"])}
+        store.current_id = key["key_id"]
+        self.assertEqual(store.open(fixture["sealed"], fixture["operation_id"], fixture["op"]), fixture["secret"])
+
     def test_shared_fixture_opens_with_the_fixture_key(self):
         """The same bytes DjangoLux's tests seal and open: the two sides agree on the format."""
         fixture = json.loads((FIXTURES / "relay_sealed.json").read_text())
