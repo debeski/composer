@@ -41,6 +41,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
+  - [ ] Branch `feat/egress-relay` (unmerged, 2026-09-30, target 1.6.0b1): `composer/relay.py` egress relay (agent is the only service with internet; celery writes requests, web reads; sealed secrets; operator-approved `relay/operations.json` + lock; `composer relay list|approve`). 763 tests OK. Not yet run against a real agent container, DjangoLux client or the CRM; built-in weather operations still to add. Design and threat model: django-lux `egress_relay_plan.md`, `docs/outbound-requests.md`.
   - [ ] TAG THE REHEARSAL: `v1.3.14b1` must be published BEFORE Dlux `v1.8.14b1` — that manifest requires `>=1.3.14b1`. Nothing pushed yet. Then verify `:beta` and `:v1.3.14b1` both appear and `:latest` did NOT move.
   - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
   - [ ] Live verify the hardened inline update on a real stack: panel-triggered apply, agent stages, executor swaps, and DjangoLux reports the new version.

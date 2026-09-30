@@ -99,7 +99,7 @@ def _normalize_leading_global_options(argv: List[str]) -> List[str]:
         break
     if not leading or not rest:
         return argv
-    if rest[0] in {"self", "agent", "executor", "dlux"}:
+    if rest[0] in {"self", "agent", "executor", "dlux", "relay"}:
         if len(rest) < 2:
             return argv
         return rest[:2] + leading + rest[2:]
@@ -526,6 +526,16 @@ class DockerComposeLauncher(
                     sys.exit(run_dlux_channel(channel_args, argv[2:]))
                 args = parse_dlux_update_args(argv[2:], action=argv[1])
                 sys.exit(run_dlux_update(args, argv[2:]))
+            if argv and argv[0] == "relay":
+                from .relay_cli import COMMANDS as relay_commands, run_relay
+
+                if len(argv) == 1 or argv[1] in {"-h", "--help"}:
+                    print(_group_usage("relay", relay_commands))
+                    return
+                if argv[1] not in relay_commands:
+                    print(_group_usage("relay", relay_commands), file=sys.stderr)
+                    sys.exit(2)
+                sys.exit(run_relay(argv[1], argv[2:]))
             if argv and argv[0] == "agent":
                 commands = ["check", "update", "restart", "off", "watch", "run", "enable"]
                 if len(argv) == 1 or argv[1] in {"-h", "--help"}:

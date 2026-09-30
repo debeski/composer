@@ -68,6 +68,7 @@ class ComposerAgent:
         self.enroll_request_path = self.bridge_dir / "enroll-request.json"
         self.agent_status_path = self.bridge_dir / "agent-status.json"
         self.watch = WatchRuntime(args)
+        self._relay = None
         self.args.log_file = self.watch.log_file
         self.client = self._build_client(self.control_url)
         self.stop_event = threading.Event()
@@ -709,10 +710,25 @@ class ComposerAgent:
         # agent-only topology it holds both the network and Docker authority.
         self._process_package_request()
 
+    def process_relay(self):
+        """Answer egress-relay requests. A stack with no runtime volume has nothing to answer."""
+        state_dir = Path(self.args.trigger_file).parent
+        if not state_dir.is_dir():
+            return
+        if self._relay is None:
+            from .relay import RelayResponder
+
+            relay_dir = os.environ.get("COMPOSER_RELAY_DIR") or str(Path.cwd() / "relay")
+            self._relay = RelayResponder(
+                state_dir, self.store.root, Path(relay_dir), composer_version=self.composer_version,
+            )
+        self._relay.answer()
+
     def run_once(self):
         self.watch.apply_check_policy()
         self.watch.maybe_answer_check_request()
         self.watch.maybe_answer_ops_request()
+        self.process_relay()
         self.watch.maybe_check_availability()
         self.watch.maybe_check_package_availability()
         self.process_enroll_request()
