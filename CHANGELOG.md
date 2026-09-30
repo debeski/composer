@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.4b1
+
+- **BuildKit for `--build`**: the image installs `docker-buildx-plugin` alongside `docker-ce-cli` and `docker-compose-plugin`. `docker-ce-cli` only *recommends* buildx and the install uses `--no-install-recommends`, so every earlier image lacked it and `start.sh -d --build` fell back to the classic builder, which left an anonymous, log-less container per `RUN` step in Docker Desktop. Image grows ~92MB (431->523MB).
+
 ## v1.5.3
 
 The stable release of the 1.5.3 line, identical in scope to `1.5.3b2` below.

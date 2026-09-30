@@ -151,7 +151,7 @@ With `--status-file` (or `--log-file PATH`), each update run also writes a clean
 | :--- | :--- |
 | `-d`, `--dev` | Development mode. Loads `compose.dev.yml` on top of the base compose file (two files) and forces `DEBUG=True` / `DEBUG_STATUS=True` into every service. |
 | `-u [service]` | Compact form of `update`: pull the latest image(s), then recreate immediately. Pass a service name to scope it. |
-| `-b`, `--build` | Rebuild images during startup. |
+| `-b`, `--build` | Rebuild images during startup. The image ships `docker-buildx-plugin` (1.5.4b1+), so builds run on BuildKit instead of the classic builder and its per-step containers. |
 | `--force` | Bypass the preflight version gate (allow updating onto an older image version). |
 | `--status-file PATH` | Write a JSON deploy-status file to `PATH` (overrides `COMPOSER_STATUS_FILE`). |
 | `--down` | Stop everything (see the `stop` subcommand). |
