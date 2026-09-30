@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.6.0
+
+The stable release of the 1.6.0 line, identical in scope to `1.6.0b1` below: the
+egress relay. Accepted before this tag on `testbed-dlux` (deployer and resident
+pair on 1.6.0b1, `check` all pass, the agent answering relay requests from a
+`celery` with no route to the internet, a city search from web returning
+OpenWeather's real refusal of a dummy key as `credentials`) and on the sales CRM
+dev stack, whose `celery` was taken off `egress` and still refreshed its
+exchange rates through the declared `finance.cbl_rates_page` and
+`finance.ean_rates_page` operations. Not yet exercised with a valid OpenWeather
+key.
+
 ## v1.6.0b1
 
 First 1.6 beta: the egress relay. The agent becomes the only service that makes outbound calls for `web` and `celery`, which lets a generated stack keep both off the internet. Needs DjangoLux 1.10.0b4 or newer to use it; nothing changes for a stack that does not.
