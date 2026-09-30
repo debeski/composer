@@ -89,7 +89,92 @@ RESPONSE_KEYS = {"type", "fields", "max_bytes", "content_types"}
 #: Operations Composer itself ships. Same shape as a declared operation and
 #: parsed by the same code; they are trusted by being part of this release, so
 #: no lock is needed. DjangoLux features (weather) are added here.
-BUILTIN_OPERATIONS: List[Dict[str, Any]] = []
+BUILTIN_OPERATIONS: List[Dict[str, Any]] = [
+    {
+        "name": "weather.geocode",
+        "url": "https://api.openweathermap.org/geo/1.0/direct",
+        "params": {
+            "q": {
+                "type": "string",
+                "max": 120,
+                "pattern": "^.{2,120}$"
+            },
+            "limit": {
+                "type": "integer",
+                "min": 1,
+                "max": 10,
+                "required": False
+            }
+        },
+        "auth": {
+            "placement": "query",
+            "name": "appid"
+        },
+        "response": {
+            "type": "json",
+            "fields": [
+                "[].name",
+                "[].state",
+                "[].country",
+                "[].lat",
+                "[].lon"
+            ],
+            "max_bytes": 131072
+        },
+        "timeout": 4,
+        "rate": {
+            "per_minute": 30
+        }
+    },
+    {
+        "name": "weather.current",
+        "url": "https://api.openweathermap.org/data/2.5/weather",
+        "params": {
+            "lat": {
+                "type": "number",
+                "min": -90,
+                "max": 90
+            },
+            "lon": {
+                "type": "number",
+                "min": -180,
+                "max": 180
+            },
+            "units": {
+                "type": "string",
+                "max": 8,
+                "pattern": "^(metric|imperial|standard)$",
+                "required": False
+            },
+            "lang": {
+                "type": "string",
+                "max": 8,
+                "pattern": "^[a-z]{2}([_-][a-zA-Z]{2,4})?$",
+                "required": False
+            }
+        },
+        "auth": {
+            "placement": "query",
+            "name": "appid"
+        },
+        "response": {
+            "type": "json",
+            "fields": [
+                "main.temp",
+                "main.feels_like",
+                "dt",
+                "weather.0.id",
+                "weather.0.icon",
+                "weather.0.description"
+            ],
+            "max_bytes": 131072
+        },
+        "timeout": 4,
+        "rate": {
+            "per_minute": 60
+        }
+    }
+]
 
 
 class OperationError(ValueError):

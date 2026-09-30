@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from composer.relay import operation_digest
 from composer.relay_cli import run_relay
@@ -23,6 +24,9 @@ def run(action, directory):
 
 class RelayCliTests(unittest.TestCase):
     def setUp(self):
+        patcher = patch("composer.relay_cli.BUILTIN_OPERATIONS", [])
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.dir = Path(tempfile.mkdtemp())
 
     def declare(self, *operations):

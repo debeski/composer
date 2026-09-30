@@ -26,7 +26,7 @@ PAGE = {
     "response": {"type": "text", "max_bytes": 4096},
 }
 WEATHER = {
-    "name": "weather.current",
+    "name": "demo.forecast",
     "url": "https://api.example.com/data/2.5/weather",
     "params": {
         "lat": {"type": "number", "min": -90, "max": 90},
@@ -168,6 +168,9 @@ class ParseOperationTests(unittest.TestCase):
 
 class CatalogTests(unittest.TestCase):
     def setUp(self):
+        patcher = patch.object(relay, "BUILTIN_OPERATIONS", [])
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.dir = Path(tempfile.mkdtemp())
 
     def write(self, operations, lock=None):
@@ -179,7 +182,7 @@ class CatalogTests(unittest.TestCase):
         self.write([PAGE, WEATHER], lock={PAGE["name"]: operation_digest(PAGE)})
         catalog = build_catalog(self.dir)
         self.assertEqual(sorted(catalog.operations), ["finance.rates_page"])
-        self.assertEqual(catalog.unapproved, ["weather.current"])
+        self.assertEqual(catalog.unapproved, ["demo.forecast"])
 
     def test_editing_a_locked_operation_unapproves_it(self):
         self.write([PAGE], lock={PAGE["name"]: operation_digest(PAGE)})
@@ -354,29 +357,29 @@ class SealedSecretTests(unittest.TestCase):
 
     def test_round_trip(self):
         oid = str(uuid.uuid4())
-        sealed = seal(self.doc, "sk-live-123", oid, "weather.current")
-        self.assertEqual(self.keys.open(sealed, oid, "weather.current"), "sk-live-123")
+        sealed = seal(self.doc, "sk-live-123", oid, "demo.forecast")
+        self.assertEqual(self.keys.open(sealed, oid, "demo.forecast"), "sk-live-123")
 
     def test_a_sealed_secret_cannot_be_replayed_into_another_request_or_operation(self):
         oid = str(uuid.uuid4())
-        sealed = seal(self.doc, "sk-live-123", oid, "weather.current")
+        sealed = seal(self.doc, "sk-live-123", oid, "demo.forecast")
         with self.assertRaises(ValueError):
-            self.keys.open(sealed, str(uuid.uuid4()), "weather.current")
+            self.keys.open(sealed, str(uuid.uuid4()), "demo.forecast")
         with self.assertRaises(ValueError):
             self.keys.open(sealed, oid, "weather.geocode")
 
     def test_tampering_and_foreign_keys_are_refused(self):
         oid = str(uuid.uuid4())
-        sealed = seal(self.doc, "sk", oid, "weather.current")
+        sealed = seal(self.doc, "sk", oid, "demo.forecast")
         flipped = dict(sealed, ct=base64.b64encode(b"\x00" * 30).decode())
         with self.assertRaises(ValueError):
-            self.keys.open(flipped, oid, "weather.current")
+            self.keys.open(flipped, oid, "demo.forecast")
         other = KeyStore(self.dir / "other.json")
         with self.assertRaises(ValueError):
-            other.open(sealed, oid, "weather.current")
+            other.open(sealed, oid, "demo.forecast")
         for bad in (None, {}, {"key_id": "x"}, dict(sealed, extra=1), dict(sealed, nonce="AAAA")):
             with self.assertRaises(ValueError):
-                self.keys.open(bad, oid, "weather.current")
+                self.keys.open(bad, oid, "demo.forecast")
 
     def test_keys_persist_privately_and_are_reused(self):
         again = KeyStore(self.dir / "relay-keys.json")
@@ -407,6 +410,9 @@ class SealedSecretTests(unittest.TestCase):
 
 class ResponderTests(unittest.TestCase):
     def setUp(self):
+        patcher = patch.object(relay, "BUILTIN_OPERATIONS", [])
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.state = Path(tempfile.mkdtemp())
         self.agent = Path(tempfile.mkdtemp())
         self.declared = Path(tempfile.mkdtemp())
@@ -445,9 +451,9 @@ class ResponderTests(unittest.TestCase):
     def test_publishes_capabilities_and_a_public_key(self):
         self.responder.answer()
         caps = json.loads((self.responder.root / "capabilities.json").read_text())
-        self.assertEqual(sorted(caps["operations"]), ["finance.rates_page", "weather.current"])
+        self.assertEqual(sorted(caps["operations"]), ["demo.forecast", "finance.rates_page"])
         self.assertEqual(caps["composer"], "1.6.0b1")
-        self.assertTrue(caps["operations"]["weather.current"]["auth"])
+        self.assertTrue(caps["operations"]["demo.forecast"]["auth"])
         key = json.loads((self.responder.root / "public-key.json").read_text())
         self.assertEqual(key["key_id"], caps["key_id"])
         self.assertNotIn("private", json.dumps(key))
@@ -464,8 +470,8 @@ class ResponderTests(unittest.TestCase):
         self.responder.answer()
         doc = json.loads((self.responder.root / "public-key.json").read_text())
         oid = str(uuid.uuid4())
-        sealed = seal(doc, "PLAINTEXT-SECRET-42", oid, "weather.current")
-        self.submit("weather.current", {"lat": 1, "lon": 2}, sealed, oid)
+        sealed = seal(doc, "PLAINTEXT-SECRET-42", oid, "demo.forecast")
+        self.submit("demo.forecast", {"lat": 1, "lon": 2}, sealed, oid)
         self.responder.answer()
         self.assertEqual(self.result(oid)["status"], "ok")
         self.assertEqual(self.calls[-1][2], "PLAINTEXT-SECRET-42")
@@ -476,8 +482,8 @@ class ResponderTests(unittest.TestCase):
     def test_a_sealed_secret_for_another_request_is_refused(self):
         self.responder.answer()
         doc = json.loads((self.responder.root / "public-key.json").read_text())
-        sealed = seal(doc, "S", str(uuid.uuid4()), "weather.current")
-        oid, _ = self.submit("weather.current", {"lat": 1, "lon": 2}, sealed)
+        sealed = seal(doc, "S", str(uuid.uuid4()), "demo.forecast")
+        oid, _ = self.submit("demo.forecast", {"lat": 1, "lon": 2}, sealed)
         self.responder.answer()
         self.assertEqual((self.result(oid)["status"], self.result(oid)["error"]), ("error", "credentials"))
         self.assertEqual(self.calls, [])
@@ -485,7 +491,7 @@ class ResponderTests(unittest.TestCase):
     def test_unknown_unapproved_and_malformed_requests_are_rejected(self):
         (self.declared / "operations.lock").write_text(json.dumps({"schema_version": 1, "operations": {PAGE["name"]: operation_digest(PAGE)}}))
         unknown, _ = self.submit("finance.nothing")
-        unapproved, _ = self.submit("weather.current", {"lat": 1, "lon": 1})
+        unapproved, _ = self.submit("demo.forecast", {"lat": 1, "lon": 1})
         wrong_id, path = self.submit()
         path.write_text(json.dumps({**json.loads(path.read_text()), "operation_id": str(uuid.uuid4())}))
         schema, _ = self.submit(schema_version=9)
@@ -518,13 +524,13 @@ class ResponderTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_rate_limit_applies_per_operation(self):
-        ids = [self.submit("weather.current", {"lat": 1, "lon": 1}, oid=str(uuid.uuid4()))[0] for _ in range(4)]
-        # weather.current requires a secret; the fake perform does not, so this only counts calls.
+        ids = [self.submit("demo.forecast", {"lat": 1, "lon": 1}, oid=str(uuid.uuid4()))[0] for _ in range(4)]
+        # demo.forecast requires a secret; the fake perform does not, so this only counts calls.
         self.responder.answer()
         statuses = [self.result(i).get("error") or self.result(i)["status"] for i in ids]
         self.assertEqual(statuses.count("limit"), 1)
         self.mono += 61
-        again, _ = self.submit("weather.current", {"lat": 1, "lon": 1})
+        again, _ = self.submit("demo.forecast", {"lat": 1, "lon": 1})
         self.responder.answer()
         self.assertEqual(self.result(again)["status"], "ok")
 

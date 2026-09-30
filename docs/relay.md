@@ -20,7 +20,11 @@ A request names an operation and its parameters; it never carries a URL, header
 or command. Operations come from:
 
 - **Built-in** (`BUILTIN_OPERATIONS` in `composer/relay.py`): shipped with this
-  release, trusted by being part of it.
+  release, trusted by being part of it, no lock needed, and a project cannot shadow
+  one. Today: `weather.geocode` (city search) and `weather.current` (a reading), both
+  to `api.openweathermap.org` with the API key sealed and sent as the `appid` query
+  parameter. Their exact shape is `tests/fixtures/relay_weather_ops.json`, which
+  DjangoLux's tests check `dlux/weather.py` against.
 - **Declared by the project** in `relay/operations.json` in the project directory.
   The agent already mounts the project directory read-only (`${PWD}:${PWD}:ro`)
   and the application services do not, so application code cannot edit it. A
