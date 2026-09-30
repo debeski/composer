@@ -58,7 +58,11 @@ def parse_args():
             "      executor topology. Run 'composer executor --help'.\n"
             "  dlux check | dlux update | dlux rollback | dlux channel\n"
             "      Check, apply, or roll back inline DjangoLux package releases.\n"
-            "      Run 'composer dlux --help'."
+            "      Run 'composer dlux --help'.\n"
+            "  relay list | relay approve\n"
+            "      Review the outbound operations a project declares in relay/operations.json,\n"
+            "      and approve them (pins their digests in relay/operations.lock).\n"
+            "      Run 'composer relay --help'."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Egress Relay**: `composer/relay.py` lets `web`/`celery` ask the agent — the only service with internet access — for outbound calls as named operations, over `state/relay/` on the runtime volume (`requests/<uuid>.json` from celery, `results/<uuid>.json` from the agent, `public-key.json`, `capabilities.json`, `stats.json`). Operations are built-in (`BUILTIN_OPERATIONS`) or declared in the project's `relay/operations.json` (read through the agent's existing read-only project mount, which the application services lack) and run only while `relay/operations.lock` pins their digest. Every call is https to one pinned host on 443 with verified TLS, address-vetted after a single resolution (no loopback, private, link-local or metadata address, and no redirects), size-, content-type-, time- and rate-bounded, and answered with stable error codes only. Secrets arrive sealed to an agent-only X25519 key (HKDF-SHA256 + ChaCha20-Poly1305, bound to the request id and operation). New `composer relay list|approve` (`composer/relay_cli.py`), an agent-loop hook (`ComposerAgent.process_relay`) and `docs/relay.md`. No compose change: `${PWD}:${PWD}:ro` and the runtime volume are already mounted.
+- **Built-In Weather Operations**: `weather.geocode` and `weather.current` (OpenWeather, key sealed to the agent, response cut to the fields DjangoLux reads) ship in `BUILTIN_OPERATIONS`, so weather works on a stack whose `celery` has no route to the internet. `composer relay list` shows them as built-in; declared operations cannot shadow them. `tests/fixtures/relay_weather_ops.json` and `relay_projection_cases.json` are shared with DjangoLux's tests so the fields and the projection rule cannot drift.
+
 ## v1.5.4b1
 
 - **BuildKit for `--build`**: the image installs `docker-buildx-plugin` alongside `docker-ce-cli` and `docker-compose-plugin`. `docker-ce-cli` only *recommends* buildx and the install uses `--no-install-recommends`, so every earlier image lacked it and `start.sh -d --build` fell back to the classic builder, which left an anonymous, log-less container per `RUN` step in Docker Desktop. Image grows ~92MB (431->523MB).
