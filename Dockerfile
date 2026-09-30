@@ -33,7 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `packaging` is the reference PEP 440 implementation. Composer must order
 # `1.9.0b2 < 1.9.0b10 < 1.9.0rc1 < 1.9.0` and must not let `1.4.0b1` satisfy
 # `>=1.4.0`; the regexes that preceded it got both wrong. See composer/versions.py.
-RUN pip install --no-cache-dir "pypi-attestations>=0.0.29" "packaging>=23.2"
+# `cryptography` is what the egress relay's sealed secrets use (composer/relay.py).
+# It arrives today as a dependency of pypi-attestations, but this image relies on
+# it directly, so it is named here rather than left to a transitive install.
+RUN pip install --no-cache-dir "pypi-attestations>=0.0.29" "packaging>=23.2" "cryptography>=42"
 
 COPY composer /app/composer
 COPY VERSION /app/VERSION

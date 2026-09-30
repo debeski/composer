@@ -33,7 +33,7 @@ for subcommand in run restart update pull stop check log; do
     exit 1
   }
 done
-for group_command in "self update" "agent check" "agent update" "agent restart" "agent off" "agent watch" "agent run" "agent enable" "executor run" "executor enable" "dlux check" "dlux update" "dlux rollback" "dlux channel"; do
+for group_command in "self update" "agent check" "agent update" "agent restart" "agent off" "agent watch" "agent run" "agent enable" "executor run" "executor enable" "dlux check" "dlux update" "dlux rollback" "dlux channel" "relay list" "relay approve"; do
   read -r first second <<< "$group_command"
   run "$first" "$second" --help >/dev/null || {
     echo "::error::'$group_command --help' failed"
@@ -47,6 +47,23 @@ echo "    help: all expected flags present"
 docker run --rm --entrypoint docker "$IMAGE" --version >/dev/null
 docker run --rm --entrypoint docker "$IMAGE" compose version >/dev/null
 echo "    tooling: docker, docker compose runnable"
+
+# 3b. The egress relay's sealed secrets work in this image: the shared fixture (sealed
+# by DjangoLux's sender) opens with the fixture key, and a fresh agent key is created.
+docker run --rm --entrypoint python \
+  -v "$PWD/tests/fixtures:/fixtures:ro" "$IMAGE" -c '
+import base64, json, tempfile
+from pathlib import Path
+from composer.relay import KeyStore
+
+fixture = json.loads(Path("/fixtures/relay_sealed.json").read_text())
+store = KeyStore(Path(tempfile.mkdtemp()) / "keys.json")
+assert store.public_document()["key_id"] == store.current_id
+store._keys = {fixture["key_id"]: base64.b64decode(fixture["private_key"])}
+store.current_id = fixture["key_id"]
+assert store.open(fixture["sealed"], fixture["operation_id"], fixture["op"]) == fixture["secret"]
+' || { echo "::error::relay sealed-secret crypto failed inside the image"; exit 1; }
+echo "    relay: sealed secrets open inside the image"
 
 # 4. Runtime overrides and Compose config must work with a read-only project,
 # read-only image filesystem, no Linux capabilities, and writable /tmp only.
