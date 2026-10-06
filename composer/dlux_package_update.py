@@ -19,6 +19,7 @@ of Docker: the executor passes the real implementations
 
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
@@ -54,6 +55,22 @@ class PackageUpdateResult:
             "message": self.message,
             "steps": list(self.steps),
         }
+
+
+def _published_availability(runtime, channel) -> str:
+    """The newest release the last `dlux check` published for ``channel``, or ''."""
+    try:
+        payload = json.loads((runtime.state_dir / "package-available.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(payload, dict) or not payload.get("available"):
+        return ""
+    try:
+        if dlux_channel.normalize_channel(payload.get("channel")) != dlux_channel.normalize_channel(channel):
+            return ""
+    except dlux_channel.ChannelError:
+        return ""
+    return str(payload.get("version") or "")
 
 
 def _noop(_message: str) -> None:
@@ -110,7 +127,12 @@ def apply_package_update(
         step("resolving", "Resolving the DjangoLux release")
         if channel is None:
             channel, _policy_error = dlux_channel.read_policy(runtime.state_dir)
-        candidate, unpacked = source.obtain(target_version, channel=channel, workdir=workdir)
+        extra = {}
+        if source is release_source and not target_version:
+            expected = _published_availability(runtime, channel)
+            if expected:
+                extra["expected"] = expected
+        candidate, unpacked = source.obtain(target_version, channel=channel, workdir=workdir, **extra)
     except Exception as exc:
         return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
 

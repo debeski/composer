@@ -1,6 +1,6 @@
 import unittest
 
-from composer.dlux_package_cli import availability_summary
+from composer.dlux_package_cli import availability_summary, installed_release
 
 
 def _payload(version, channel="stable", inline_safe=True):
@@ -32,6 +32,24 @@ class AvailabilitySummaryTests(unittest.TestCase):
             availability_summary(_payload("1.8.13"), ""),
             "DjangoLux 1.8.13 available (inline-safe, stable channel)",
         )
+
+
+    def test_a_recorded_image_version_is_never_called_up_to_date(self):
+        # Seen on testbed-dlux: active.json kept source=image, version=1.11.0b1
+        # while the image ran 1.9.4, and check said "Up to date".
+        line = availability_summary(_payload("1.10.2b1", channel="beta"), "1.11.0b1", verified=False)
+        self.assertNotIn("Up to date", line)
+        self.assertIn("recorded as 1.11.0b1", line)
+        self.assertIn("cannot verify", line)
+
+    def test_a_newer_release_is_announced_whatever_the_source(self):
+        line = availability_summary(_payload("1.11.0b2", channel="beta"), "1.9.4", verified=False)
+        self.assertEqual(line, "DjangoLux 1.11.0b2 available (inline-safe, beta channel)")
+
+    def test_only_a_volume_release_is_verified(self):
+        self.assertEqual(installed_release({"source": "volume", "version": "1.11.0b2"}), ("1.11.0b2", True))
+        self.assertEqual(installed_release({"source": "image", "version": "1.11.0b1"}), ("1.11.0b1", False))
+        self.assertEqual(installed_release({}), ("", False))
 
 
 if __name__ == "__main__":

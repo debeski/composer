@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
@@ -383,14 +384,30 @@ def unpack(wheel_path, destination) -> Path:
     return destination
 
 
+INDEX_RETRY_DELAYS = (3, 6, 12)
+
+
 def obtain(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
-           opener=urllib.request.urlopen, runner=subprocess.run) -> tuple:
+           opener=urllib.request.urlopen, runner=subprocess.run,
+           expected="", sleep=time.sleep) -> tuple:
     """Resolve, verify and unpack a release. Returns ``(candidate, unpacked_dir)``.
 
     Order matters: attestation and digest are checked before the archive is
     opened, and `inline_safe` before anything is unpacked into place.
+
+    ``expected`` is the newest release a recent check saw. Shortly after a
+    publish PyPI's CDN can serve an index without it, so an unpinned resolve
+    that lands below it re-reads the index a few times before settling for
+    what it found. It never pins to ``expected``: the channel may have changed.
     """
     candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel)
+    wanted = try_parse(expected) if expected and not target_version else None
+    for delay in INDEX_RETRY_DELAYS if wanted is not None else ():
+        current = try_parse(candidate.version)
+        if current is None or current >= wanted:
+            break
+        sleep(delay)
+        candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel)
     workdir = Path(workdir or tempfile.mkdtemp(prefix="composer-dlux-"))
     workdir.mkdir(parents=True, exist_ok=True)
     verify_attestation(candidate, runner=runner)

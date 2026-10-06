@@ -411,3 +411,26 @@ class MigrationApplierRestartTests(unittest.TestCase):
 class _RestartArgs:
     file = None
     dev = False
+
+
+class PublishedAvailabilityTests(unittest.TestCase):
+    def _read(self, payload, channel="beta"):
+        from types import SimpleNamespace
+
+        from composer.dlux_package_update import _published_availability
+
+        with TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            if payload is not None:
+                (state / "package-available.json").write_text(
+                    payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8"
+                )
+            return _published_availability(SimpleNamespace(state_dir=state), channel)
+
+    def test_only_an_available_release_on_the_same_channel_counts(self):
+        self.assertEqual(self._read({"available": True, "version": "1.11.0b2", "channel": "beta"}), "1.11.0b2")
+        self.assertEqual(self._read({"available": True, "version": "1.11.0b2", "channel": "beta"}, "stable"), "")
+        self.assertEqual(self._read({"available": False, "version": "1.11.0b2", "channel": "beta"}), "")
+        self.assertEqual(self._read({"available": True, "version": "1.11.0b2", "channel": "nightly"}), "")
+        self.assertEqual(self._read("not json"), "")
+        self.assertEqual(self._read(None), "")
