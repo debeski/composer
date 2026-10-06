@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.1b1
+
+- **Outbox Replay Backs Off**: `ComposerAgent.flush_outbox()` retried the oldest queued snapshot, event or capabilities post on every agent tick (`--interval`, 2 s) with no delay, so an enrolled agent whose panel answered 503 or was offline opened one HTTPS connection (plus DNS lookups) every 2 seconds indefinitely. A failed post now holds the outbox back exponentially (1 s doubling to 60 s, plus jitter), matching `_poll_control_plane`; a successful post or command poll resets it. A delivered-cancellation 409 is still handled without backing off.
+
 ## v1.6.0
 
 The stable release of the 1.6.0 line, identical in scope to `1.6.0b1` below: the

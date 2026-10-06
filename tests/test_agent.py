@@ -317,6 +317,46 @@ class ComposerAgentTests(unittest.TestCase):
             run.assert_not_called()
             self.assertEqual(agent.store.command_state(value["operation_id"]), "cancelled")
 
+    def test_unreachable_panel_backs_off_outbox_retries(self):
+        class Client:
+            attempts = 0
+            down = True
+
+            def put_capabilities(self, credentials, body):
+                self.attempts += 1
+                if self.down:
+                    raise ControlPlaneError("Service Unavailable", status=503)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = ComposerAgent(agent_args(Path(temp_dir)))
+            agent.client = client = Client()
+            agent.store.save_credentials("agent-id", "agent-secret")
+            agent.publish_capabilities()
+            with patch("composer.agent.random.random", return_value=0.0), \
+                    patch("composer.agent.time.monotonic") as clock:
+                clock.return_value = 100.0
+                agent.flush_outbox()
+                agent.flush_outbox()
+                self.assertEqual(client.attempts, 1)
+
+                clock.return_value = 101.0
+                agent.flush_outbox()
+                self.assertEqual(client.attempts, 2)
+                clock.return_value = 102.5
+                agent.flush_outbox()
+                self.assertEqual(client.attempts, 2)
+
+                for _ in range(10):
+                    clock.return_value += 61.0
+                    agent.flush_outbox()
+                self.assertEqual(agent._outbox_backoff, 60.0)
+
+                client.down = False
+                clock.return_value += 61.0
+                agent.flush_outbox()
+                self.assertEqual(agent.store.pending_outbox(), [])
+                self.assertEqual(agent._outbox_backoff, 0.0)
+
     def test_capabilities_are_queued_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             agent = ComposerAgent(agent_args(Path(temp_dir)))

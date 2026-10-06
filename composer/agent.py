@@ -73,6 +73,8 @@ class ComposerAgent:
         self.client = self._build_client(self.control_url)
         self.stop_event = threading.Event()
         self.poll_thread: Optional[threading.Thread] = None
+        self._outbox_backoff = 0.0
+        self._outbox_retry_at = 0.0
 
     @staticmethod
     def _normalize_control_url(control_url: Any) -> str:
@@ -126,6 +128,8 @@ class ComposerAgent:
                 self.store.set_meta("last_contact_at", utc_now())
                 self.store.set_meta("revoked", "")
                 backoff = 1.0
+                self._outbox_backoff = 0.0
+                self._outbox_retry_at = 0.0
                 if command:
                     self.store.enqueue_command(validate_command(command))
             except ProtocolError as exc:
@@ -386,11 +390,17 @@ class ComposerAgent:
         }
         self.store.queue_outbox("snapshot", clean)
 
+    def _outbox_failed(self):
+        self._outbox_backoff = min(60.0, max(1.0, self._outbox_backoff * 2))
+        self._outbox_retry_at = time.monotonic() + self._outbox_backoff + random.random()
+
     def flush_outbox(self):
         if not self.client:
             return
         credentials = self.store.load_credentials()
         if not credentials:
+            return
+        if time.monotonic() < self._outbox_retry_at:
             return
         for item in self.store.pending_outbox():
             try:
@@ -414,9 +424,12 @@ class ComposerAgent:
                 ):
                     self.store.set_command_state(item["operation_id"], "cancelled")
                     self.store.acknowledge_outbox(item["id"])
+                else:
+                    self._outbox_failed()
                 break
             self.store.acknowledge_outbox(item["id"])
             self.store.set_meta("last_contact_at", utc_now())
+            self._outbox_backoff = 0.0
 
     def _deadline_expired(self, value: str) -> bool:
         if not value:
