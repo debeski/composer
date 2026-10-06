@@ -8,7 +8,8 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from .stack_schema import collect_stamps
+from . import maintenance_page
+from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
 # First DjangoLux whose inline updates Composer can drive end to end.
@@ -526,6 +527,33 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         note = f" {unstamped} other file(s) unstamped." if unstamped else ""
         return _result(OK, "stack-schema", f"{compose} declares stack schema {schema}.{note}")
 
+    def _check_maintenance_page(self) -> Dict[str, Any]:
+        page = maintenance_page.inspect(Path("."))
+        state = page["state"]
+        if state == maintenance_page.STALE_STOCK_PAGE:
+            return _result(
+                WARN,
+                "maintenance-page",
+                f"{page['path']} is a stock page from an older DjangoLux; after an update it can wait "
+                "on 'ready' forever instead of returning to the site.",
+                fix="Run 'composer check --fix' to replace it; the current file is archived under .xclude/ first.",
+            )
+        if state == maintenance_page.CUSTOM_STUCK:
+            return _result(
+                WARN,
+                "maintenance-page",
+                f"{page['path']} is customised and keeps the old end-of-update logic (sawProgress/readyCount), "
+                "which can leave visitors on the page after an update.",
+                fix="Edit it by hand: on any end state, probe window.location.href and reload it once it answers "
+                "(see DjangoLux's scaffold .proxy/maintenance.html).",
+            )
+        messages = {
+            maintenance_page.CURRENT: "is current",
+            maintenance_page.CUSTOM: "is customised",
+            maintenance_page.MISSING: "is not present",
+        }
+        return _result(OK, "maintenance-page", f"{page['path']} {messages[state]}.")
+
     def _check_wrappers(self) -> List[Dict[str, Any]]:
         """Report drift between the project's launcher wrappers and this image.
 
@@ -732,6 +760,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             results.append(self._check_dlux_updater_executor())
             results.append(self._check_proxy_routes())
             results.append(self._check_stack_schema())
+            results.append(self._check_maintenance_page())
             results.append(self._check_versions())
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
@@ -927,6 +956,9 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         stale_wrappers = [
             entry for entry in wrappers.inspect_wrappers(".") if entry["status"] in wrappers.FIXABLE
         ]
+        stale_maintenance_page = (
+            maintenance_page.inspect(Path("."))["state"] == maintenance_page.STALE_STOCK_PAGE
+        )
         obsolete = sorted(OBSOLETE_SERVICES.intersection(self.services))
         proxy_inspection = inspect_legacy_proxy_routes(".")
         if proxy_inspection["unsupported"]:
@@ -943,10 +975,15 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
-                and not needs_install and not needs_init_containers
+                and not stale_maintenance_page and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration):
             return fixes
         consequences = []
+        if stale_maintenance_page:
+            consequences.append(
+                "Replace the stock .proxy/maintenance.html with the current DjangoLux page "
+                "(rewritten in place, so the running proxy serves it without a restart)."
+            )
         if stale_wrappers:
             consequences.append(
                 "Replace launcher wrappers with the copies baked into this composer image: "
@@ -1058,8 +1095,6 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             return fixes
 
         if stale_wrappers:
-            from pathlib import Path
-
             from .stack_cleanup import _archive_root
 
             root = wrappers.baked_root()
@@ -1078,6 +1113,25 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 )
             except OSError as exc:
                 fixes.append(_result(FAIL, "fix:wrappers", f"Could not update the wrappers: {exc}"))
+
+        if stale_maintenance_page:
+            from .stack_cleanup import _archive_root
+
+            compose = next(
+                (c for c in (args.file, "compose.yml", "docker-compose.yml") if c and Path(c).is_file()),
+                "",
+            )
+            schema = read_stamp(Path(compose).read_text(encoding="utf-8")) if compose else None
+            try:
+                archive = _archive_root(Path("."))
+                maintenance_page.install(Path("."), schema, archive)
+                fixes.append(
+                    _result(OK, "fix:maintenance-page", f"Replaced .proxy/maintenance.html. Backup: {archive}")
+                )
+            except OSError as exc:
+                fixes.append(
+                    _result(FAIL, "fix:maintenance-page", f"Could not replace .proxy/maintenance.html: {exc}")
+                )
 
         if obsolete or proxy_routes:
             from .stack_cleanup import StackCleanupError, remove_obsolete_services
