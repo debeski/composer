@@ -8,6 +8,7 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
+from .stack_schema import collect_stamps
 from .stack_cleanup import OBSOLETE_SERVICES
 
 # First DjangoLux whose inline updates Composer can drive end to end.
@@ -481,6 +482,50 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             fix="Update the resident agent's image so both match, if that matters for the change you're shipping.",
         )
 
+    def _check_stack_schema(self) -> Dict[str, Any]:
+        """Do the generated stack files agree on the stack contract schema?
+
+        compose.yml's stamp is the one DjangoLux reads at runtime, so it leads.
+        Whether that schema is the one the running DjangoLux expects is the app's
+        `stack.schema` doctor check, relayed by `--deep`.
+        """
+        compose = next(
+            (c for c in (self.compose_file, "compose.yml", "docker-compose.yml") if c and Path(c).is_file()),
+            "compose.yml",
+        )
+        secrets = [str(c) for c in self.plaintext_env_candidates()[:1]]
+        stamps = collect_stamps(".", compose, secrets)
+        stamped = {path: schema for path, schema in stamps.items() if schema is not None}
+        if not stamped:
+            return _result(
+                OK,
+                "stack-schema",
+                "Stack files carry no schema stamp; they predate DjangoLux stack schema stamping.",
+            )
+        schemas = sorted(set(stamped.values()))
+        if len(schemas) > 1:
+            by_schema = "; ".join(
+                f"{schema}: " + ", ".join(sorted(p for p, s in stamped.items() if s == schema))
+                for schema in schemas
+            )
+            return _result(
+                WARN,
+                "stack-schema",
+                f"Stack files declare different stack schemas ({by_schema}).",
+                fix="Bring the older files up to date using DjangoLux's docs/stack-schema.md, then restamp them.",
+            )
+        schema = schemas[0]
+        if stamps.get(compose) is None:
+            return _result(
+                WARN,
+                "stack-schema",
+                f"Stack files declare schema {schema}, but {compose} carries no DLUX_STACK_SCHEMA.",
+                fix=f'Add DLUX_STACK_SCHEMA: "{schema}" to the x-environment block of {compose}.',
+            )
+        unstamped = len(stamps) - len(stamped)
+        note = f" {unstamped} other file(s) unstamped." if unstamped else ""
+        return _result(OK, "stack-schema", f"{compose} declares stack schema {schema}.{note}")
+
     def _check_wrappers(self) -> List[Dict[str, Any]]:
         """Report drift between the project's launcher wrappers and this image.
 
@@ -685,6 +730,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             results.append(self._check_removed_services())
             results.append(self._check_dlux_updater_executor())
             results.append(self._check_proxy_routes())
+            results.append(self._check_stack_schema())
             results.append(self._check_versions())
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))

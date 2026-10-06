@@ -894,3 +894,79 @@ class CheckupRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StackSchemaCheckTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self._cwd = os.getcwd()
+        os.chdir(self._tmp.name)
+        self.launcher = DockerComposeLauncher()
+        self.launcher.compose_file = None
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        self._tmp.cleanup()
+
+    def _write(self, relative, text):
+        from pathlib import Path
+
+        path = Path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _check(self):
+        with patch.object(self.launcher, "plaintext_env_candidates", return_value=[]):
+            return self.launcher._check_stack_schema()
+
+    def test_read_stamp_matches_the_djangolux_spellings(self):
+        from composer.stack_schema import read_stamp
+
+        self.assertEqual(read_stamp('x:\n  DLUX_STACK_SCHEMA: "3"\n'), 3)
+        self.assertEqual(read_stamp('LABEL org.dlux.stack-schema="4"'), 4)
+        self.assertEqual(read_stamp("#!/bin/sh\n# dlux stack schema 5\n"), 5)
+        self.assertEqual(read_stamp("<!-- dlux stack schema 6 -->"), 6)
+        self.assertIsNone(read_stamp("# composer-wrapper: 3\n"))
+
+    def test_unstamped_stack_is_informational(self):
+        self._write("compose.yml", "services: {}\n")
+        self._write("Dockerfile", "FROM python\n")
+        result = self._check()
+        self.assertEqual(result["level"], OK)
+        self.assertIn("predate", result["message"])
+
+    def test_agreeing_stamps_pass_and_count_unstamped_files(self):
+        self._write("compose.yml", 'x-environment: &de\n  DLUX_STACK_SCHEMA: "2"\n')
+        self._write("Dockerfile", 'LABEL org.dlux.stack-schema="2"\n')
+        self._write("gunicorn.py", "workers = 3\n")
+        result = self._check()
+        self.assertEqual(result["level"], OK)
+        self.assertIn("schema 2", result["message"])
+        self.assertIn("1 other file(s) unstamped", result["message"])
+
+    def test_disagreeing_stamps_warn_and_name_the_files(self):
+        self._write("compose.yml", 'x-environment: &de\n  DLUX_STACK_SCHEMA: "3"\n')
+        self._write(".proxy/Caddyfile", "# dlux stack schema 2\n")
+        result = self._check()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("2: .proxy/Caddyfile", result["message"])
+        self.assertIn("3: compose.yml", result["message"])
+
+    def test_stamped_files_without_a_compose_stamp_warn(self):
+        self._write("compose.yml", "services: {}\n")
+        self._write("entrypoint.sh", "#!/bin/sh\n# dlux stack schema 2\n")
+        result = self._check()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn('DLUX_STACK_SCHEMA: "2"', result["fix"])
+
+    def test_the_secrets_file_in_use_is_read(self):
+        from pathlib import Path
+
+        self._write("compose.yml", 'x-environment: &de\n  DLUX_STACK_SCHEMA: "2"\n')
+        self._write(".secrets/.env", "# dlux stack schema 1\nX=1\n")
+        with patch.object(self.launcher, "plaintext_env_candidates", return_value=[Path(".secrets/.env")]):
+            result = self.launcher._check_stack_schema()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn(".secrets/.env", result["message"])
