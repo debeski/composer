@@ -3,6 +3,7 @@
 ## v1.6.1b1
 
 - **Outbox Replay Backs Off**: `ComposerAgent.flush_outbox()` retried the oldest queued snapshot, event or capabilities post on every agent tick (`--interval`, 2 s) with no delay, so an enrolled agent whose panel answered 503 or was offline opened one HTTPS connection (plus DNS lookups) every 2 seconds indefinitely. A failed post now holds the outbox back exponentially (1 s doubling to 60 s, plus jitter), matching `_poll_control_plane`; a successful post or command poll resets it. A delivered-cancellation 409 is still handled without backing off.
+- **Stack Schema Stamps In `check`**: new `stack-schema` finding reads the DjangoLux stack schema stamps (`DLUX_STACK_SCHEMA` in compose.yml, the Dockerfile's `org.dlux.stack-schema` label, `dlux stack schema N` headers in `compose.dev.yml`, `entrypoint.sh`, `gunicorn.py`, the secrets file in use and `.proxy/*`) through `composer/stack_schema.py`, which mirrors `dlux.contracts.stack.read_stamp`. Unstamped stacks are `ok` (they predate stamping); stamps that disagree, or stamped files with an unstamped compose.yml, are `warn`. Never `fail`, so the exit code is unchanged. Comparing against the running contract stays with DjangoLux's `stack.schema` doctor check via `--deep`.
 
 ## v1.6.0
 
