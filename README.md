@@ -358,6 +358,17 @@ one the running DjangoLux expects is the app's `stack.schema` doctor check,
 which `check --deep` relays. `start.sh`/`start.ps1` are not stamped; they carry
 composer's own `composer-wrapper` marker.
 
+## maintenance page
+
+`.proxy/maintenance.html` is the page the proxy shows while DjangoLux is in
+maintenance or web is down. DjangoLux scaffolds it once and a release never
+touches it, so `check` keeps it current: a stock page from a DjangoLux older than
+1.11.0b2 (which can leave visitors on it after an update) is a `maintenance-page`
+warning, and `check --fix` archives it under `.xclude/composer-check/` and writes
+the bundled page in place (the proxy bind-mounts the single file, so no restart is
+needed). A customised page is reported, never replaced. `composer/assets/maintenance.html.tmpl`
+mirrors DjangoLux's scaffold template; a test fails when the two checkouts differ.
+
 ## mechanics
 - **Secrets**: Plaintext env file (`.env` → `secrets/.env` → `.secrets/.env`); the first that satisfies the compose's required vars wins.
 - **Version**: Every service gets `COMPOSER_VERSION`.
