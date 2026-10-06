@@ -2,15 +2,52 @@
 
 Env. Docker. Silence.
 
-Composer resolves secrets from a plaintext env file and orchestrates Docker Compose. No local Python setup. Just Docker.
+Composer is the deployment and lifecycle layer of the [DjangoLux](https://pypi.org/project/django-lux/) framework. It started as a thin wrapper that resolved secrets and called Docker Compose; it now owns everything that happens to a DLUX stack *around* the application: getting it up, keeping it healthy, updating it, repairing its topology, and letting the application's own admin panel drive all of that safely.
+
+There is no local Python setup. Composer runs from a container, so the only thing a host needs is Docker.
+
+## what it does
+
+- **Deploys** a Compose project with secrets resolved from a plaintext env file, health-checked, with post-start tasks (DjangoLux's migrator) run exactly once. See [the surface](#the-surface).
+- **Updates** in two ways: whole application images (`update`, `pull`) behind a version gate that refuses to recreate onto an older image, and **inline DjangoLux releases** (`dlux update`, `dlux rollback`) applied from PyPI onto a runtime volume, with Trusted Publisher attestation, SHA-256 and release-manifest checks, and automatic rollback.
+- **Diagnoses and repairs** the outside of a stack with `check` / `check --fix`: topology, obsolete services and proxy routes, retired wiring, wrapper drift, and deployer/resident version drift, always archived under `.xclude/` first.
+- **Runs resident inside the stack** as a privilege-split pair, `composer-agent` (network-facing, read-only Docker) and `composer-executor` (sole holder of Docker write authority), so an update or repair can be triggered from the DjangoLux admin UI without giving the web-facing side the Docker socket. See [Agent Protocol v1](docs/agent-protocol-v1.md) and [executor hardening](docs/executor-hardening.md).
+- **Publishes state for the application to show**: deploy status and a console log, image and package availability, the active DjangoLux channel, and results for the Operations card. Composer writes these files; DjangoLux reads them.
+- **Manages release channels** for both Composer itself and DjangoLux (stable or beta, independently), and updates itself with `self update`.
+
+## how it fits
+
+```
+ host                                   compose project
+ ┌───────────────────┐   one-shot       ┌──────────────────────────────────────┐
+ │ start.sh/start.ps1├─────────────────►│ web · celery · db · proxy · ...      │
+ │  (deployer)       │  debeski/composer└──────────────────────────────────────┘
+ └───────────────────┘                    ▲ health, post-start   ▲ recreate/restart
+                                          │                      │
+                      ┌───────────────────┴──┐  private   ┌──────┴────────────┐
+   DjangoLux admin ──►│ composer-agent       │──socket───►│ composer-executor │
+   (trigger files,    │ egress, read-only    │  typed ops │ docker.sock owner │
+    Operations card)  │ Docker via proxy     │            │ runs the pipeline │
+                      └──────────────────────┘            └───────────────────┘
+```
+
+Three faces of one image (`debeski/composer`):
+
+| face | runs | job |
+| --- | --- | --- |
+| **deployer** | on demand, from `start.sh`/`start.ps1` | deploy, update, check, stop, logs, run, migrate |
+| **agent** | resident (`composer agent run`) | watches triggers and registries, stages verified packages, publishes availability, delegates every write |
+| **executor** | resident (`composer executor run`) | applies updates, restarts, repairs and package activations over a private socket |
+
+The wrappers, the image, and the resident pair are versioned separately, so `check` reports drift between them and `self update` / `agent update` bring them back in line.
 
 ## setup
+
+Put `start.sh` or `start.ps1` in your project root. The DLUX scaffold writes them once; composer owns them from then on and `check --fix` keeps them current (see [wrapper versioning](#wrapper-versioning)).
 
 To leave DjangoLux's initial setup wizard available even when the image contains
 `config.json`, use `./start.sh --skip-config` (or `./start.sh -d --skip-config`).
 This requires DjangoLux 1.9.4+; see [manual first-deploy setup](docs/first-deploy.md).
-
-Put `start.sh` or `start.ps1` in your project root.
 
 ## deployment
 Just start it.
@@ -23,7 +60,27 @@ Composer resolves secrets automatically. It looks for a plaintext env file —
 `.env`, `secrets/.env`, then `.secrets/.env` — and uses the first one that
 supplies every variable the compose file requires.
 
-### resident agent secret access
+## command map
+
+| I want to… | run |
+| --- | --- |
+| bring the stack up | `./start.sh` (`-d` for dev, `-b` to build) |
+| update the application image | `./start.sh update` |
+| only download images | `./start.sh pull` |
+| update DjangoLux inline, or roll it back | `./start.sh dlux update` / `dlux rollback` |
+| see or request the DjangoLux channel | `./start.sh dlux channel [stable\|beta]` |
+| diagnose, then repair, a deployment | `./start.sh check` / `check --fix` |
+| switch Composer's own channel | `./start.sh check --beta` / `--stable` |
+| update Composer itself | `./start.sh self update` |
+| manage the resident pair | `agent update\|restart\|off\|enable`, `executor enable` |
+| run a command in a service | `./start.sh run -m web migrate --noinput` |
+| run DjangoLux's migrator | `./start.sh migrate` |
+| read logs | `./start.sh log -n 200 web` |
+| stop | `./start.sh stop` (`-v`, `-p` are destructive and confirmed) |
+
+The rest of this file is the reference for each.
+
+## resident agent secret access
 
 A resident `composer-agent` must retain the same values for later image-update
 runs. The `start.sh`/`start.ps1` wrappers pass the selected file to the one-shot
@@ -290,4 +347,4 @@ command or invalid response still blocks. `--force` bypasses the check explicitl
 - **Image**: Wrapper scripts target `debeski/composer:latest`, overridable with `COMPOSER_SELF_IMAGE`.
 
 ## why
-Installing Python and a compose toolchain everywhere is friction. Composer keeps the toolchain inside the container and leaves the project root alone.
+Installing Python and a compose toolchain on every host is friction, and letting an application container hold the Docker socket to update itself is a risk. Composer keeps the toolchain inside its own image, leaves the project root alone, and splits the resident work across a network-facing agent and a privileged executor, so the application can ask for an update or a repair without ever being able to perform one.
