@@ -26,6 +26,7 @@ DjangoLux's Operations card asks the resident Composer to perform one **named** 
 - Control-plane requests reject HTTP redirects, including same-origin redirects, and therefore never forward agent authentication headers to a redirect target.
 - Recovery deployment `force` is a strict JSON boolean; string-shaped values are rejected. Sanitized relay output removes complete Authorization values, including Bearer credentials.
 - Commands are retrieved from `GET /api/agent/v1/commands/next/?wait=25`. Offline is a presentation state after 90 seconds without contact, never proof of deployment failure.
+- While the panel is unreachable, both the command poll and outbox replay back off exponentially from 1 to 60 seconds (plus up to 1 second of jitter). Outbox replay resumes immediately once a post or a command poll succeeds.
 - Credential rotation is two-phase: stage a pending secret, persist it, confirm with it, then revoke the old hash. An interrupted confirmation is retried from durable agent state.
 
 ## Document envelope and bounds
