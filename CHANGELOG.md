@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.1b2
+
+- **One-Shot Commands Run The Active DjangoLux Release**: `composer run -m` and `check --deep` exec `python manage.py` directly, and a project `manage.py` generated before DjangoLux resolved the runtime-active release imports the baked image package instead, so `run -m collectstatic` could write another release's static files under the serving templates, and `--deep` reported the baked doctor (on `testbed-dlux`, 1.9.4 instead of the active 1.11.0b1). `exec_in_service(manage=True)` and `_run_deep()` now prefix `python -m dlux.updater.supervisor --no-watch --` when the service's own command runs under the supervisor (`supervised_prefix()`, `SUPERVISED_ONE_SHOT_PREFIX`); unsupervised services, plain `run` commands and already-supervised commands are unchanged.
+
 ## v1.6.1b1
 
 - **Outbox Replay Backs Off**: `ComposerAgent.flush_outbox()` retried the oldest queued snapshot, event or capabilities post on every agent tick (`--interval`, 2 s) with no delay, so an enrolled agent whose panel answered 503 or was offline opened one HTTPS connection (plus DNS lookups) every 2 seconds indefinitely. A failed post now holds the outbox back exponentially (1 s doubling to 60 s, plus jitter), matching `_poll_control_plane`; a successful post or command poll resets it. A delivered-cancellation 409 is still handled without backing off.

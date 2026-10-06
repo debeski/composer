@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import sys
 import tempfile
 import time
@@ -16,6 +17,8 @@ from .constants import (
     SERVICE_NOT_SEEN,
     SERVICE_STARTING,
     SERVICE_UPDATING,
+    SUPERVISED_ONE_SHOT_PREFIX,
+    SUPERVISOR_MODULE,
 )
 from .output_utils import OutputUtilsMixin
 from .service_selection import scoped_service_list
@@ -104,6 +107,8 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             cmd = ["python", "manage.py"] + cmd
         if shell:
             cmd = ["sh", "-c", " ".join(cmd)]
+        if manage:
+            cmd = self.supervised_prefix(service, cmd) + cmd
 
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
         action = ["run", "--rm"] if fresh else ["exec"]
@@ -286,6 +291,36 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         except Exception:
             pass
         self.compose_runtime_override = None
+
+    def supervised_prefix(self, service: str, command: List[str]) -> List[str]:
+        """The DjangoLux runtime supervisor prefix for a one-shot command, or [].
+
+        A project ``manage.py`` generated before DjangoLux learned to resolve the
+        runtime-active release imports the baked image package, so an exec'd
+        ``collectstatic`` or doctor would run a different release than the one
+        serving. When the service's own command runs under the supervisor, run
+        the one-shot under it too (``--no-watch``, as the pre_start hooks do).
+        """
+        if any(SUPERVISOR_MODULE in token for token in command):
+            return []
+        config = self.compose_config_json() or {}
+        services = config.get("services") if isinstance(config, dict) else None
+        spec = services.get(service) if isinstance(services, dict) else None
+        if not isinstance(spec, dict):
+            return []
+        tokens: List[str] = []
+        for key in ("entrypoint", "command"):
+            value = spec.get(key)
+            if isinstance(value, str):
+                try:
+                    tokens += shlex.split(value)
+                except ValueError:
+                    continue
+            elif isinstance(value, list):
+                tokens += [str(item) for item in value]
+        if any(SUPERVISOR_MODULE in token for token in tokens):
+            return list(SUPERVISED_ONE_SHOT_PREFIX)
+        return []
 
     def compose_config_json(self) -> Optional[dict]:
         """Resolved compose config, or None if it cannot be read or parsed.

@@ -595,6 +595,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
 
     def _run_deep(self, service: str, command: str) -> Dict[str, Any]:
         argv = command.split()
+        argv = self.supervised_prefix(service, argv) + argv
         ok, out, err = self.run_docker_compose(["exec", "-T", service] + argv, timeout=120)
         detail = (out or err or "").strip()
         if ok:

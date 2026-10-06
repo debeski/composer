@@ -59,6 +59,8 @@ POST_START_LABEL = "org.dlux.post-start"
 # otherwise static in the compose file.
 MIGRATOR_FLAGS_ENV = "DLUX_MIGRATOR_FLAGS"
 DEFAULT_MIGRATOR_SERVICE = "web"
+SUPERVISOR_MODULE = "dlux.updater.supervisor"
+SUPERVISED_ONE_SHOT_PREFIX = ("python", "-m", SUPERVISOR_MODULE, "--no-watch", "--")
 DEFAULT_MIGRATOR_COMMAND = (
     "python -m dlux.updater.supervisor --no-watch -- python manage.py migrator"
 )
