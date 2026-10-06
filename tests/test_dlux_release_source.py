@@ -291,3 +291,47 @@ class AssessAndUnpackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleIndexRetryTests(unittest.TestCase):
+    """PyPI's CDN served an index without a just-published beta to alternate
+    requests, so an unpinned update settled for the release before it."""
+
+    class _Selected(Exception):
+        pass
+
+    def _resolve(self, indexes, **kwargs):
+        chosen = []
+        stale = iter(indexes)
+
+        def capture(candidate, runner=None):
+            chosen.append(candidate.version)
+            raise self._Selected()
+
+        sleeps = []
+        with (
+            patch.object(source, "fetch_index", side_effect=lambda opener=None: next(stale)),
+            patch.object(source, "verify_attestation", side_effect=capture),
+        ):
+            with self.assertRaises(self._Selected):
+                source.obtain(channel="beta", sleep=sleeps.append, **kwargs)
+        return chosen[0], sleeps
+
+    def test_rereads_a_stale_index_until_the_expected_release_appears(self):
+        old = SelectionTests._candidates("1.11.0b1")
+        new = SelectionTests._candidates("1.11.0b1", "1.11.0b2")
+        chosen, sleeps = self._resolve([old, old, new], expected="1.11.0b2")
+        self.assertEqual(chosen, "1.11.0b2")
+        self.assertEqual(sleeps, [3, 6])
+
+    def test_settles_for_what_the_index_offers_after_the_retries(self):
+        old = SelectionTests._candidates("1.11.0b1")
+        chosen, sleeps = self._resolve([old] * 4, expected="1.11.0b2")
+        self.assertEqual(chosen, "1.11.0b1")
+        self.assertEqual(sleeps, list(source.INDEX_RETRY_DELAYS))
+
+    def test_no_retry_when_current_or_pinned(self):
+        new = SelectionTests._candidates("1.11.0b2")
+        self.assertEqual(self._resolve([new], expected="1.11.0b2"), ("1.11.0b2", []))
+        old = SelectionTests._candidates("1.11.0b1", "1.10.1")
+        self.assertEqual(self._resolve([old], expected="1.11.0b2", target_version="1.10.1"), ("1.10.1", []))

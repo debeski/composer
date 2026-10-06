@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Tuple
 from pathlib import Path
 
 from .dlux_package_update import apply_package_update, rollback_package_update
@@ -146,7 +147,20 @@ def build_availability_payload(target_version="", *, channel=None, runtime=None,
     }
 
 
-def availability_summary(payload: dict, installed: str = "") -> str:
+def installed_release(active) -> Tuple[str, bool]:
+    """``(version, verified)`` for the active release.
+
+    A volume release is the version on disk. An image activation's ``version``
+    is only what DjangoLux last recorded: after the image moves to an older
+    DjangoLux it can name a release that is not running, and from the runtime
+    volume Composer cannot read the baked package to check.
+    """
+    if not isinstance(active, dict):
+        return "", False
+    return str(active.get("version") or ""), active.get("source") == "volume"
+
+
+def availability_summary(payload: dict, installed: str = "", verified: bool = True) -> str:
     """One line for a successful check, relative to what is installed.
 
     The payload names the newest release on the channel, which is not an update
@@ -160,6 +174,11 @@ def availability_summary(payload: dict, installed: str = "") -> str:
     current, candidate = versions.try_parse(installed), versions.try_parse(latest)
     if current is not None and candidate is not None and candidate <= current:
         where = f" on the {channel} channel" if channel else ""
+        if not verified:
+            return (
+                f"DjangoLux {latest} is the newest release{where}; the image's DjangoLux is recorded as "
+                f"{installed}, which Composer cannot verify (the Updates card compares with what is running)"
+            )
         if candidate == current:
             return f"Up to date: DjangoLux {installed} is the newest release{where}"
         return f"Up to date: DjangoLux {installed} is newer than {latest}, the newest release{where}"
@@ -176,9 +195,8 @@ def run_availability_check(args, runtime) -> int:
         print(f"✖ {payload['error']}", file=sys.stderr)
         print(f"  published to {path}", file=sys.stderr)
         return 1
-    active = runtime.read_active() if runtime.exists() else {}
-    installed = str(active.get("version") or "") if isinstance(active, dict) else ""
-    print(f"✔ {availability_summary(payload, installed)} — published to {path}")
+    installed, verified = installed_release(runtime.read_active() if runtime.exists() else {})
+    print(f"✔ {availability_summary(payload, installed, verified)} — published to {path}")
     if payload.get("error"):
         print(f"  note: {payload['error']}", file=sys.stderr)
     return 0
@@ -419,11 +437,11 @@ def run_dlux_channel(args, argv=None) -> int:
         return 0
 
     status = dlux_channel.describe(runtime.state_dir)
-    active = runtime.read_active() if runtime.exists() else {}
-    installed = str(active.get("version") or "") if isinstance(active, dict) else ""
+    installed, verified = installed_release(runtime.read_active() if runtime.exists() else {})
     print(f"Channel:   {status['channel']}")
     if installed:
-        print(f"Installed: DjangoLux {installed}")
+        note = "" if verified else " (baked into the image, as recorded; not verified)"
+        print(f"Installed: DjangoLux {installed}{note}")
     if status["pending"]:
         print(f"Pending:   {status['pending']} (requested, not yet applied by the worker)")
     if status["failed"]:

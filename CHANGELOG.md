@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.6.1b3
+
+- **Recorded Image Versions Are Not Called Current**: under `source: image`, `active.json`'s `version` is only what DjangoLux last recorded, and after the image moves to an older DjangoLux it names a release that is not running (seen on `testbed-dlux`: recorded 1.11.0b1, running 1.9.4, and `dlux check` said "Up to date"). New `installed_release()` treats only a volume release as verified; `availability_summary(..., verified=False)` no longer claims up to date and says the version cannot be verified, and `dlux channel` marks it "baked into the image, as recorded; not verified". Updates were never blocked: the already-active test requires a volume release.
+- **Unpinned Update Re-Reads A Stale Index**: right after a publish PyPI's CDN served alternate requests an index without the new release, so `dlux update` twice settled for the previous one while `dlux check` had just seen the new one. `dlux_release_source.obtain(expected=...)` now re-reads the index (after 3, 6 and 12 s) while the resolved release is older than the one the last check published for the same channel (`_published_availability()`), then proceeds with what it found. It never pins to the published version.
+
 ## v1.6.1b2
 
 - **Stale Maintenance Page Repair**: new `maintenance-page` finding in `check` (`composer/maintenance_page.py`). DjangoLux pages scaffolded before 1.11.0b2 redirect only after seeing a progress phase, so a visitor whose first status read is `ready` waits on `.proxy/maintenance.html` forever. A byte-identical stock copy (four known sha256s) is `warn`, and `check --fix` archives it under `.xclude/composer-check/` and writes the bundled page (`composer/assets/maintenance.html.tmpl`, a mirror of DjangoLux's scaffold template, stamped to match compose.yml or unstamped). It rewrites in place, because the proxy bind-mounts the single file and a renamed-over file would not be served until the proxy was recreated. A customised page that still carries the old logic is `warn` with a manual hint and is never touched.
