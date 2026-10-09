@@ -108,8 +108,13 @@ def apply_package_update(
     keep_releases: int = DEFAULT_KEEP_RELEASES,
     workdir=None,
     channel: Optional[str] = None,
+    before_swap: Optional[Callable[[], tuple]] = None,
 ) -> PackageUpdateResult:
     """Fetch, stage, activate, restart, health-check — and undo if unhealthy.
+
+    ``before_swap`` (``() -> (ok, detail)``) runs once the release is resolved
+    and is not already active, before anything is staged: the operator CLI's
+    pre-update backup. A failure stops the update with nothing changed.
 
     `restart` and `health_check` each return ``(ok, detail)``. Without an
     explicit ``channel`` the deployment's published policy decides which
@@ -147,6 +152,16 @@ def apply_package_update(
             ok=True, version=candidate.version, previous_version=candidate.version,
             message=f"DjangoLux {candidate.version} is already the active release.", steps=steps,
         )
+
+    if before_swap is not None:
+        step("backing-up", "Taking a pre-update DjangoLux backup")
+        backed_up, backup_detail = before_swap()
+        if not backed_up:
+            return PackageUpdateResult(
+                ok=False, version=candidate.version,
+                message=f"Nothing was changed: {backup_detail}", steps=steps,
+            )
+        say(backup_detail)
 
     try:
         step("staging", f"Staging DjangoLux {candidate.version}")
@@ -220,8 +235,12 @@ def rollback_package_update(
     restart: Callable[[], tuple],
     health_check: Callable[[], tuple],
     progress: Optional[Callable[[str], None]] = None,
+    before_swap: Optional[Callable[[], tuple]] = None,
 ) -> PackageUpdateResult:
-    """Operator-requested rollback to the newest staged release below the active one."""
+    """Operator-requested rollback to the newest staged release below the active one.
+
+    ``before_swap`` is the pre-rollback backup, taken before the pointer moves.
+    """
     say = progress or _noop
     steps: List[str] = []
     try:
@@ -238,6 +257,16 @@ def rollback_package_update(
         version for version in runtime.staged_versions()
         if version_sort_key(version) < version_sort_key(current)
     ]
+    if before_swap is not None:
+        steps.append("backing-up")
+        say("Taking a pre-rollback DjangoLux backup")
+        backed_up, backup_detail = before_swap()
+        if not backed_up:
+            return PackageUpdateResult(ok=False, previous_version=current,
+                                       message=f"Nothing was changed: {backup_detail}",
+                                       steps=steps)
+        say(backup_detail)
+
     if not targets:
         # Nothing below the active release: fall back to the image copy.
         steps.append("restore-image")

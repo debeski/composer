@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`dlux update` / `dlux rollback` Back Up First**: an operator's CLI update went straight to the swap and never passed through DjangoLux's update path, so it ran with no snapshot (found break-testing DjangoLux 1.11.0b4 on `testbed-dlux`, S4). `--backup data|full|skip` (default `data`, or `COMPOSER_DLUX_BACKUP`) now takes a DjangoLux system backup in the stack before anything is staged or activated (`composer/dlux_snapshot.py`, `before_swap` in `apply_package_update` / `rollback_package_update`): `manage.py dlux_backup --trigger update` in `celery` (or `web`) under the runtime supervisor, falling back to `manage.py shell` and `dlux.backup.run_system_backup` for a DjangoLux without the command. A failed backup stops the update with "Nothing was changed"; an already-active release takes no backup. Executor runs (`COMPOSER_OPERATION_ID`, DjangoLux's own hand-off) take none, because DjangoLux backs up before writing the request.
+
 ## v1.6.1b3
 
 - **Recorded Image Versions Are Not Called Current**: under `source: image`, `active.json`'s `version` is only what DjangoLux last recorded, and after the image moves to an older DjangoLux it names a release that is not running (seen on `testbed-dlux`: recorded 1.11.0b1, running 1.9.4, and `dlux check` said "Up to date"). New `installed_release()` treats only a volume release as verified; `availability_summary(..., verified=False)` no longer claims up to date and says the version cannot be verified, and `dlux channel` marks it "baked into the image, as recorded; not verified". Updates were never blocked: the already-active test requires a volume release.

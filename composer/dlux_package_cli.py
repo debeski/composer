@@ -57,6 +57,18 @@ def parse_dlux_update_args(argv, *, action="update"):
             "--restart-service", action="append", dest="restart_services", default=None,
             metavar="SERVICE", help="Service to restart (repeatable; default: web, celery)",
         )
+    if action in {"update", "rollback"}:
+        parser.add_argument(
+            "--backup", choices=("data", "full", "skip"),
+            default=os.environ.get("COMPOSER_DLUX_BACKUP", "data").strip().lower() or "data",
+            help=(
+                "Pre-update DjangoLux backup the CLI takes in the stack before swapping: "
+                "data (default; database), full (database and media) or skip. Not taken "
+                "when DjangoLux handed the update over, because it backed up first."
+            ),
+        )
+    else:
+        parser.set_defaults(backup="skip")
     if action == "update":
         parser.add_argument(
             "--dry-run", action="store_true",
@@ -325,6 +337,33 @@ def _without_the_runtime_volume(args, argv) -> int:
         return 2
 
 
+def _pre_update_backup(args):
+    """The snapshot to take before the swap, or None.
+
+    None when the operator chose `--backup skip`, and when the executor runs
+    this on DjangoLux's behalf (`COMPOSER_OPERATION_ID` is set): DjangoLux took
+    the backup itself before handing the update over, and a second one would
+    only double the wait.
+    """
+    if args.backup == "skip" or os.environ.get("COMPOSER_OPERATION_ID"):
+        return None
+    from .dlux_snapshot import take_snapshot
+    from .launcher import DockerComposeLauncher
+
+    def snapshot():
+        launcher = DockerComposeLauncher()
+        launcher.compose_file = args.file
+        launcher.dev_mode = args.dev
+        launcher.resolve_active_compose_files()
+        launcher.resolve_secrets()
+        ok, detail = take_snapshot(launcher, args.backup)
+        if not ok:
+            detail += " Pass --backup skip to update without one."
+        return ok, detail
+
+    return snapshot
+
+
 def run_dlux_update(args, argv=None) -> int:
     runtime = DluxRuntime(args.runtime_root)
     if not runtime.exists():
@@ -355,15 +394,17 @@ def run_dlux_update(args, argv=None) -> int:
 
     restart, health_check = _build_operations(args, services)
     progress = lambda message: print(f"⟳ {message}", flush=True)
+    before_swap = _pre_update_backup(args)
 
     if args.mode == "rollback":
         result = rollback_package_update(
-            runtime, restart=restart, health_check=health_check, progress=progress
+            runtime, restart=restart, health_check=health_check, progress=progress,
+            before_swap=before_swap,
         )
     else:
         result = apply_package_update(
             runtime, restart=restart, health_check=health_check,
-            target_version=args.version, progress=progress,
+            target_version=args.version, progress=progress, before_swap=before_swap,
             **({"source": staged} if staged else {}),
         )
 
