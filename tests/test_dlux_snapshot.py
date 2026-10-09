@@ -160,6 +160,7 @@ class TakeSnapshotTests(unittest.TestCase):
         script = fallback[-1]
         self.assertIn("run_system_backup", script)
         self.assertIn("media_included=False", script)
+        self.assertIn("status='failed', next_attempt_at=None", script, "a failure must not leave a retry armed")
 
     def test_a_failed_backup_reports_why(self):
         reply = json.dumps({"ok": False, "token": "t", "error": "disk full"})

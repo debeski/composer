@@ -26,6 +26,10 @@ _FALLBACK = (
     "SB = apps.get_model('dlux', 'SystemBackup'); "
     "b = SB.objects.create(requested_by_username='composer', trigger='update', media_included={media}); "
     "run_system_backup(b.pk); b.refresh_from_db(); "
+    # A failure may have armed an automatic retry; the caller decides on this
+    # answer, so make it final rather than leave a backup to run later.
+    "SB.objects.filter(pk=b.pk, status='pending').update(status='failed', next_attempt_at=None) "
+    "if b.status == 'pending' else None; b.refresh_from_db(); "
     "print(json.dumps({{'ok': b.status == 'completed', 'token': b.token, 'status': b.status, "
     "'rows': b.row_count, 'error': b.error}}))"
 )
@@ -75,5 +79,5 @@ def take_snapshot(launcher, scope: str = "data") -> Tuple[bool, str]:
     reason = (result or {}).get("error") or (err or out or "").strip().splitlines()[-1:] or ["no result"]
     if isinstance(reason, list):
         reason = reason[0]
-    return False, f"the pre-update backup failed in {service}: {reason}"
+    return False, f"the backup failed in {service}: {reason}"
 
