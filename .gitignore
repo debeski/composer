@@ -36,5 +36,4 @@ composer-detached.log
 .agents
 .claude
 .codex
-/CLAUDE.md
 db.sqlite3
