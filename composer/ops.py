@@ -345,6 +345,133 @@ def _update_resident_pair(runtime, request, self_request_path=None) -> dict:
     return {"deferred": True}
 
 
+#: Lines a log request may ask for, and the characters a result may carry back.
+LOG_LINES_DEFAULT = 200
+LOG_LINES_MAX = 1000
+MAX_LOG_CHARS = 60000
+
+
+def _stack_launcher(runtime):
+    from .launcher import DockerComposeLauncher
+
+    launcher = DockerComposeLauncher()
+    launcher.compose_file = getattr(runtime.args, "file", None)
+    launcher.dev_mode = getattr(runtime.args, "dev", False)
+    launcher.resolve_active_compose_files()
+    return launcher
+
+
+def _parse_ps(text: str) -> dict:
+    """`docker compose ps --format json`: one object per line, or one array."""
+    rows = []
+    text = (text or "").strip()
+    if text.startswith("["):
+        try:
+            rows = json.loads(text)
+        except ValueError:
+            rows = []
+    else:
+        for line in text.splitlines():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    states = {}
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("Service"):
+            states[row["Service"]] = {
+                "state": str(row.get("State") or ""),
+                "health": str(row.get("Health") or ""),
+                "status": str(row.get("Status") or "")[:120],
+            }
+    return states
+
+
+def _service_table(runtime) -> list:
+    """Every Compose service, its state, and whether a request may restart it."""
+    from .executor_ops import _restart_policy
+
+    launcher = _stack_launcher(runtime)
+    ok, out, err = launcher.run_docker_compose(["config", "--format", "json"], timeout=60)
+    if not ok:
+        raise ValueError(redact_text(err or out or "docker compose config failed.")[:MAX_MESSAGE_CHARS])
+    try:
+        services = json.loads(out).get("services") or {}
+    except (ValueError, AttributeError):
+        raise ValueError("docker compose config returned invalid JSON.")
+    _ok, ps_out, _err = launcher.run_docker_compose(["ps", "--all", "--format", "json"], timeout=60)
+    states = _parse_ps(ps_out)
+    protected, allowed = _restart_policy(os.environ)
+    table = []
+    for name in sorted(services):
+        labels = (services[name] or {}).get("labels") or {}
+        label = str(labels.get("org.dlux.restart") or "") if isinstance(labels, dict) else ""
+        state = states.get(name, {"state": "absent", "health": "", "status": ""})
+        table.append({
+            "name": name,
+            **state,
+            "restart_label": label,
+            "can_restart": name in allowed and name not in protected and label != "protected",
+        })
+    return table
+
+
+def _list_services(runtime) -> dict:
+    return {"exit_code": 0, "services": _service_table(runtime), "findings": []}
+
+
+def _requested_service(runtime, request, *, restartable: bool) -> str:
+    service = str(request.get("service") or "").strip()
+    table = {row["name"]: row for row in _service_table(runtime)}
+    if service not in table:
+        raise ValueError(f"'{service}' is not a service of this deployment.")
+    if restartable and not table[service]["can_restart"]:
+        raise ValueError(
+            f"'{service}' may not be restarted remotely (protected, or not in COMPOSER_AGENT_RESTART_SERVICES)."
+        )
+    return service
+
+
+def _restart_service(runtime, request, *, op: str) -> dict:
+    """Restart or recreate one allow-listed service through the executor."""
+    import uuid
+
+    from . import executor_client
+
+    service = _requested_service(runtime, request, restartable=True)
+    if not executor_client.executor_configured():
+        raise ValueError("Restarting a service needs composer-executor, which this deployment does not define.")
+    exit_code, detail = executor_client.run_operation(op, {"service": service}, operation_id=str(uuid.uuid4()))
+    verb = "Recreated" if op == "recreate" else "Restarted"
+    if exit_code != 0:
+        raise ValueError(redact_text(detail or f"{verb[:-1]} of {service} failed (exit {exit_code}).")[:MAX_MESSAGE_CHARS])
+    return {
+        "exit_code": 0,
+        "service": service,
+        "findings": [{"name": f"service-{op}", "level": "ok", "message": f"{verb} {service}."}],
+    }
+
+
+def _tail_logs(runtime, request) -> dict:
+    """The last lines of one service's logs, redacted and capped."""
+    service = _requested_service(runtime, request, restartable=False)
+    try:
+        lines = int(request.get("lines") or LOG_LINES_DEFAULT)
+    except (TypeError, ValueError):
+        lines = LOG_LINES_DEFAULT
+    lines = max(1, min(LOG_LINES_MAX, lines))
+    launcher = _stack_launcher(runtime)
+    ok, out, err = launcher.run_docker_compose(
+        ["logs", "--no-color", "--no-log-prefix", "--tail", str(lines), service], timeout=60,
+    )
+    if not ok:
+        raise ValueError(redact_text(err or out or f"Could not read {service}'s logs.")[:MAX_MESSAGE_CHARS])
+    text = redact_text(out or "")
+    if len(text) > MAX_LOG_CHARS:
+        text = text[-MAX_LOG_CHARS:]
+    return {"exit_code": 0, "service": service, "lines": lines, "logs": text, "findings": []}
+
+
 #: operation name -> callable. Nothing outside this table can run.
 HANDLERS = {
     "check": lambda runtime, request: _run_check(runtime),
@@ -354,6 +481,10 @@ HANDLERS = {
     "agent-update": lambda runtime, request: _update_resident_pair(
         runtime, request, Path(runtime.package_trigger.parent) / REQUEST_FILENAME,
     ),
+    "services": lambda runtime, request: _list_services(runtime),
+    "service-restart": lambda runtime, request: _restart_service(runtime, request, op="restart"),
+    "service-recreate": lambda runtime, request: _restart_service(runtime, request, op="recreate"),
+    "logs-tail": _tail_logs,
 }
 
 

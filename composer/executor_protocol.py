@@ -35,7 +35,7 @@ _LENGTH_PREFIX_BYTES = 4
 # absence of image_update (file-triggered), backup (DLUX-side), and
 # rotate_credentials (agent-local) — none of them belong on this surface.
 EXECUTOR_OPS = frozenset(
-    {"restart", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback", "check_fix", "agent_update"}
+    {"restart", "recreate", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback", "check_fix", "agent_update"}
 )
 
 REQUEST_FIELDS = frozenset({"protocol_version", "operation_id", "op", "payload"})
@@ -105,6 +105,12 @@ def validate_executor_request(value: Any) -> Dict[str, Any]:
         service = _clip(payload.get("service"), 200)
         if service and not _SERVICE_RE.fullmatch(service):
             raise ProtocolError("Restart service name is invalid.")
+        payload = {"service": service}
+    elif op == "recreate":
+        _require_payload_fields(payload, {"service"})
+        service = _clip(payload.get("service"), 200)
+        if not service or not _SERVICE_RE.fullmatch(service):
+            raise ProtocolError("Recreate needs one valid service name.")
         payload = {"service": service}
     elif op == "recovery_deploy":
         _require_payload_fields(payload, {"force", "reason"})

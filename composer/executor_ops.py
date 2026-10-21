@@ -49,8 +49,8 @@ def _run(argv, env) -> Tuple[int, str]:
         return 127, f"Composer process could not start: {exc}"
 
 
-def _run_restart(operation_id: str, service: str) -> Tuple[int, str]:
-    env = _op_env(operation_id)
+def _restart_policy(env) -> Tuple[set, list]:
+    """(protected, allowed): the services a remote request may never / may touch."""
     protected = PROTECTED_RESTART_SERVICES | set(
         parse_service_list(env.get("COMPOSER_EXCLUDE_SERVICES"))
     )
@@ -59,6 +59,30 @@ def _run_restart(operation_id: str, service: str) -> Tuple[int, str]:
         for item in parse_service_list(os.environ.get("COMPOSER_AGENT_RESTART_SERVICES"))
         if item not in protected
     ]
+    return protected, allowed
+
+
+def _run_recreate(operation_id: str, service: str) -> Tuple[int, str]:
+    """Recreate one allow-listed service; Compose runs its pre_start hooks."""
+    env = _op_env(operation_id)
+    protected, allowed = _restart_policy(env)
+    if service in protected:
+        return 2, f"Service '{service}' is protected from remote recreation."
+    if service not in allowed:
+        return 2, f"Service '{service}' is not in COMPOSER_AGENT_RESTART_SERVICES."
+    from .launcher import DockerComposeLauncher
+
+    launcher = DockerComposeLauncher()
+    launcher.resolve_active_compose_files()
+    ok, out, err = launcher.run_docker_compose(
+        ["up", "-d", "--no-deps", "--force-recreate", service], timeout=600,
+    )
+    return (0, "") if ok else (1, (err or out or f"Could not recreate {service}.").strip()[-1000:])
+
+
+def _run_restart(operation_id: str, service: str) -> Tuple[int, str]:
+    env = _op_env(operation_id)
+    protected, allowed = _restart_policy(env)
     if service in protected:
         return 2, f"Service '{service}' is protected from remote restart."
     if service and service not in allowed:
@@ -219,6 +243,8 @@ def default_operation_handler(request: Dict) -> Dict:
     payload = request.get("payload", {})
     if op == "restart":
         exit_code, detail = _run_restart(operation_id, payload.get("service", ""))
+    elif op == "recreate":
+        exit_code, detail = _run_recreate(operation_id, payload.get("service", ""))
     elif op == "recovery_deploy":
         exit_code, detail = _run_recovery(operation_id, bool(payload.get("force")))
     elif op == "dlux_package_apply":

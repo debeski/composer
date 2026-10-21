@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.7.0b2
+
+- **Service Operations For DjangoLux's Operations Panel**: new named operations in `composer.ops.HANDLERS` — `services` (every Compose service with state, health, `org.dlux.restart` label and `can_restart`), `service-restart`, `service-recreate` and `logs-tail` (last 1–1000 lines, redacted, capped at 60000 characters). A request may carry only a `service` name, checked against the stack's own services and the restart allow-list, and a `lines` count.
+- **Executor `recreate` Op**: `docker compose up -d --no-deps --force-recreate SERVICE` for one service, under the same protected-service and `COMPOSER_AGENT_RESTART_SERVICES` policy as `restart` (shared `_restart_policy`), re-enforced by the executor itself.
+
 ## v1.7.0b1
 
 - **Composer Publishes The Maintenance Page**: the page DjangoLux used to scaffold into each project (`.proxy/maintenance.html`, bind-mounted into the proxy) now ships in this image as `composer/assets/maintenance/` (`index.html`, `maintenance.css`, `maintenance.js` — no inline script or style). `composer-agent` publishes it on every start to the runtime volume at `proxy/maintenance/`; the proxy serves it from the runtime mount it already has, with assets under `/_dlux/maintenance/` so they load while `web` is down (DjangoLux stack schema 3). New `composer maintenance publish [--override DIR]`.
