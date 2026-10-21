@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "version": "1.7.0b1",
+  "summary": "Composer publishes the DjangoLux maintenance page itself and hardens the resident stack.",
+  "highlights": [
+    "The maintenance page ships in the Composer image; composer-agent publishes it on the runtime volume and the proxy serves it from there (DjangoLux stack schema 3).",
+    "'composer check --fix' moves an existing stack off its project maintenance page; a customised page is kept as the .proxy/maintenance/ override.",
+    "The resident stack is hardened: no write-enabled Docker socket proxy, DAC_OVERRIDE instead of DAC_READ_SEARCH, pinned images and actions.",
+    "Composer's version and release notes come from release-manifest.json, also exposed as the image label org.dlux.composer.release-manifest."
+  ],
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b1"
+}

@@ -5,7 +5,7 @@
 #
 # Runs the actual image and fails (non-zero) if it is broken, so CI and the
 # Release workflow can gate the Docker Hub push on it. Must be run from the repo
-# root (reads ./VERSION to assert the image reports the expected version).
+# root (reads ./release-manifest.json to assert the image reports the expected version).
 set -euo pipefail
 
 IMAGE="${1:?usage: smoke-test.sh <image-ref>}"
@@ -13,11 +13,11 @@ run() { docker run --rm "$IMAGE" "$@"; }
 
 echo "==> Smoke-testing image: $IMAGE"
 
-# 1. --version prints and matches the repo VERSION file.
-expected="$(tr -d '[:space:]' < VERSION)"
+# 1. --version prints and matches the repo release manifest.
+expected="$(python3 -c 'import json; print(json.load(open("release-manifest.json"))["version"])')"
 actual="$(run --version | awk '{print $NF}' | tr -d '[:space:]')"
 echo "    version: image='$actual' file='$expected'"
-[ "$actual" = "$expected" ] || { echo "::error::image version '$actual' != VERSION '$expected'"; exit 1; }
+[ "$actual" = "$expected" ] || { echo "::error::image version '$actual' != release-manifest.json '$expected'"; exit 1; }
 
 # 2. --help exposes the key CLI flags.
 help="$(run --help)"

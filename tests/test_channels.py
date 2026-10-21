@@ -355,11 +355,13 @@ class ReleaseTagTests(unittest.TestCase):
         import subprocess
         import sys
 
-        # Derived from VERSION, not hardcoded: this shells out to the real CLI,
-        # which validates the tag against that file, so a pinned literal would
-        # fail on every version bump for a reason unrelated to what is tested.
+        # Derived from the release manifest, not hardcoded: this shells out to
+        # the real CLI, which validates the tag against that file, so a pinned
+        # literal would fail on every version bump for an unrelated reason.
+        import json
+
         root = Path(__file__).resolve().parents[1]
-        version = (root / "VERSION").read_text(encoding="utf-8").strip()
+        version = json.loads((root / "release-manifest.json").read_text(encoding="utf-8"))["version"]
         completed = subprocess.run(
             [sys.executable, "-m", "composer.release_tag", f"v{version}"],
             capture_output=True, text=True, cwd=str(root),

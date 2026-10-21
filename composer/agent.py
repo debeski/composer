@@ -754,6 +754,20 @@ class ComposerAgent:
         self.flush_outbox()
         self.publish_agent_status()
 
+    def publish_maintenance_page(self) -> None:
+        """Put this image's maintenance page on the runtime volume for the proxy.
+
+        On every start, so `agent update` refreshes it; a project override
+        (`.custom` marker) is left alone. Failure must not stop the agent.
+        """
+        from . import maintenance_page
+
+        try:
+            if maintenance_page.publish(self.watch.runtime_root):
+                print("✔ maintenance page published", flush=True)
+        except OSError as exc:
+            print(f"⚠ could not publish the maintenance page: {redact_text(exc)}", flush=True)
+
     def run(self) -> int:
         if self.args.once and self.client:
             try:
@@ -764,6 +778,7 @@ class ComposerAgent:
                         self.store.enqueue_command(validate_command(command))
             except (ControlPlaneError, ProtocolError, ValueError) as exc:
                 self.store.set_meta("last_connection_error", redact_text(exc))
+        self.publish_maintenance_page()
         self.start_poller()
         print(
             f"👁 composer agent — trigger={self.watch.trigger}"

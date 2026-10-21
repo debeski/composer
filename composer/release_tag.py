@@ -53,8 +53,8 @@ def classify_tag(tag, *, version_file_value="") -> dict:
         declared = str(version_file_value).strip()
         if declared != text:
             raise ReleaseTagError(
-                f"Release tag {raw!r} does not match VERSION ({declared}). "
-                "Bump VERSION before tagging."
+                f"Release tag {raw!r} does not match release-manifest.json ({declared}). "
+                "Bump release-manifest.json before tagging."
             )
     prerelease = bool(version.is_prerelease)
     return {
@@ -219,7 +219,7 @@ def changelog_section(version, path="CHANGELOG.md") -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="composer.release_tag")
     parser.add_argument("tag", nargs="?", default=os.getenv("GITHUB_REF_NAME", ""))
-    parser.add_argument("--version-file", default="VERSION")
+    parser.add_argument("--version-file", default="release-manifest.json")
     parser.add_argument("--github-output", action="store_true")
     parser.add_argument(
         "--current-beta", default="",
@@ -237,8 +237,10 @@ def main(argv=None) -> int:
 
     try:
         declared = Path(args.version_file).read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        print(f"::error::Could not read {args.version_file}: {exc}", file=sys.stderr)
+        if args.version_file.endswith(".json"):
+            declared = str(json.loads(declared).get("version") or "").strip()
+    except (OSError, ValueError, AttributeError) as exc:
+        print(f"::error::Could not read the version from {args.version_file}: {exc}", file=sys.stderr)
         return 1
     try:
         decision = classify_tag(args.tag, version_file_value=declared)

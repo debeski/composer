@@ -3,7 +3,13 @@
 Composer ships as the public Docker image **`debeski/composer`**. Releases are
 **tag-driven**: pushing a `v*` git tag runs `.github/workflows/release.yml`,
 which builds the multi-arch image, pushes it to Docker Hub, and creates a GitHub
-Release. The `VERSION` file is the single source of truth for the version.
+Release. `release-manifest.json` is the single source of truth for the version and
+the release notes a deployment sees (`version`, `summary`, `highlights`,
+`release_url`). The image derives `/app/VERSION` from it for deployed wrappers
+and older Composer images, and carries the whole manifest as the label
+`org.dlux.composer.release-manifest` (`base64:` + URL-safe base64 of compact
+JSON, the same encoding as a project image's `org.dlux.project.release-manifest`)
+so DjangoLux can show what a Composer update brings without pulling it.
 
 ## One-time setup
 
@@ -21,8 +27,9 @@ Add two repository secrets (Settings → Secrets and variables → Actions):
 
 1. Update `CHANGELOG.md`: add a new `## vX.Y.Z` section at the top describing the
    changes. The release notes are extracted from this exact section.
-2. Bump `VERSION` to the same `X.Y.Z` (no `v` prefix). The workflow **fails** if
-   the tag and `VERSION` disagree.
+2. Set `version` in `release-manifest.json` to the same `X.Y.Z` (no `v` prefix)
+   and update its `summary`, `highlights` and `release_url`. The workflow
+   **fails** if the tag and the manifest's version disagree.
 3. **If `start.sh` or `start.ps1` changed in this release**, bump the
    `# composer-wrapper: N` marker in *both* (they share one version), record the
    new sha256s in `wrappers-history.json` — the test suite prints them on
@@ -38,7 +45,7 @@ Add two repository secrets (Settings → Secrets and variables → Actions):
 
 The `Release` workflow then:
 
-- classifies the tag (`composer/release_tag.py`), verifying `tag == VERSION` and
+- classifies the tag (`composer/release_tag.py`), verifying the tag equals the manifest's `version` and
   that `CHANGELOG.md` has a matching section,
 - builds `linux/amd64` + `linux/arm64` with Buildx,
 - pushes `debeski/composer:vX.Y.Z` plus the moving alias the tag earns,
@@ -64,7 +71,7 @@ stable, and an alias that can move backwards makes "update" mean "downgrade".
 
 The classifier refuses a tag it cannot publish honestly: non-canonical spellings
 (`v1.4.0-beta1`, `v1.4.0.b1`, `V1.4.0` — tag `v1.4.0b1`), development releases,
-local versions, post-releases, epochs, a tag disagreeing with `VERSION`, and a
+local versions, post-releases, epochs, a tag disagreeing with the manifest's `version`, and a
 version with no `## vX.Y.Z` section in `CHANGELOG.md`.
 
 Check a tag before pushing it:

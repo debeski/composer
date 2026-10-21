@@ -360,14 +360,29 @@ composer's own `composer-wrapper` marker.
 
 ## maintenance page
 
-`.proxy/maintenance.html` is the page the proxy shows while DjangoLux is in
-maintenance or web is down. DjangoLux scaffolds it once and a release never
-touches it, so `check` keeps it current: a stock page from a DjangoLux older than
-1.11.0b2 (which can leave visitors on it after an update) is a `maintenance-page`
-warning, and `check --fix` archives it under `.xclude/composer-check/` and writes
-the bundled page in place (the proxy bind-mounts the single file, so no restart is
-needed). A customised page is reported, never replaced. `composer/assets/maintenance.html.tmpl`
-mirrors DjangoLux's scaffold template; a test fails when the two checkouts differ.
+The page the proxy shows while DjangoLux is in maintenance or `web` is down ships
+in this image (`composer/assets/maintenance/`: `index.html`, `maintenance.css`,
+`maintenance.js`, no inline script or style). `composer-agent` publishes it on
+every start to the runtime volume at `proxy/maintenance/`, which the proxy already
+mounts read-only, so an `agent update` refreshes it everywhere. The proxy serves
+the page from there on 502/503/504 and its assets under `/_dlux/maintenance/`,
+which bypasses `web` so they load during an outage (DjangoLux stack schema 3).
+
+A project that wants its own page keeps it in `.proxy/maintenance/` (an
+`index.html` plus any assets). `composer maintenance publish --override DIR`
+copies it over the published page and drops a `.custom` marker, which the agent
+respects. `composer maintenance publish` (inside `composer-agent`) republishes
+the bundled page.
+
+Stacks generated before schema 3 serve `.proxy/maintenance.html` from a bind
+mount. `check` reports that as a `maintenance-page` warning and `check --fix`
+(resident agent 1.7+) migrates it: it rewrites `.proxy/Caddyfile` /
+`.proxy/default.conf.template`, drops the mount from compose, validates the new
+proxy config in a throwaway container before changing anything, keeps a
+customised page as the `.proxy/maintenance/` override, archives the originals
+under `.xclude/composer-check/`, publishes through the agent and recreates the
+proxy. `composer/assets/maintenance.html.tmpl` is kept only to recognise a stock
+legacy page.
 
 ## mechanics
 - **Secrets**: Plaintext env file (`.env` → `secrets/.env` → `.secrets/.env`); the first that satisfies the compose's required vars wins.

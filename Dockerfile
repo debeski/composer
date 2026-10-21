@@ -39,7 +39,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir "pypi-attestations>=0.0.29" "packaging>=23.2" "cryptography>=42"
 
 COPY composer /app/composer
-COPY VERSION /app/VERSION
+COPY release-manifest.json /app/release-manifest.json
+# Deployed wrappers and older Composer images read /app/VERSION; derive it.
+RUN python -c "import json; open('/app/VERSION', 'w').write(json.load(open('/app/release-manifest.json'))['version'] + '\\n')"
+ARG COMPOSER_RELEASE_MANIFEST=""
+LABEL org.dlux.composer.release-manifest="${COMPOSER_RELEASE_MANIFEST}"
 # Reference wrappers for `composer check`: a deployment compares its start.sh /
 # start.ps1 against the composer it is actually running, with no registry call.
 COPY start.sh start.ps1 wrappers-history.json /app/wrappers/

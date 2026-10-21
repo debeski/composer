@@ -153,6 +153,14 @@ jobs:
             echo EOF
           } >> "$GITHUB_OUTPUT"
 
+      # The manifest travels as a label so DjangoLux can show what a Composer
+      # update brings without pulling the image: base64 of compact JSON, the
+      # same encoding as a project's org.dlux.project.release-manifest.
+      - name: Encode the release manifest label
+        id: manifest
+        run: |
+          python3 -c 'import base64, json; m = json.load(open("release-manifest.json")); print("label=base64:" + base64.urlsafe_b64encode(json.dumps(m, separators=(",", ":"), ensure_ascii=True).encode()).decode())' >> "$GITHUB_OUTPUT"
+
       - name: Build and push (amd64 + arm64)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -160,6 +168,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.list }}
+          build-args: |
+            COMPOSER_RELEASE_MANIFEST=${{ steps.manifest.outputs.label }}
           labels: |
             org.opencontainers.image.version=${{ needs.classify.outputs.version }}
           cache-from: type=gha

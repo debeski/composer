@@ -35,6 +35,14 @@ def read_stamp(text: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
+def restamp(text: str, schema: int) -> str:
+    """Rewrite the first stamp in ``text`` to ``schema``, keeping its spelling."""
+    match = _STAMP_RE.search(text or "")
+    if not match:
+        return text
+    return text[: match.start(1)] + str(schema) + text[match.end(1):]
+
+
 def collect_stamps(root: str, compose_file: str, extra: Iterable[str] = ()) -> Dict[str, Optional[int]]:
     """``{relative path: schema or None}`` for each stamped file that exists."""
     base = Path(root)

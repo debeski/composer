@@ -1,6 +1,12 @@
-"""The DjangoLux maintenance page in a project's ``.proxy/``.
+"""The maintenance page: published by Composer, or legacy in a project's ``.proxy/``.
 
-DjangoLux scaffolds ``.proxy/maintenance.html`` once; the proxy bind-mounts it,
+Since Composer 1.7 (DjangoLux stack schema 3) the page ships in this image
+(``assets/maintenance/``) and the agent publishes it to the runtime volume at
+``proxy/maintenance/``, which the proxy already mounts read-only. A project that
+wants its own page keeps it in ``.proxy/maintenance/``; ``publish_override``
+copies it there and marks it so the agent leaves it alone.
+
+Before that, DjangoLux scaffolded ``.proxy/maintenance.html`` once; the proxy bind-mounts it,
 so a DjangoLux release never reaches it. Pages scaffolded before DjangoLux
 1.11.0b2 redirect to ``/`` only after seeing a progress phase, so a visitor whose
 first status read is ``ready`` waits on the page forever.
@@ -11,6 +17,7 @@ a mirror of DjangoLux's scaffold template); a customised page that still carries
 the old logic is reported for a manual edit and never touched.
 """
 import hashlib
+import os
 import shutil
 from pathlib import Path
 from typing import Dict, Optional
@@ -67,18 +74,58 @@ def inspect(project_root: Path) -> Dict[str, str]:
     return {"state": CUSTOM, "path": str(PAGE)}
 
 
-def install(project_root: Path, schema: Optional[int], archive_dir: Path) -> None:
-    """Archive the page, then rewrite it in place.
+# --- Composer-owned page (stack schema 3) -------------------------------------
 
-    In place, not ``os.replace``: the proxy bind-mounts this single file, and a
-    file bind mount keeps the inode it was created with, so a renamed-over page
-    would not be served until the proxy container was recreated.
+BUNDLE = Path(__file__).resolve().parent / "assets" / "maintenance"
+PUBLISHED = Path("proxy") / "maintenance"
+OVERRIDE = Path(".proxy") / "maintenance"
+CUSTOM_MARKER = ".custom"
+BUNDLE_FILES = ("index.html", "maintenance.css", "maintenance.js")
+
+
+def published_dir(runtime_root: Path) -> Path:
+    return Path(runtime_root) / PUBLISHED
+
+
+def _write_atomically(path: Path, data: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
+
+
+def publish(runtime_root: Path) -> bool:
+    """Publish the bundled page unless a project override is in place.
+
+    Returns True when a file changed. The proxy mounts the runtime volume as a
+    directory, so replacing a file is picked up on the next request.
     """
-    path = project_root / PAGE
-    destination = archive_dir / PAGE
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(path, destination)
-    with path.open("r+", encoding="utf-8", newline="\n") as stream:
-        stream.seek(0)
-        stream.write(render(schema))
-        stream.truncate()
+    target = published_dir(runtime_root)
+    target.mkdir(parents=True, exist_ok=True)
+    if (target / CUSTOM_MARKER).exists():
+        return False
+    changed = False
+    for name in BUNDLE_FILES:
+        data = (BUNDLE / name).read_bytes()
+        destination = target / name
+        if destination.is_file() and destination.read_bytes() == data:
+            continue
+        _write_atomically(destination, data)
+        changed = True
+    return changed
+
+
+def publish_override(source: Path, runtime_root: Path) -> int:
+    """Copy a project's ``.proxy/maintenance/`` over the published page."""
+    target = published_dir(runtime_root)
+    target.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for path in sorted(Path(source).iterdir()):
+        if path.is_file():
+            _write_atomically(target / path.name, path.read_bytes())
+            copied += 1
+    (target / CUSTOM_MARKER).write_text("project override\n", encoding="utf-8")
+    return copied
+
+
+def is_published(runtime_root: Path) -> bool:
+    return (published_dir(runtime_root) / "index.html").is_file()

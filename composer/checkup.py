@@ -8,7 +8,7 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from . import maintenance_page
+from . import maintenance_migration, maintenance_page
 from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -565,32 +565,60 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         note = f" {unstamped} other file(s) unstamped." if unstamped else ""
         return _result(OK, "stack-schema", f"{compose} declares stack schema {schema}.{note}")
 
+    MAINTENANCE_AGENT_FLOOR = "1.7.0b1"
+
+    def _maintenance_compose_files(self) -> List[str]:
+        return list(self.active_compose_files) or [
+            c for c in ("compose.yml", "docker-compose.yml") if Path(c).is_file()
+        ][:1]
+
+    def _maintenance_page_published(self) -> bool:
+        ok, _out, _err = self.run_docker_compose(
+            ["exec", "-T", "composer-agent", "test", "-f",
+             f"{maintenance_migration.RUNTIME_PAGE_DIR}/index.html"],
+            timeout=10,
+        )
+        return ok
+
     def _check_maintenance_page(self) -> Dict[str, Any]:
-        page = maintenance_page.inspect(Path("."))
-        state = page["state"]
-        if state == maintenance_page.STALE_STOCK_PAGE:
+        """Composer publishes the page (stack schema 3); a legacy stack still serves
+        the project's ``.proxy/maintenance.html`` and is migrated by ``check --fix``."""
+        migration = maintenance_migration.inspect(Path("."), self._maintenance_compose_files())
+        if migration["legacy"]:
             return _result(
                 WARN,
                 "maintenance-page",
-                f"{page['path']} is a stock page from an older DjangoLux; after an update it can wait "
-                "on 'ready' forever instead of returning to the site.",
-                fix="Run 'composer check --fix' to replace it; the current file is archived under .xclude/ first.",
+                "The proxy serves the project's .proxy/maintenance.html ("
+                + ", ".join(sorted(migration["files"]))
+                + "); since Composer 1.7 composer-agent publishes the page on the runtime volume.",
+                fix="Run 'composer check --fix' to move it; a customised page is kept as the "
+                ".proxy/maintenance/ override. The resident agent must be Composer 1.7+ "
+                "('composer agent update' first).",
             )
-        if state == maintenance_page.CUSTOM_STUCK:
+        if "composer-agent" not in set(self.services):
+            return _result(OK, "maintenance-page", "No composer-agent in this stack; nothing publishes a page.")
+        if not self._maintenance_page_published():
             return _result(
                 WARN,
                 "maintenance-page",
-                f"{page['path']} is customised and keeps the old end-of-update logic (sawProgress/readyCount), "
-                "which can leave visitors on the page after an update.",
-                fix="Edit it by hand: on any end state, probe window.location.href and reload it once it answers "
-                "(see DjangoLux's scaffold .proxy/maintenance.html).",
+                "The maintenance page is not published on the runtime volume, so the proxy has none to show.",
+                fix="Run 'composer check --fix' (or restart composer-agent, which publishes it on start).",
             )
-        messages = {
-            maintenance_page.CURRENT: "is current",
-            maintenance_page.CUSTOM: "is customised",
-            maintenance_page.MISSING: "is not present",
-        }
-        return _result(OK, "maintenance-page", f"{page['path']} {messages[state]}.")
+        if (Path(".") / maintenance_page.OVERRIDE).is_dir():
+            ok, _out, _err = self.run_docker_compose(
+                ["exec", "-T", "composer-agent", "test", "-f",
+                 f"{maintenance_migration.RUNTIME_PAGE_DIR}/{maintenance_page.CUSTOM_MARKER}"],
+                timeout=10,
+            )
+            if not ok:
+                return _result(
+                    WARN,
+                    "maintenance-page",
+                    f"{maintenance_page.OVERRIDE}/ exists but the published page is still Composer's own.",
+                    fix="Run 'composer check --fix' to publish the project page.",
+                )
+            return _result(OK, "maintenance-page", f"Serving the project page from {maintenance_page.OVERRIDE}/.")
+        return _result(OK, "maintenance-page", "Served from the runtime volume, published by composer-agent.")
 
     def _check_wrappers(self) -> List[Dict[str, Any]]:
         """Report drift between the project's launcher wrappers and this image.
@@ -1001,8 +1029,11 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         stale_wrappers = [
             entry for entry in wrappers.inspect_wrappers(".") if entry["status"] in wrappers.FIXABLE
         ]
-        stale_maintenance_page = (
-            maintenance_page.inspect(Path("."))["state"] == maintenance_page.STALE_STOCK_PAGE
+        maintenance_legacy = maintenance_migration.inspect(
+            Path("."), self._maintenance_compose_files()
+        )["legacy"]
+        maintenance_unpublished = not maintenance_legacy and any(
+            result.get("name") == "maintenance-page" and result.get("level") == WARN for result in results
         )
         obsolete = sorted(OBSOLETE_SERVICES.intersection(self.services))
         proxy_inspection = inspect_legacy_proxy_routes(".")
@@ -1020,15 +1051,18 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
-                and not stale_maintenance_page and not needs_install and not needs_init_containers
+                and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration):
             return fixes
         consequences = []
-        if stale_maintenance_page:
+        if maintenance_legacy:
             consequences.append(
-                "Replace the stock .proxy/maintenance.html with the current DjangoLux page "
-                "(rewritten in place, so the running proxy serves it without a restart)."
+                "Move the maintenance page to Composer: rewrite the proxy config to serve it from "
+                "the runtime volume, drop the .proxy/maintenance.html mount, keep a customised page "
+                "as .proxy/maintenance/, publish it through composer-agent and recreate the proxy."
             )
+        if maintenance_unpublished:
+            consequences.append("Publish the maintenance page through composer-agent.")
         if stale_wrappers:
             consequences.append(
                 "Replace launcher wrappers with the copies baked into this composer image: "
@@ -1160,24 +1194,55 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             except OSError as exc:
                 fixes.append(_result(FAIL, "fix:wrappers", f"Could not update the wrappers: {exc}"))
 
-        if stale_maintenance_page:
-            from .stack_cleanup import _archive_root
+        if maintenance_legacy:
+            from .stack_cleanup import StackCleanupError
+            from .versions import at_least
 
-            compose = next(
-                (c for c in (args.file, "compose.yml", "docker-compose.yml") if c and Path(c).is_file()),
-                "",
-            )
-            schema = read_stamp(Path(compose).read_text(encoding="utf-8")) if compose else None
+            agent_version = self._resident_agent_version()
+            if not agent_version or not at_least(agent_version, self.MAINTENANCE_AGENT_FLOOR):
+                fixes.append(
+                    _result(
+                        FAIL,
+                        "fix:maintenance-page",
+                        f"composer-agent is {agent_version or 'not running'}; publishing the maintenance page "
+                        f"needs {self.MAINTENANCE_AGENT_FLOOR}+. Run 'composer agent update', then "
+                        "'composer check --fix' again.",
+                    )
+                )
+            else:
+                try:
+                    outcome = maintenance_migration.migrate(
+                        ".",
+                        self._maintenance_compose_files(),
+                        environment=self.build_compose_env(),
+                    )
+                    detail = f"Migrated {', '.join(outcome['files'])}"
+                    if outcome["override"]:
+                        detail += f"; kept the customised page as {outcome['override']}"
+                    if outcome["recreated"]:
+                        detail += f"; recreated {', '.join(outcome['recreated'])}"
+                    fixes.append(_result(OK, "fix:maintenance-page", f"{detail}. Backup: {outcome['backup_root']}"))
+                except (OSError, StackCleanupError) as exc:
+                    fixes.append(_result(FAIL, "fix:maintenance-page", str(exc)))
+        elif maintenance_unpublished:
+            from .stack_cleanup import StackCleanupError
+
             try:
-                archive = _archive_root(Path("."))
-                maintenance_page.install(Path("."), schema, archive)
-                fixes.append(
-                    _result(OK, "fix:maintenance-page", f"Replaced .proxy/maintenance.html. Backup: {archive}")
+                project_page = maintenance_migration.publish_through_agent(
+                    Path(".").resolve(),
+                    [Path(c).resolve() for c in self._maintenance_compose_files()],
+                    self.build_compose_env(),
                 )
-            except OSError as exc:
                 fixes.append(
-                    _result(FAIL, "fix:maintenance-page", f"Could not replace .proxy/maintenance.html: {exc}")
+                    _result(
+                        OK,
+                        "fix:maintenance-page",
+                        f"Published the project page from {maintenance_page.OVERRIDE}/." if project_page
+                        else "Published the maintenance page.",
+                    )
                 )
+            except StackCleanupError as exc:
+                fixes.append(_result(FAIL, "fix:maintenance-page", str(exc)))
 
         if obsolete or proxy_routes:
             from .stack_cleanup import StackCleanupError, remove_obsolete_services

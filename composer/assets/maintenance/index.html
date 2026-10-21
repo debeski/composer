@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Update in progress</title>
+  <link rel="stylesheet" href="/_dlux/maintenance/maintenance.css">
+  <script src="/_dlux/maintenance/maintenance.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Application update in progress</h1>
+    <p>DjangoLux and composer are applying the verified image update. This page stays available while the application containers restart.</p>
+    <div class="meta">
+      <span class="pill" id="phase">Preparing</span>
+      <span class="pill muted" id="updated">Waiting for status...</span>
+    </div>
+    <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="12">
+      <div class="bar" id="bar"></div>
+    </div>
+    <div class="status" id="statusText">Starting update...</div>
+    <pre id="log" class="muted">Waiting for deployment log...</pre>
+  </main>
+</body>
+</html>
