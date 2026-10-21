@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.7.0b3
+
+- **`logs-tail` For Every Service**: a `logs-tail` request with no `service` runs `docker compose logs --no-color --timestamps --tail N` across the stack, and `_merge_logs()` orders the lines by timestamp and keeps the newest `N` as `service | message`, under the same redaction and 60000-character cap. A named service still has to be one of the stack's own.
+
 ## v1.7.0b2
 
 - **Service Operations For DjangoLux's Operations Panel**: new named operations in `composer.ops.HANDLERS` — `services` (every Compose service with state, health, `org.dlux.restart` label and `can_restart`), `service-restart`, `service-recreate` and `logs-tail` (last 1–1000 lines, redacted, capped at 60000 characters). A request may carry only a `service` name, checked against the stack's own services and the restart allow-list, and a `lines` count.

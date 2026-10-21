@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "version": "1.7.0b2",
-  "summary": "Service operations for DjangoLux's Operations panel: list, restart, recreate and read logs.",
+  "version": "1.7.0b3",
+  "summary": "Logs of every service at once for DjangoLux's Operations panel.",
   "highlights": [
-    "DjangoLux 1.13.0b2's Operations panel can list services, restart or recreate allow-listed ones and read recent logs through new named operations.",
-    "The executor gains a 'recreate' operation under the same allow-list as 'restart'.",
+    "'logs-tail' without a service returns the newest lines of every service, merged in time order as 'service | message'.",
+    "Includes 1.7.0b2: service list, restart, recreate and logs operations; the executor's 'recreate' op.",
     "Includes 1.7.0b1: the maintenance page ships in this image; release-manifest.json replaces VERSION; stack hardening."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b2"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b3"
 }

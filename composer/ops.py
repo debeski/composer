@@ -452,21 +452,40 @@ def _restart_service(runtime, request, *, op: str) -> dict:
     }
 
 
+def _merge_logs(text: str, lines: int) -> str:
+    """`docker compose logs --timestamps` for several services, as one timeline.
+
+    Each service's tail arrives in its own block; sorting on the timestamp makes
+    them one stream, and only the newest ``lines`` of it are kept.
+    """
+    entries = []
+    for raw in (text or "").splitlines():
+        service, sep, rest = raw.partition("|")
+        if not sep:
+            continue
+        stamp, _space, message = rest.strip().partition(" ")
+        entries.append((stamp, service.strip(), message))
+    entries.sort(key=lambda entry: entry[0])
+    width = max((len(service) for _stamp, service, _message in entries), default=0)
+    return "\n".join(f"{service.ljust(width)} | {message}" for _stamp, service, message in entries[-lines:])
+
+
 def _tail_logs(runtime, request) -> dict:
-    """The last lines of one service's logs, redacted and capped."""
-    service = _requested_service(runtime, request, restartable=False)
+    """The last lines of one service's logs, or of all of them merged in time order."""
+    every = not str(request.get("service") or "").strip()
+    service = "" if every else _requested_service(runtime, request, restartable=False)
     try:
         lines = int(request.get("lines") or LOG_LINES_DEFAULT)
     except (TypeError, ValueError):
         lines = LOG_LINES_DEFAULT
     lines = max(1, min(LOG_LINES_MAX, lines))
     launcher = _stack_launcher(runtime)
-    ok, out, err = launcher.run_docker_compose(
-        ["logs", "--no-color", "--no-log-prefix", "--tail", str(lines), service], timeout=60,
-    )
+    args = (["logs", "--no-color", "--timestamps", "--tail", str(lines)] if every
+            else ["logs", "--no-color", "--no-log-prefix", "--tail", str(lines), service])
+    ok, out, err = launcher.run_docker_compose(args, timeout=60)
     if not ok:
-        raise ValueError(redact_text(err or out or f"Could not read {service}'s logs.")[:MAX_MESSAGE_CHARS])
-    text = redact_text(out or "")
+        raise ValueError(redact_text(err or out or "Could not read the logs.")[:MAX_MESSAGE_CHARS])
+    text = redact_text(_merge_logs(out, lines) if every else (out or ""))
     if len(text) > MAX_LOG_CHARS:
         text = text[-MAX_LOG_CHARS:]
     return {"exit_code": 0, "service": service, "lines": lines, "logs": text, "findings": []}

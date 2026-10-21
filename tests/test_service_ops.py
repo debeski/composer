@@ -108,6 +108,21 @@ class ServiceOpsTests(unittest.TestCase):
         self.assertIn("line one", result["logs"])
         self.assertIn(["logs", "--no-color", "--no-log-prefix", "--tail", "1000", "web"], self.compose.calls)
 
+    def test_all_services_merge_into_one_timeline(self):
+        self.compose.logs = (
+            "web-1     | 2026-10-21T10:00:02.000Z second\n"
+            "celery-1  | 2026-10-21T10:00:01.000Z first\n"
+            "celery-1  | 2026-10-21T10:00:03.000Z third TOKEN=supersecret\n"
+        )
+        result = self._ask("logs-tail", lines=2)
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["service"], "")
+        self.assertEqual(result["logs"].splitlines()[0], "web-1    | second")
+        self.assertIn("third", result["logs"])
+        self.assertNotIn("first", result["logs"], "only the newest lines across services")
+        self.assertNotIn("supersecret", result["logs"])
+        self.assertIn(["logs", "--no-color", "--timestamps", "--tail", "2"], self.compose.calls)
+
     def test_ps_parsing_accepts_lines_or_an_array(self):
         array = json.dumps([{"Service": "web", "State": "running"}])
         self.assertEqual(_parse_ps(array)["web"]["state"], "running")
