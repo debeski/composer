@@ -1,11 +1,10 @@
 {
   "schema_version": 1,
-  "version": "1.7.0b4",
-  "summary": "The repair preview shows the maintenance-page migration before it is applied.",
+  "version": "1.7.0b5",
+  "summary": "The deployment check no longer reports a published maintenance page as missing when it runs in composer-agent.",
   "highlights": [
-    "The deployment check's repair preview now lists the maintenance-page migration (stack schema 3) with its exact proxy and compose diffs.",
-    "An apply refuses if the proxy config changed since the preview, not just the compose files.",
-    "Includes 1.7.0b3: logs of every service. Includes 1.7.0b2: service operations. Includes 1.7.0b1: the maintenance page ships in this image."
+    "Inside composer-agent (the Operations panel's check and apply) the maintenance-page check reads the runtime volume instead of an exec the socket proxy refuses.",
+    "Includes 1.7.0b4: the repair preview lists the maintenance-page migration. Includes 1.7.0b3: logs of every service. Includes 1.7.0b2: service operations. Includes 1.7.0b1: the maintenance page ships in this image."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b4"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b5"
 }

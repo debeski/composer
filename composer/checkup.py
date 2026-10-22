@@ -572,13 +572,25 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             c for c in ("compose.yml", "docker-compose.yml") if Path(c).is_file()
         ][:1]
 
-    def _maintenance_page_published(self) -> bool:
+    def _published_page_has(self, name: str) -> bool:
+        """Whether the page composer-agent published on the runtime volume has ``name``.
+
+        Where this process mounts the runtime volume — composer-agent, which runs
+        the Operations panel's check and apply — it reads the file: the read-only
+        socket proxy refuses ``exec`` there, which made every panel check report a
+        published page as missing. On the host, composer-agent is asked.
+        """
+        page_dir = Path(maintenance_migration.RUNTIME_PAGE_DIR)
+        if page_dir.parents[1].is_dir():
+            return (page_dir / name).is_file()
         ok, _out, _err = self.run_docker_compose(
-            ["exec", "-T", "composer-agent", "test", "-f",
-             f"{maintenance_migration.RUNTIME_PAGE_DIR}/index.html"],
+            ["exec", "-T", "composer-agent", "test", "-f", f"{page_dir}/{name}"],
             timeout=10,
         )
         return ok
+
+    def _maintenance_page_published(self) -> bool:
+        return self._published_page_has("index.html")
 
     def _check_maintenance_page(self) -> Dict[str, Any]:
         """Composer publishes the page (stack schema 3); a legacy stack still serves
@@ -605,12 +617,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 fix="Run 'composer check --fix' (or restart composer-agent, which publishes it on start).",
             )
         if (Path(".") / maintenance_page.OVERRIDE).is_dir():
-            ok, _out, _err = self.run_docker_compose(
-                ["exec", "-T", "composer-agent", "test", "-f",
-                 f"{maintenance_migration.RUNTIME_PAGE_DIR}/{maintenance_page.CUSTOM_MARKER}"],
-                timeout=10,
-            )
-            if not ok:
+            if not self._published_page_has(maintenance_page.CUSTOM_MARKER):
                 return _result(
                     WARN,
                     "maintenance-page",

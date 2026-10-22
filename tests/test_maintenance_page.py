@@ -255,6 +255,45 @@ class CheckFindingTests(unittest.TestCase):
             launcher._maybe_fix(SimpleNamespace(fix=True, yes=False, file="", dry_run=False, json=False), [])
         migrate.assert_not_called()
 
+    def _published(self, files):
+        runtime = self.root / "runtime"
+        page = runtime / "proxy" / "maintenance"
+        page.mkdir(parents=True)
+        for name in files:
+            (page / name).write_text("x", encoding="utf-8")
+        (self.root / "compose.yml").write_text("services:\n  web: {}\n  composer-agent: {}\n", encoding="utf-8")
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "composer-agent"]
+        return launcher, patch.object(mm, "RUNTIME_PAGE_DIR", str(page))
+
+    def test_inside_the_agent_the_page_is_read_from_the_volume_not_through_exec(self):
+        # The agent's socket proxy refuses `exec`; asking it made every panel
+        # check say a published page was missing (found accepting 1.13.0b5).
+        launcher, runtime = self._published(["index.html"])
+        with runtime, patch.object(launcher, "run_docker_compose", side_effect=AssertionError("no exec")):
+            result = launcher._check_maintenance_page()
+        self.assertEqual(result["level"], OK, result["message"])
+
+    def test_inside_the_agent_a_missing_page_is_still_reported(self):
+        launcher, runtime = self._published([])
+        with runtime, patch.object(launcher, "run_docker_compose", side_effect=AssertionError("no exec")):
+            self.assertEqual(launcher._check_maintenance_page()["level"], WARN)
+
+    def test_inside_the_agent_the_override_marker_is_read_from_the_volume(self):
+        launcher, runtime = self._published(["index.html", mp.CUSTOM_MARKER])
+        (self.root / mp.OVERRIDE).mkdir(parents=True)
+        with runtime, patch.object(launcher, "run_docker_compose", side_effect=AssertionError("no exec")):
+            result = launcher._check_maintenance_page()
+        self.assertEqual(result["level"], OK)
+        self.assertIn("project page", result["message"])
+
+    def test_on_the_host_composer_agent_is_asked(self):
+        launcher = DockerComposeLauncher()
+        with patch.object(mm, "RUNTIME_PAGE_DIR", str(self.root / "absent" / "proxy" / "maintenance")), \
+                patch.object(launcher, "run_docker_compose", return_value=(True, "", "")) as run:
+            self.assertTrue(launcher._maintenance_page_published())
+        self.assertIn("exec", run.call_args[0][0])
+
     def test_a_stack_without_an_agent_has_nothing_to_publish(self):
         (self.root / "compose.yml").write_text("services:\n  web: {}\n", encoding="utf-8")
         self.assertEqual(DockerComposeLauncher()._check_maintenance_page()["level"], OK)

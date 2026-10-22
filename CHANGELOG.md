@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.7.0b5
+
+- **Maintenance-Page Check Inside composer-agent**: `_check_maintenance_page()` asked whether the page was published with `docker compose exec composer-agent test -f …`, which the read-only socket proxy refuses (`EXEC=0`), so every check run by the agent — the Operations panel's check and the findings after an apply — warned that a published page was missing (found accepting DjangoLux 1.13.0b5). `_published_page_has()` reads `/opt/dlux-runtime/proxy/maintenance/` directly wherever the runtime volume is mounted, for the page and the `.custom` override marker alike, and asks composer-agent only on the host.
+
 ## v1.7.0b4
 
 - **Maintenance-Page Migration In The Repair Preview**: `check` (and `check-fix-preview`) listed only the `agent_installer` transforms, so DjangoLux's Operations panel showed no diff for the stack schema 3 page move that `check --fix` then ran. `maintenance_migration.preview()` returns that repair's unified diffs (`.proxy/Caddyfile`, `.proxy/default.conf.template`, compose, schema restamps) and a note on the page itself; it reads the same `_plan()` that `migrate()` executes, so the preview cannot drift from the change. `ops._maintenance_repair()` appends it as the `maintenance-page` repair.
