@@ -3,6 +3,8 @@
 ## v1.7.0b5
 
 - **Maintenance-Page Check Inside composer-agent**: `_check_maintenance_page()` asked whether the page was published with `docker compose exec composer-agent test -f …`, which the read-only socket proxy refuses (`EXEC=0`), so every check run by the agent — the Operations panel's check and the findings after an apply — warned that a published page was missing (found accepting DjangoLux 1.13.0b5). `_published_page_has()` reads `/opt/dlux-runtime/proxy/maintenance/` directly wherever the runtime volume is mounted, for the page and the `.custom` override marker alike, and asks composer-agent only on the host.
+- **`recreate` Runs With The Deployment's Secrets**: the executor's `recreate` op (1.7.0b2) called `docker compose up -d --no-deps --force-recreate` without resolving the project's secrets, so Compose interpolated defaults — on testbed-dlux `web` came back with `${DJANGO_SECRET_KEY:-local_secret}` and the compose-default database password and waited for migrations for ever (found accepting DjangoLux 1.13.0b5). `_run_recreate()` now calls `resolve_secrets()` first, like `dlux update`'s recreate, and refuses with the reason instead of recreating on defaults. `restart` was never affected: it reuses the container.
+
 
 ## v1.7.0b4
 

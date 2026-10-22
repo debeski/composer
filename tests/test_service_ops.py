@@ -147,6 +147,51 @@ class ExecutorRecreateTests(unittest.TestCase):
             self.assertEqual(executor_ops._run_recreate("op", "celery")[0], 2)
             with patch("composer.launcher.DockerComposeLauncher.run_docker_compose", autospec=True,
                        return_value=(True, "", "")) as run, \
+                    patch("composer.launcher.DockerComposeLauncher.resolve_secrets", autospec=True,
+                          return_value=(True, "")), \
                     patch("composer.launcher.DockerComposeLauncher.resolve_active_compose_files", autospec=True):
                 self.assertEqual(executor_ops._run_recreate("op", "web"), (0, ""))
             self.assertEqual(run.call_args.args[1], ["up", "-d", "--no-deps", "--force-recreate", "web"])
+
+    def _project(self, secrets):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(tmp.name)
+        self.addCleanup(os.chdir, cwd)
+        Path("compose.yml").write_text(
+            "services:\n  web:\n    image: x\n    environment:\n"
+            "      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local_secret}\n"
+            "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}\n",
+            encoding="utf-8",
+        )
+        if secrets is not None:
+            Path(".secrets").mkdir()
+            Path(".secrets/.env").write_text(secrets, encoding="utf-8")
+
+    def test_a_recreate_runs_with_the_deployments_secrets(self):
+        # Compose interpolates the secrets into the new container; without them
+        # web got the `local_secret` default and never started (1.13.0b5).
+        self._project("DJANGO_SECRET_KEY=the-real-key\nPOSTGRES_PASSWORD=pw\n")
+        seen = {}
+
+        def compose(launcher, args, **_kwargs):
+            seen.update({key: launcher.build_compose_env().get(key) for key in ("DJANGO_SECRET_KEY", "POSTGRES_PASSWORD")})
+            return True, "", ""
+
+        with patch.dict(os.environ, {"COMPOSER_AGENT_RESTART_SERVICES": "web"}), \
+                patch("composer.launcher.DockerComposeLauncher.run_docker_compose", autospec=True, side_effect=compose):
+            os.environ.pop("DJANGO_SECRET_KEY", None)
+            os.environ.pop("POSTGRES_PASSWORD", None)
+            self.assertEqual(executor_ops._run_recreate("op", "web"), (0, ""))
+        self.assertEqual(seen, {"DJANGO_SECRET_KEY": "the-real-key", "POSTGRES_PASSWORD": "pw"})
+
+    def test_without_readable_secrets_nothing_is_recreated(self):
+        self._project(None)
+        with patch.dict(os.environ, {"COMPOSER_AGENT_RESTART_SERVICES": "web"}), \
+                patch("composer.launcher.DockerComposeLauncher.run_docker_compose", autospec=True) as run:
+            os.environ.pop("POSTGRES_PASSWORD", None)
+            code, message = executor_ops._run_recreate("op", "web")
+        self.assertEqual(code, 1)
+        self.assertIn("compose defaults", message)
+        run.assert_not_called()

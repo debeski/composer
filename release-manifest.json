@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
   "version": "1.7.0b5",
-  "summary": "The deployment check no longer reports a published maintenance page as missing when it runs in composer-agent.",
+  "summary": "Recreate from the Operations panel keeps the deployment's secrets; the maintenance-page check works inside composer-agent.",
   "highlights": [
     "Inside composer-agent (the Operations panel's check and apply) the maintenance-page check reads the runtime volume instead of an exec the socket proxy refuses.",
+    "Recreating a service from the Operations panel loads the deployment's secrets; before, the new container ran on compose defaults.",
     "Includes 1.7.0b4: the repair preview lists the maintenance-page migration. Includes 1.7.0b3: logs of every service. Includes 1.7.0b2: service operations. Includes 1.7.0b1: the maintenance page ships in this image."
   ],
   "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b5"

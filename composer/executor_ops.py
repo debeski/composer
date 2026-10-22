@@ -74,6 +74,17 @@ def _run_recreate(operation_id: str, service: str) -> Tuple[int, str]:
 
     launcher = DockerComposeLauncher()
     launcher.resolve_active_compose_files()
+    # A recreated container is built from the interpolated compose config, so it
+    # needs the deployment's secrets (a restart reuses the container and never
+    # did). Without them web came up on `${DJANGO_SECRET_KEY:-local_secret}` and
+    # the compose-default database password and never started (found accepting
+    # DjangoLux 1.13.0b5). Refuse rather than recreate on defaults.
+    secrets_ok, secrets_error = launcher.resolve_secrets()
+    if not secrets_ok:
+        return 1, (
+            f"{service} was not recreated: the deployment's secrets could not be read, and a "
+            f"container built without them would run on compose defaults. {secrets_error}"
+        ).strip()[-1000:]
     ok, out, err = launcher.run_docker_compose(
         ["up", "-d", "--no-deps", "--force-recreate", service], timeout=600,
     )
