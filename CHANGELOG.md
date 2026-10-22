@@ -2,7 +2,7 @@
 
 ## v1.7.0b3
 
-- **`logs-tail` For Every Service**: a `logs-tail` request with no `service` runs `docker compose logs --no-color --timestamps --tail N` across the stack, and `_merge_logs()` orders the lines by timestamp and keeps the newest `N` as `service | message`, under the same redaction and 60000-character cap. A named service still has to be one of the stack's own.
+- **`logs-tail` For Every Service**: a `logs-tail` request with no `service` runs `docker compose logs --no-color --timestamps --tail N` across the stack, and `_merge_logs()` orders the lines by timestamp and keeps the newest `N`, each line with Compose's own `service-N |` prefix, under the same redaction and 60000-character cap. A named service still has to be one of the stack's own.
 
 ## v1.7.0b2
 
