@@ -244,7 +244,7 @@ class FixPreviewAndApplyTests(unittest.TestCase):
     def test_a_preview_writes_nothing_and_carries_a_digest(self):
         self._request("check-fix-preview")
         launcher = SimpleNamespace(
-            active_compose_files=[], composer_version="1.6.0",
+            active_compose_files=[], _maintenance_compose_files=lambda: [], composer_version="1.6.0",
             collect_checkup=lambda args: ([{"level": "fail", "name": "resident-commands", "message": "flat"}], []),
         )
         with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
@@ -263,7 +263,7 @@ class FixPreviewAndApplyTests(unittest.TestCase):
     def test_a_transform_that_refuses_is_reported_not_raised(self):
         self._request("check-fix-preview")
         launcher = SimpleNamespace(
-            active_compose_files=[], composer_version="1.6.0",
+            active_compose_files=[], _maintenance_compose_files=lambda: [], composer_version="1.6.0",
             collect_checkup=lambda args: ([], []),
         )
         with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
@@ -299,7 +299,7 @@ class CheckCarriesTheRepairPreviewTests(unittest.TestCase):
 
     def _answer(self, repairs_diff="--- a/compose.yml\n+++ b/compose.yml\n+      - run\n"):
         launcher = SimpleNamespace(
-            active_compose_files=[], composer_version="1.5.2",
+            active_compose_files=[], _maintenance_compose_files=lambda: [], composer_version="1.5.2",
             collect_checkup=lambda args: ([{"level": "fail", "name": "resident-commands", "message": "flat"}], []),
         )
         with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
@@ -319,7 +319,7 @@ class CheckCarriesTheRepairPreviewTests(unittest.TestCase):
 
     def test_a_clean_stack_offers_no_repairs(self):
         launcher = SimpleNamespace(
-            active_compose_files=[], composer_version="1.5.2",
+            active_compose_files=[], _maintenance_compose_files=lambda: [], composer_version="1.5.2",
             collect_checkup=lambda args: ([{"level": "ok", "name": "docker", "message": "fine"}], []),
         )
         with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
@@ -536,3 +536,45 @@ class ResultTrimmingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaintenanceRepairPreviewTests(unittest.TestCase):
+    """The page move is a `check --fix` repair, so the preview has to show it too."""
+
+    def setUp(self):
+        from composer.maintenance_migration import CADDYFILE
+
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.cwd = os.getcwd()
+        os.chdir(self._tmp.name)
+        self.addCleanup(os.chdir, self.cwd)
+        legacy = Path(__file__).resolve().parent / "fixtures" / "legacy-proxy"
+        Path(".proxy").mkdir()
+        Path("compose.yml").write_text((legacy / "compose.yml").read_text(encoding="utf-8"), encoding="utf-8")
+        CADDYFILE.write_text((legacy / "Caddyfile").read_text(encoding="utf-8"), encoding="utf-8")
+        self.launcher = SimpleNamespace(
+            active_compose_files=["compose.yml"], _maintenance_compose_files=lambda: ["compose.yml"],
+        )
+
+    def test_a_legacy_stack_previews_the_page_move(self):
+        from composer.ops import _dry_run_repairs
+
+        with patch("composer.agent_installer.enable_agent", return_value={"files": []}), \
+                patch("composer.agent_installer.enable_executor", return_value={"files": []}), \
+                patch("composer.agent_installer.enable_post_start_label", return_value={"files": []}), \
+                patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": []}), \
+                patch("composer.agent_installer.normalize_restart_labels", return_value={"files": []}):
+            repairs, digest = _dry_run_repairs(self.launcher, SimpleNamespace(file=None))
+        self.assertEqual([r["name"] for r in repairs], ["maintenance-page"])
+        self.assertEqual(repairs[0]["files"], [".proxy/Caddyfile", "compose.yml"])
+        self.assertIn("/_dlux/maintenance/", repairs[0]["diff"])
+        self.assertEqual(digest, compose_digest(self.launcher))
+
+    def test_editing_the_caddyfile_after_the_preview_changes_the_digest(self):
+        from composer.maintenance_migration import CADDYFILE
+
+        before = compose_digest(self.launcher)
+        CADDYFILE.write_text(CADDYFILE.read_text(encoding="utf-8") + "# edited\n", encoding="utf-8")
+        self.assertNotEqual(compose_digest(self.launcher), before, "an apply would refuse the stale preview")
+

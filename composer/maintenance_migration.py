@@ -14,6 +14,7 @@ and recreates the proxy. Originals are archived under ``.xclude/composer-check/`
 
 from __future__ import annotations
 
+import difflib
 import re
 import shutil
 import subprocess
@@ -165,15 +166,11 @@ def inspect(project_root: Path, compose_files: Sequence[str]) -> Dict[str, Any]:
     return {"legacy": bool(legacy), "files": legacy}
 
 
-def migrate(
-    project_dir: str,
-    compose_files: Sequence[str],
-    *,
-    environment: Mapping[str, str] | None = None,
-    command_runner=subprocess.run,
-    agent_service: str = "composer-agent",
-) -> Dict[str, Any]:
-    project_root = Path(project_dir).resolve()
+def _plan(project_root: Path, compose_files: Sequence[str]):
+    """(compose sources, {file: new contents}) — every rewrite ``migrate`` makes.
+
+    The repair preview reads the same plan, so what DjangoLux shows is what runs.
+    """
     sources = [_project_file(project_root, value) for value in compose_files]
     updates: Dict[Path, str] = {}
     for source in sources:
@@ -195,6 +192,46 @@ def migrate(
             text = updates.get(path, path.read_text(encoding="utf-8"))
             if read_stamp(text) == LEGACY_SCHEMA:
                 updates[path] = restamp(text, TARGET_SCHEMA)
+    return sources, updates
+
+
+def preview(project_dir: str, compose_files: Sequence[str]) -> Dict[str, Any]:
+    """What ``migrate`` would change, as unified diffs plus a note. Writes nothing."""
+    project_root = Path(project_dir).resolve()
+    _sources, updates = _plan(project_root, compose_files)
+    files = sorted(str(path.relative_to(project_root)) for path in updates)
+    if not updates:
+        return {"files": [], "diff": "", "note": ""}
+    diff = "".join(
+        "".join(difflib.unified_diff(
+            path.read_text(encoding="utf-8").splitlines(keepends=True),
+            updates[path].splitlines(keepends=True),
+            fromfile=f"a/{name}", tofile=f"b/{name}",
+        ))
+        for name, path in sorted((str(path.relative_to(project_root)), path) for path in updates)
+    )
+    page = project_root / LEGACY_PAGE
+    notes = []
+    if page.is_file():
+        state = maintenance_page.inspect(project_root)["state"]
+        if state in (maintenance_page.CUSTOM, maintenance_page.CUSTOM_STUCK) \
+                and not (project_root / maintenance_page.OVERRIDE).exists():
+            notes.append(f"The customised {LEGACY_PAGE} is kept as {maintenance_page.OVERRIDE}/index.html.")
+        notes.append(f"{LEGACY_PAGE} moves to the backup under .xclude/composer-check/.")
+    notes.append("The proxy config is validated first; composer-agent then publishes the page and the proxy is recreated.")
+    return {"files": files, "diff": diff, "note": " ".join(notes)}
+
+
+def migrate(
+    project_dir: str,
+    compose_files: Sequence[str],
+    *,
+    environment: Mapping[str, str] | None = None,
+    command_runner=subprocess.run,
+    agent_service: str = "composer-agent",
+) -> Dict[str, Any]:
+    project_root = Path(project_dir).resolve()
+    sources, updates = _plan(project_root, compose_files)
 
     result: Dict[str, Any] = {
         "applied": False,

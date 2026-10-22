@@ -111,8 +111,12 @@ def compose_digest(launcher) -> str:
     """
     import hashlib
 
+    from .maintenance_migration import CADDYFILE, LEGACY_PAGE, NGINX_TEMPLATE
+
     digest = hashlib.sha256()
-    for name in sorted(launcher.active_compose_files or []):
+    # The proxy files too: the maintenance-page repair rewrites them.
+    proxy_files = [str(path) for path in (CADDYFILE, NGINX_TEMPLATE, LEGACY_PAGE) if path.is_file()]
+    for name in sorted(launcher.active_compose_files or []) + proxy_files:
         digest.update(name.encode("utf-8"))
         try:
             digest.update(Path(name).read_bytes())
@@ -180,7 +184,27 @@ def _dry_run_repairs(launcher, args):
             "diff": diff,
             "note": "; ".join(str(w) for w in outcome.get("warnings") or [])[:MAX_MESSAGE_CHARS],
         })
+    repairs.extend(_maintenance_repair(launcher))
     return repairs, compose_digest(launcher)
+
+
+def _maintenance_repair(launcher):
+    """The stack schema 3 page move, which `check --fix` runs outside agent_installer."""
+    from . import maintenance_migration
+
+    try:
+        outcome = maintenance_migration.preview(".", launcher._maintenance_compose_files())
+    except Exception as exc:
+        return [{"name": "maintenance-page", "files": [], "diff": "",
+                 "note": redact_text(str(exc))[:MAX_MESSAGE_CHARS]}]
+    if not outcome["files"]:
+        return []
+    return [{
+        "name": "maintenance-page",
+        "files": outcome["files"],
+        "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
+        "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
+    }]
 
 
 def _apply_fixes(runtime, request) -> dict:

@@ -193,6 +193,40 @@ class MigrateTests(unittest.TestCase):
         self.assertEqual(self.docker.calls, [])
 
 
+class PreviewTests(MigrateTests):
+    """The repair preview DjangoLux shows before an operator applies `check --fix`."""
+
+    def _snapshot(self):
+        return {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+
+    def test_the_preview_shows_exactly_what_the_migration_writes_and_writes_nothing(self):
+        (self.root / ".proxy" / "maintenance.html").write_bytes((FIXTURES / "maintenance-stock-1.8.html").read_bytes())
+        before = self._snapshot()
+        preview = mm.preview(str(self.root), ["compose.yml"])
+        self.assertEqual(self._snapshot(), before, "a preview writes nothing")
+        self.assertEqual(self.docker.calls, [], "and runs nothing")
+        self.assertEqual(preview["files"], [".proxy/Caddyfile", "compose.yml"])
+        self.assertIn("+++ b/.proxy/Caddyfile", preview["diff"])
+        added = [line for line in preview["diff"].splitlines() if line.startswith("+")]
+        removed = [line for line in preview["diff"].splitlines() if line.startswith("-")]
+        self.assertTrue(any("handle /_dlux/maintenance/* {" in line for line in added))
+        self.assertTrue(any(f"root * {mm.RUNTIME_PAGE_DIR}" in line for line in added))
+        self.assertTrue(any("./.proxy/maintenance.html:/usr/share/caddy" in line for line in removed))
+        self.assertIn("moves to the backup", preview["note"])
+        self.assertNotIn("override", preview["note"], "a stock page is not kept")
+
+        outcome = self._migrate()
+        self.assertEqual(sorted(outcome["files"]), preview["files"], "the preview and the migration share one plan")
+
+    def test_a_customised_page_is_announced_as_the_override(self):
+        (self.root / ".proxy" / "maintenance.html").write_text("<p>our own page</p>", encoding="utf-8")
+        self.assertIn(".proxy/maintenance/index.html", mm.preview(str(self.root), ["compose.yml"])["note"])
+
+    def test_a_migrated_stack_previews_nothing(self):
+        self._migrate()
+        self.assertEqual(mm.preview(str(self.root), ["compose.yml"]), {"files": [], "diff": "", "note": ""})
+
+
 class CheckFindingTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

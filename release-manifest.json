@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "version": "1.7.0b3",
-  "summary": "Logs of every service at once for DjangoLux's Operations panel.",
+  "version": "1.7.0b4",
+  "summary": "The repair preview shows the maintenance-page migration before it is applied.",
   "highlights": [
-    "'logs-tail' without a service returns the newest lines of every service, merged in time order as 'service | message'.",
-    "Includes 1.7.0b2: service list, restart, recreate and logs operations; the executor's 'recreate' op.",
-    "Includes 1.7.0b1: the maintenance page ships in this image; release-manifest.json replaces VERSION; stack hardening."
+    "The deployment check's repair preview now lists the maintenance-page migration (stack schema 3) with its exact proxy and compose diffs.",
+    "An apply refuses if the proxy config changed since the preview, not just the compose files.",
+    "Includes 1.7.0b3: logs of every service. Includes 1.7.0b2: service operations. Includes 1.7.0b1: the maintenance page ships in this image."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b3"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b4"
 }

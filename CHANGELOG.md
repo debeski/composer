@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.7.0b4
+
+- **Maintenance-Page Migration In The Repair Preview**: `check` (and `check-fix-preview`) listed only the `agent_installer` transforms, so DjangoLux's Operations panel showed no diff for the stack schema 3 page move that `check --fix` then ran. `maintenance_migration.preview()` returns that repair's unified diffs (`.proxy/Caddyfile`, `.proxy/default.conf.template`, compose, schema restamps) and a note on the page itself; it reads the same `_plan()` that `migrate()` executes, so the preview cannot drift from the change. `ops._maintenance_repair()` appends it as the `maintenance-page` repair.
+- **Apply Guard Covers The Proxy Files**: `compose_digest()` also fingerprints `.proxy/Caddyfile`, `.proxy/default.conf.template` and `.proxy/maintenance.html`, so an apply refuses when any file the preview showed changed in between. A preview taken by an older agent no longer matches after `agent update`; the operator previews again.
+
 ## v1.7.0b3
 
 - **`logs-tail` For Every Service**: a `logs-tail` request with no `service` runs `docker compose logs --no-color --timestamps --tail N` across the stack, and `_merge_logs()` orders the lines by timestamp and keeps the newest `N`, each line with Compose's own `service-N |` prefix, under the same redaction and 60000-character cap. A named service still has to be one of the stack's own.
