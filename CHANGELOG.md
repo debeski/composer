@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.7.0
+
+The stable release of the 1.7.0 line, identical in scope to `1.7.0b5` below and
+the betas before it, paired with DjangoLux 1.13.0: the maintenance page ships in
+this image (stack schema 3, `check --fix` migrates, the repair preview lists it),
+`release-manifest.json` replaces `VERSION`, stack hardening, and the service
+operations behind DjangoLux's Operations panel (`services`, `service-restart`,
+`service-recreate` with the deployment's secrets, `logs-tail` for one service or
+all). It also carries the 1.6.1 betas, which never had a stable of their own.
+Accepted with each DjangoLux 1.13.0 beta on `testbed-dlux` — published images
+byte-checked against their tags, deployer and resident pair updated, a legacy
+stack migrated through the panel with real clicks, restart and recreate verified
+live, `check` all pass. A stack on Composer 1.6 keeps working; its maintenance
+page stays in the project until `check --fix` runs with a 1.7 agent.
+
 ## v1.7.0b5
 
 - **Maintenance-Page Check Inside composer-agent**: `_check_maintenance_page()` asked whether the page was published with `docker compose exec composer-agent test -f …`, which the read-only socket proxy refuses (`EXEC=0`), so every check run by the agent — the Operations panel's check and the findings after an apply — warned that a published page was missing (found accepting DjangoLux 1.13.0b5). `_published_page_has()` reads `/opt/dlux-runtime/proxy/maintenance/` directly wherever the runtime volume is mounted, for the page and the `.custom` override marker alike, and asks composer-agent only on the host.

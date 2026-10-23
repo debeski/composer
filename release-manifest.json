@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "version": "1.7.0b5",
-  "summary": "Recreate from the Operations panel keeps the deployment's secrets; the maintenance-page check works inside composer-agent.",
+  "version": "1.7.0",
+  "summary": "The maintenance page ships in this image, and DjangoLux's Operations panel can restart, recreate and read the logs of services.",
   "highlights": [
-    "Inside composer-agent (the Operations panel's check and apply) the maintenance-page check reads the runtime volume instead of an exec the socket proxy refuses.",
-    "Recreating a service from the Operations panel loads the deployment's secrets; before, the new container ran on compose defaults.",
-    "Includes 1.7.0b4: the repair preview lists the maintenance-page migration. Includes 1.7.0b3: logs of every service. Includes 1.7.0b2: service operations. Includes 1.7.0b1: the maintenance page ships in this image."
+    "composer-agent publishes the maintenance page on the runtime volume (stack schema 3); check --fix migrates existing stacks, and the repair preview shows that change first.",
+    "Operations for DjangoLux 1.13's panel: list services, restart or recreate allow-listed ones with the deployment's secrets, and read the logs of one service or all of them.",
+    "release-manifest.json replaces VERSION; stack hardening (read-only socket proxy, pinned images, DAC_OVERRIDE).",
+    "Includes the 1.6.1 betas: dlux update/rollback back up first, outbox backoff, stack-schema finding."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0b5"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0"
 }
