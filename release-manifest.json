@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "version": "1.8.0b1",
+  "version": "1.8.0",
   "summary": "Start and stop approved auxiliary services from DjangoLux while keeping the control path available.",
   "highlights": [
-    "Typed service-start/service-stop operations for existing allow-listed containers, paired with DjangoLux 1.14.0b3.",
+    "Typed service-start/service-stop operations for existing allow-listed containers, paired with DjangoLux 1.14.",
     "Agent and executor independently enforce protected services, labels, allowlists and current state; Web/Celery, proxies, data and Composer services remain protected.",
     "Service capabilities reflect actual state. Existing restart/recreate, logs, updates and maintenance-page support are retained."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.8.0b1"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.8.0"
 }
