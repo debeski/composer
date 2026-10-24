@@ -22,6 +22,8 @@ Unreleased Composer 1.8 / DjangoLux 1.14 adds `service-start` and `service-stop`
 
 `PROTECTED_LIFECYCLE_SERVICES` additionally protects `web`, `celery`, `celery-beat`, `celery_beat`, `beat`, `worker`, `nginx`, `caddy`, `proxy`; their restart/recreate capabilities stay unchanged. This preserves the browser and worker path needed for Start. DjangoLux requires superuser, POST/CSRF, password and audit; its operation floor is `1.8.0b1`. Older pairs fail closed for these actions. Accept the paired beta before promotion.
 
+Local validation, 2026-10-24: 861 tests OK/four skips and the candidate image's repository smoke script passed. A separate 8096 stack passed actual SMTP-relay Stop/Start through the paired DjangoLux panel in English/Arabic at 1440/390, preserving Web/Celery/proxy protection; SMTP was left running and healthy. The final combined DjangoLux package matches Web/Celery byte-for-byte, with unchanged user/settings fingerprints. Local build exports use candidate versions only; nothing new is tagged or published. Evidence: `pkg-django-lux/service_controls/.xclude/validation/service-controls/`; combined DjangoLux validation is in its `docs/operations.md`. Published paired-beta acceptance remains required before promotion.
+
 - The control URL must use HTTPS. Plain HTTP is accepted only for explicit localhost development.
 - Enrollment uses `POST /api/agent/v1/enroll/` with a one-use token whose server lifetime is 15 minutes.
 - Enrollment returns a UUID agent ID and random bearer secret. The agent persists credentials, commands, event sequences, and replay outbox in mode-`0600` SQLite under `COMPOSER_AGENT_STATE_DIR`.
