@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+Paired with DjangoLux 1.15 OCR (`1.15/ocr`).
+
+- **OCR Service Controls**: `ocr` joins `SAFE_RESTART_CANDIDATES` and `RESTART_LABELS` (`safe`), so generated resident blocks allow-list it in `COMPOSER_AGENT_RESTART_SERVICES` and the Operations panel can start, stop, restart and recreate it; web/celery/proxies stay lifecycle-protected. The in-app image update keeps running an unscoped `composer update`, so the `ocr` image is pulled with every image update (pinned by a test).
+- **ASCII Windows Launcher (wrapper 4)**: `start.ps1` replaces the em dash Windows PowerShell 5.1 read as a string terminator under ANSI decoding; both wrappers move to version 4 (`wrappers-history.json` records it), so `check --fix` now writes the ASCII launcher instead of reverting it. DjangoLux's scaffold mirrors are byte-identical.
+
 ## v1.8.0b1
 
 - **Auxiliary Service Start/Stop**: Add typed `service-start`/`service-stop` requests and executor `start`/`stop` for existing allow-listed containers. Publish capabilities from actual state; independently enforce allowlists, protected labels and services in the executor. Web/Celery, workers/beat, proxies, data and Composer stay protected. Pairs with DjangoLux 1.14.
