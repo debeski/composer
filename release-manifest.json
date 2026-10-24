@@ -1,12 +1,11 @@
 {
   "schema_version": 1,
-  "version": "1.7.0",
-  "summary": "The maintenance page ships in this image, and DjangoLux's Operations panel can restart, recreate and read the logs of services.",
+  "version": "1.8.0b1",
+  "summary": "Start and stop approved auxiliary services from DjangoLux while keeping the control path available.",
   "highlights": [
-    "composer-agent publishes the maintenance page on the runtime volume (stack schema 3); check --fix migrates existing stacks, and the repair preview shows that change first.",
-    "Operations for DjangoLux 1.13's panel: list services, restart or recreate allow-listed ones with the deployment's secrets, and read the logs of one service or all of them.",
-    "release-manifest.json replaces VERSION; stack hardening (read-only socket proxy, pinned images, DAC_OVERRIDE).",
-    "Includes the 1.6.1 betas: dlux update/rollback back up first, outbox backoff, stack-schema finding."
+    "Typed service-start/service-stop operations for existing allow-listed containers, paired with DjangoLux 1.14.0b3.",
+    "Agent and executor independently enforce protected services, labels, allowlists and current state; Web/Celery, proxies, data and Composer services remain protected.",
+    "Service capabilities reflect actual state. Existing restart/recreate, logs, updates and maintenance-page support are retained."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.7.0"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.8.0b1"
 }

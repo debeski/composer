@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.8.0b1
 
 - **Auxiliary Service Start/Stop**: Add typed `service-start`/`service-stop` requests and executor `start`/`stop` for existing allow-listed containers. Publish capabilities from actual state; independently enforce allowlists, protected labels and services in the executor. Web/Celery, workers/beat, proxies, data and Composer stay protected. Pairs with DjangoLux 1.14.
 

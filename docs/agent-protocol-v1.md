@@ -18,7 +18,7 @@ DjangoLux's Operations card asks the resident Composer to perform one **named** 
 
 ## Transport and authentication
 
-Unreleased Composer 1.8 / DjangoLux 1.14 adds `service-start` and `service-stop`, carrying one required `service`, delegated to executor `start`/`stop` requests. They run `docker compose start SERVICE` / `stop SERVICE`; no user command, flags, creation or volume deletion is accepted. Both sides independently check real Compose services, `COMPOSER_AGENT_RESTART_SERVICES`, protected labels and state. `services` adds `can_lifecycle`, `can_start` and `can_stop`: start for created/exited/stopped, stop for running/restarting/paused containers. Use Recreate for absent services.
+Composer 1.8.0b1 / DjangoLux 1.14.0b3 adds `service-start` and `service-stop`, carrying one required `service`, delegated to executor `start`/`stop` requests. They run `docker compose start SERVICE` / `stop SERVICE`; no user command, flags, creation or volume deletion is accepted. Both sides independently check real Compose services, `COMPOSER_AGENT_RESTART_SERVICES`, protected labels and state. `services` adds `can_lifecycle`, `can_start` and `can_stop`: start for created/exited/stopped, stop for running/restarting/paused containers. Use Recreate for absent services.
 
 `PROTECTED_LIFECYCLE_SERVICES` additionally protects `web`, `celery`, `celery-beat`, `celery_beat`, `beat`, `worker`, `nginx`, `caddy`, `proxy`; their restart/recreate capabilities stay unchanged. This preserves the browser and worker path needed for Start. DjangoLux requires superuser, POST/CSRF, password and audit; its operation floor is `1.8.0b1`. Older pairs fail closed for these actions. Accept the paired beta before promotion.
 
