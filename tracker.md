@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- **Unreleased, merged to main (2026-10-21)**: stack hardening from the Sept 28 branch `claude/project-thread-x7md08` (never merged), cherry-picked onto main: `agent enable` always writes the hardened trio, `check` FAILs a docker-socket-proxy with POST/EXEC, `DAC_OVERRIDE` replaces `DAC_READ_SEARCH` (matches DjangoLux scaffold since 1.9.5b4), socket-proxy pinned by digest, Actions/Dockerfile pinned + dependabot. Ships in Composer 1.7.0 with DjangoLux 1.13.0.
+- 2026-10-24 **1.8.0b1 candidate prepared** on `1.8/service_controls`, paired DjangoLux1.14.0b3 (release/operation floor1.8.0b1). Typed auxiliary Start/Stop, independent agent/executor guards and actual-state capabilities; standalone Web/Celery/control-path lifecycle protected, restart/recreate/update unchanged. Suite861 OK/4skips; proper release image smoke + classifier PASS. Local8096 EN/AR desktop/mobile accepted; no new tag published. Push/PR then paired main integration and published acceptance next (owner authorized).
 - **v1.7.0 stable candidate on main (2026-10-23)**: identical to 1.7.0b5 (betas b2–b5 on `1.7/operations`, all published + accepted with DjangoLux 1.13.0b2–b5): service ops (`services`, `service-restart`, `service-recreate` with secrets resolved, `logs-tail` incl. all services), repair preview lists the maintenance-page migration (digest covers `.proxy/`), agent-side page check reads the runtime volume. 842+ tests OK. Tag `v1.7.0` with DjangoLux `v1.13.0` on owner OK. "Update everything" moved out (owner).
 - **v1.7.0b1 (beta, published + accepted 2026-10-21; `:v1.7.0b1` + `:beta`, tag `d51d7bf` on `1.7/maintenance_page`)**: maintenance page in the image (`composer/assets/maintenance/`, agent publishes on start, `composer maintenance publish [--override]`), `check`/`check --fix` migration to stack schema 3 (validated proxy rewrite, mount dropped, custom page kept as `.proxy/maintenance/`, restamp 2->3), override publishing for new stacks, `release-manifest.json` replaces `VERSION` (image derives `/app/VERSION`, label `org.dlux.composer.release-manifest`). 834 tests OK; smoke test OK; pre-publish testbed migration accepted (evidence `pkg-django-lux/main/.xclude/validation/composer-1.7.0b1-prepublish-2026-10-21/`). Pairs with DjangoLux 1.13.0b1 (schema 3 scaffold).
 - **Composer 1.7.0 plan (owner, 2026-10-21)**: betas first (`v1.7.0bN`, `:beta`), paired with DjangoLux 1.13.0 betas on `testbed-dlux`. Scope: stack hardening (above); maintenance page owned by the Composer image (agent publishes to the runtime volume, proxy serves it, optional project `.proxy/maintenance/` override, stack schema 3, `check --fix` migrates); operations-centre operations (restart/recreate allow-listed services, `logs tail`, "update everything"); **`VERSION` replaced by a `release-manifest.json`** like DjangoLux and projects (version, summary, highlights, release URL), exposed as an image label so DjangoLux's Updates card can show what a Composer update brings (used by DjangoLux 1.14).
@@ -72,7 +72,7 @@
   - [x] v1.3.5: one migrator run per start — `org.dlux.post-start` label replaces the native Compose `post_start` hook (which Compose ran itself, unflagged, overlapping composer's `-mm` run and clearing STATIC_ROOT mid-collect). Label discovery via `compose_config_json()`, legacy blocks still run + announced, `enable_post_start_label` migration in `check --fix`. `-nm` now means "skip migrations, still collect static" and passes through to the migrator; the old "no hooks at all" meaning moved to `skip_post_start` (`agent update`). `-mm`/`-nm` mutually exclusive. +21 tests.
 
 ### One-line info about last verified Tests:
-- 2026-10-06: 1.6.1b1 — suite 778 OK (6 skips) in a scratch venv incl. outbox backoff and 6 stack-schema tests; check run against a fresh DjangoLux scaffold: 9 files at schema 2 -> ok, one proxy file at 1 -> warn naming it.
+- 2026-10-24: full861 OK/4skips with DjangoLux repo interpreter/deps (bare system Python lacked packaging/crypto/yaml); new agent/executor lifecycle tests PASS; candidate image smoke PASS. Paired dev8096 real stop/start, final package/user/settings checks PASS; evidence `pkg-django-lux/service_controls/.xclude/validation/service-controls/`.
 - 2026-09-30: 1.5.4b1 — suite 709 OK (6 skips) in a venv with packaging/pyyaml/pypi-attestations; local image has buildx v0.37.1, and a buildx build created no per-step containers.
 - 2026-09-25: 1.5.3 on `testbed-dlux` — b2 local build then published: unpinned `dlux update` resolves beta 1.9.4b1 / stable 1.9.3 by policy, the agent->executor handoff applied 1.9.4b1 (ack exit 0); stable 1.5.3 installed stable 1.9.4 over 1.9.3. Suite 705/709 (4 need a Docker CLI in the container).
 - 2026-09-24: `--skip-config` live on the decrees rig from a locally built 1.5.3b1 image — `./start.sh --skip-config` put `DLUX_SKIP_CONFIG_IMPORT=True` into web, celery and composer-agent, DjangoLux returned `skipped` with `config.json` byte-identical, and a plain `./start.sh` left the variable unset. 704 tests OK (beta-first now gates patches too).
@@ -80,7 +80,7 @@
 - 2026-09-24: 1.5.2b1 published to `:beta`; the decrees rig was put back on published 1.5.1, then host-updated to `:beta` from the registry (resident 1.5.2b1, deployer 1.5.1 published in agent-status). From there DjangoLux's card ran `agent-check` (tick: resident == the beta channel's current version) and the deployment check (15/15 OK). 701 tests OK.
 - 2026-09-23: ops responder live on decrees — panel check answered in ~9 s with the CLI's own 15 findings, a reintroduced flat `agent` command came back as a `fail` finding with its fix hint, an unknown operation was refused, and a 1.4.1 pair (no responder) left the run to time out with DjangoLux's version message. 660 tests OK.
 ### One-line info about last time edited Docs:
-- 2026-10-06: `docs/agent-protocol-v1.md` notes poll + outbox backoff; README `stack schema stamps` section + `check` paragraph; 1.6.1b1 changelog (v1.6.0 tag verified).
+- 2026-10-24: 1.8.0b1 manifest/changelog + agent-protocol/executor-hardening document guarded Start/Stop and exact paired DjangoLux1.14.0b3 beta.
 - 2026-09-30: README `--build` row notes buildx/BuildKit; 1.5.4b1 changelog/version opened after verifying the 1.5.3 tag.
 
 ## Part 2: Global
@@ -92,7 +92,7 @@
 - Preserve unrelated worktree changes; never delete files; keep `tracker.md` below 100 lines.
 
 ### Agent Handoff Rules:
-- `start.py` is intentionally absent; do not restore it.
+- 2026-10-24: 1.8/service_controls candidate1.8.0b1 pairs with DjangoLux1.14/table_builder candidate1.14.0b3 (floor1.8.0b1). Owner authorized paired publication after backup/search fixes; DjangoLux main requires owner review before tagging. No tag yet. Existing1.7 restart/recreate unchanged; live8096 accepted, published pair still needs official testbed acceptance. `start.py` stays absent.
 - Re-run syntax/tests after edits; latest generated caches moved to `.xclude/test-cache-20260905-nested-commands/`.
 
 ### References and Links:

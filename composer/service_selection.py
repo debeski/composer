@@ -23,6 +23,11 @@ PROTECTED_RESTART_SERVICES = frozenset(
     }
 )
 
+# Keep the browser and request-dispatch path available for a later Start.
+PROTECTED_LIFECYCLE_SERVICES = PROTECTED_RESTART_SERVICES | frozenset(
+    {"web", "celery", "celery-beat", "celery_beat", "beat", "worker", "nginx", "caddy", "proxy"}
+)
+
 
 def parse_service_list(raw: Optional[str]) -> List[str]:
     names: List[str] = []

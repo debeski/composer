@@ -411,11 +411,12 @@ def _parse_ps(text: str) -> dict:
     return states
 
 
-def _service_table(runtime) -> list:
+def _service_table(runtime=None, *, launcher=None) -> list:
     """Every Compose service, its state, and whether a request may restart it."""
     from .executor_ops import _restart_policy
+    from .service_selection import PROTECTED_LIFECYCLE_SERVICES
 
-    launcher = _stack_launcher(runtime)
+    launcher = launcher or _stack_launcher(runtime)
     ok, out, err = launcher.run_docker_compose(["config", "--format", "json"], timeout=60)
     if not ok:
         raise ValueError(redact_text(err or out or "docker compose config failed.")[:MAX_MESSAGE_CHARS])
@@ -431,11 +432,16 @@ def _service_table(runtime) -> list:
         labels = (services[name] or {}).get("labels") or {}
         label = str(labels.get("org.dlux.restart") or "") if isinstance(labels, dict) else ""
         state = states.get(name, {"state": "absent", "health": "", "status": ""})
+        can_restart = name in allowed and name not in protected and label != "protected"
+        can_lifecycle = can_restart and name not in PROTECTED_LIFECYCLE_SERVICES
         table.append({
             "name": name,
             **state,
             "restart_label": label,
-            "can_restart": name in allowed and name not in protected and label != "protected",
+            "can_restart": can_restart,
+            "can_lifecycle": can_lifecycle,
+            "can_start": can_lifecycle and state["state"] in ("created", "exited", "stopped"),
+            "can_stop": can_lifecycle and state["state"] in ("running", "restarting", "paused"),
         })
     return table
 
@@ -444,7 +450,7 @@ def _list_services(runtime) -> dict:
     return {"exit_code": 0, "services": _service_table(runtime), "findings": []}
 
 
-def _requested_service(runtime, request, *, restartable: bool) -> str:
+def _requested_service(runtime, request, *, restartable: bool, action="") -> str:
     service = str(request.get("service") or "").strip()
     table = {row["name"]: row for row in _service_table(runtime)}
     if service not in table:
@@ -453,22 +459,24 @@ def _requested_service(runtime, request, *, restartable: bool) -> str:
         raise ValueError(
             f"'{service}' may not be restarted remotely (protected, or not in COMPOSER_AGENT_RESTART_SERVICES)."
         )
+    if action in ("start", "stop") and not table[service][f"can_{action}"]:
+        raise ValueError(f"Remote {action} is unavailable for '{service}' (protected or incompatible current state).")
     return service
 
 
 def _restart_service(runtime, request, *, op: str) -> dict:
-    """Restart or recreate one allow-listed service through the executor."""
+    """Control one allow-listed service through the executor."""
     import uuid
 
     from . import executor_client
 
-    service = _requested_service(runtime, request, restartable=True)
+    service = _requested_service(runtime, request, restartable=True, action=op)
     if not executor_client.executor_configured():
-        raise ValueError("Restarting a service needs composer-executor, which this deployment does not define.")
+        raise ValueError("Controlling a service needs composer-executor, which this deployment does not define.")
     exit_code, detail = executor_client.run_operation(op, {"service": service}, operation_id=str(uuid.uuid4()))
-    verb = "Recreated" if op == "recreate" else "Restarted"
+    verb = {"start": "Started", "stop": "Stopped", "recreate": "Recreated", "restart": "Restarted"}[op]
     if exit_code != 0:
-        raise ValueError(redact_text(detail or f"{verb[:-1]} of {service} failed (exit {exit_code}).")[:MAX_MESSAGE_CHARS])
+        raise ValueError(redact_text(detail or f"Could not {op} {service} (exit {exit_code}).")[:MAX_MESSAGE_CHARS])
     return {
         "exit_code": 0,
         "service": service,
@@ -526,6 +534,8 @@ HANDLERS = {
     ),
     "services": lambda runtime, request: _list_services(runtime),
     "service-restart": lambda runtime, request: _restart_service(runtime, request, op="restart"),
+    "service-start": lambda runtime, request: _restart_service(runtime, request, op="start"),
+    "service-stop": lambda runtime, request: _restart_service(runtime, request, op="stop"),
     "service-recreate": lambda runtime, request: _restart_service(runtime, request, op="recreate"),
     "logs-tail": _tail_logs,
 }

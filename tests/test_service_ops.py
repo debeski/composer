@@ -17,10 +17,14 @@ CONFIG = json.dumps({"services": {
     "celery": {"labels": {"org.dlux.restart": "safe"}},
     "db": {"labels": {"org.dlux.restart": "protected"}},
     "composer-agent": {"labels": {"org.dlux.restart": "protected"}},
+    "metrics": {"labels": {"org.dlux.restart": "safe"}},
+    "locked": {"labels": {"org.dlux.restart": "protected"}},
 }})
 PS = "\n".join(json.dumps(row) for row in (
     {"Service": "web", "State": "running", "Health": "healthy", "Status": "Up 2 hours (healthy)"},
     {"Service": "db", "State": "running", "Health": "healthy", "Status": "Up 2 hours"},
+    {"Service": "metrics", "State": "running", "Health": "healthy", "Status": "Up 2 hours"},
+    {"Service": "locked", "State": "running", "Health": "healthy", "Status": "Up 2 hours"},
 ))
 
 
@@ -35,13 +39,14 @@ class FakeCompose:
     def __init__(self, logs="line one\nAPI_KEY=supersecret\n"):
         self.calls = []
         self.logs = logs
+        self.ps = PS
 
     def __call__(self, launcher, args, timeout=None):
         self.calls.append(list(args))
         if args[0] == "config":
             return True, CONFIG, ""
         if args[0] == "ps":
-            return True, PS, ""
+            return True, self.ps, ""
         if args[0] == "logs":
             return True, self.logs, ""
         return False, "", "unexpected"
@@ -54,18 +59,20 @@ class ServiceOpsTests(unittest.TestCase):
         self.state = Path(self._tmp.name)
         self.responder = OpsResponder(WatchRuntime(_args(self.state / "image-update-request.json")))
         self.compose = FakeCompose()
+        self.request_count = 0
         patches = [
             patch("composer.launcher.DockerComposeLauncher.run_docker_compose", autospec=True, side_effect=self.compose),
             patch("composer.launcher.DockerComposeLauncher.resolve_active_compose_files", autospec=True),
-            patch.dict(os.environ, {"COMPOSER_AGENT_RESTART_SERVICES": "web,celery,db"}),
+            patch.dict(os.environ, {"COMPOSER_AGENT_RESTART_SERVICES": "web,celery,db,metrics,locked"}),
         ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
 
     def _ask(self, operation, **fields):
+        self.request_count += 1
         (self.state / "ops-request.json").write_text(
-            json.dumps({"schema_version": 1, "token": f"t-{operation}-{len(fields)}", "operation": operation, **fields}),
+            json.dumps({"schema_version": 1, "token": f"t-{operation}-{self.request_count}", "operation": operation, **fields}),
             encoding="utf-8",
         )
         self.responder.answer()
@@ -108,6 +115,27 @@ class ServiceOpsTests(unittest.TestCase):
         self.assertIn("line one", result["logs"])
         self.assertIn(["logs", "--no-color", "--no-log-prefix", "--tail", "1000", "web"], self.compose.calls)
 
+    def test_lifecycle_capabilities_protect_control_path_and_absent_services(self):
+        rows = {row['name']: row for row in self._ask('services')['services']}
+        self.assertTrue(rows['metrics']['can_stop'])
+        self.assertFalse(rows['metrics']['can_start'])
+        for name in ('web', 'celery', 'db', 'composer-agent', 'locked'):
+            self.assertFalse(rows[name]['can_start'], name)
+            self.assertFalse(rows[name]['can_stop'], name)
+
+    def test_start_stop_travel_through_executor_and_revalidate_state(self):
+        with patch('composer.executor_client.executor_configured', return_value=True), \
+                patch('composer.executor_client.run_operation', return_value=(0, '')) as run:
+            self.assertEqual(self._ask('service-stop', service='metrics')['error'], '')
+            self.assertEqual(run.call_args.args[:2], ('stop', {'service': 'metrics'}))
+            self.assertIn('unavailable', self._ask('service-start', service='metrics')['error'])
+            self.compose.ps = json.dumps({'Service': 'metrics', 'State': 'exited'})
+            self.assertEqual(self._ask('service-start', service='metrics')['error'], '')
+            self.assertEqual(run.call_args.args[:2], ('start', {'service': 'metrics'}))
+            for service in ('web', 'celery', 'db', 'locked', 'missing'):
+                for action in ('start', 'stop'):
+                    with self.subTest(service=service, action=action):
+                        self.assertNotEqual(self._ask('service-'+action, service=service)['error'], '')
     def test_all_services_merge_into_one_timeline(self):
         self.compose.logs = (
             "web-1     | 2026-10-21T10:00:02.000Z second\n"
@@ -128,6 +156,38 @@ class ServiceOpsTests(unittest.TestCase):
         self.assertEqual(_parse_ps(array)["web"]["state"], "running")
         self.assertEqual(_parse_ps(PS)["db"]["health"], "healthy")
 
+
+class ExecutorLifecycleTests(unittest.TestCase):
+    def test_protocol_rejects_missing_or_injected_service_names(self):
+        for op in ('start', 'stop'):
+            for service in ('', '../web', 'metrics;id'):
+                with self.subTest(op=op, service=service), self.assertRaises(executor_protocol.ProtocolError):
+                    executor_protocol.validate_executor_request({
+                        'protocol_version': 1, 'operation_id': '11111111-1111-1111-1111-111111111111',
+                        'op': op, 'payload': {'service': service},
+                    })
+
+    def test_executor_checks_allowlist_labels_state_and_control_path_itself(self):
+        compose = FakeCompose()
+        def execute(launcher, args, timeout=None):
+            if args[0] in ('start', 'stop'):
+                compose.calls.append(args)
+                return True, '', ''
+            return compose(launcher, args, timeout)
+        with patch.dict(os.environ, {'COMPOSER_AGENT_RESTART_SERVICES': 'metrics,web,celery,db,locked,absent'}), \
+                patch('composer.launcher.DockerComposeLauncher.resolve_active_compose_files', autospec=True), \
+                patch('composer.launcher.DockerComposeLauncher.run_docker_compose', autospec=True, side_effect=execute):
+            for service in ('web', 'celery', 'db', 'locked', 'absent', 'unknown'):
+                for action in ('start', 'stop'):
+                    with self.subTest(service=service, action=action):
+                        self.assertEqual(executor_ops._run_service_lifecycle('op', service, action)[0], 2)
+            self.assertEqual(executor_ops._run_service_lifecycle('op', 'metrics', 'stop'), (0, ''))
+            self.assertIn(['stop', 'metrics'], compose.calls)
+            self.assertEqual(executor_ops._run_service_lifecycle('op', 'metrics', 'start')[0], 2)
+            compose.ps = json.dumps({'Service': 'metrics', 'State': 'exited'})
+            self.assertEqual(executor_ops._run_service_lifecycle('op', 'metrics', 'start'), (0, ''))
+            self.assertIn(['start', 'metrics'], compose.calls)
+            self.assertNotIn(['start', 'web'], compose.calls)
 
 class ExecutorRecreateTests(unittest.TestCase):
     def test_the_protocol_needs_one_valid_service(self):

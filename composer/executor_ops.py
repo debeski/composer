@@ -17,6 +17,7 @@ from typing import Dict, Tuple
 
 from . import executor_protocol as proto
 from .service_selection import (
+    PROTECTED_LIFECYCLE_SERVICES,
     PROTECTED_RESTART_SERVICES,
     join_service_list,
     parse_service_list,
@@ -106,6 +107,25 @@ def _run_restart(operation_id: str, service: str) -> Tuple[int, str]:
     else:
         env["COMPOSER_RESTART_SERVICES"] = join_service_list(allowed)
     return _run(argv, env)
+
+
+def _run_service_lifecycle(operation_id: str, service: str, action: str) -> Tuple[int, str]:
+    """Start/stop an existing auxiliary container without changing its config."""
+    env = _op_env(operation_id)
+    protected, allowed = _restart_policy(env)
+    if service in protected | PROTECTED_LIFECYCLE_SERVICES or service not in allowed:
+        return 2, f"Service '{service}' is protected or not in COMPOSER_AGENT_RESTART_SERVICES."
+    from .launcher import DockerComposeLauncher
+
+    launcher = DockerComposeLauncher()
+    launcher.resolve_active_compose_files()
+    from .ops import _service_table
+
+    row = next((row for row in _service_table(launcher=launcher) if row["name"] == service), None)
+    if row is None or not row[f"can_{action}"]:
+        return 2, f"Remote {action} is unavailable for '{service}' in its current state or because it is protected."
+    ok, out, err = launcher.run_docker_compose([action, service], timeout=120)
+    return (0, "") if ok else (1, (err or out or f"Could not {action} {service}.").strip()[-1000:])
 
 
 def _run_recovery(operation_id: str, force: bool) -> Tuple[int, str]:
@@ -252,7 +272,9 @@ def default_operation_handler(request: Dict) -> Dict:
     operation_id = request["operation_id"]
     op = request["op"]
     payload = request.get("payload", {})
-    if op == "restart":
+    if op in ("start", "stop"):
+        exit_code, detail = _run_service_lifecycle(operation_id, payload["service"], op)
+    elif op == "restart":
         exit_code, detail = _run_restart(operation_id, payload.get("service", ""))
     elif op == "recreate":
         exit_code, detail = _run_recreate(operation_id, payload.get("service", ""))

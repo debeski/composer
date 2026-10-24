@@ -30,6 +30,7 @@ Yet the agent's *actual* Docker-mutating surface is a small named set
 |:--|:--|:--|
 | `dlux.image_update` | `compose pull` + `up -d --force-recreate` (scoped) | `version_gate` rejects downgrades; scoped service list |
 | `composer.restart` | `compose restart <service>` | `PROTECTED_RESTART_SERVICES` + `COMPOSER_AGENT_RESTART_SERVICES` allowlist |
+| `start` / `stop` (unreleased 1.8) | start/stop one existing auxiliary container | executor rechecks real service, state, protected labels, `PROTECTED_LIFECYCLE_SERVICES` and allowlist; Web/Celery/proxy/control/data services protected |
 | `composer.recovery_deploy` | recreate from known-good state | requires a reason |
 | `dlux.backup.create` | management command via `compose exec`/`run` | scoped one-off |
 | `agent.rotate_credentials` | credential store only | **no Docker authority** |
