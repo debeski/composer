@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.9.0b1
 
 Paired with DjangoLux 1.15 OCR (`1.15/ocr`).
 

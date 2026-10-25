@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "version": "1.8.0",
-  "summary": "Start and stop approved auxiliary services from DjangoLux while keeping the control path available.",
+  "version": "1.9.0b1",
+  "summary": "Project-image OCR lifecycle support for DjangoLux 1.15 and ASCII-safe wrapper 4.",
   "highlights": [
-    "Typed service-start/service-stop operations for existing allow-listed containers, paired with DjangoLux 1.14.",
-    "Agent and executor independently enforce protected services, labels, allowlists and current state; Web/Celery, proxies, data and Composer services remain protected.",
-    "Service capabilities reflect actual state. Existing restart/recreate, logs, updates and maintenance-page support are retained."
+    "The optional OCR service joins generated restart and lifecycle allowlists; project-image updates include OCR with the application services.",
+    "Wrapper 4 keeps Windows PowerShell 5.1 launchers ASCII-safe and matches the DjangoLux scaffold.",
+    "Retains verified Composer 1.8 stable service protections and existing restart, recreate, update and maintenance behavior."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.8.0"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.0b1"
 }

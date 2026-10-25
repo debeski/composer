@@ -22,6 +22,8 @@ Composer 1.8.0b1 / DjangoLux 1.14.0b3 adds `service-start` and `service-stop`, c
 
 Composer 1.9 (paired with DjangoLux 1.15 OCR) allow-lists the optional `ocr` service in generated resident blocks (`SAFE_RESTART_CANDIDATES`, label `safe`), so it can be started and stopped like `smtp-relay`. An existing deployment that adds the `ocr` service also adds `ocr` to `COMPOSER_AGENT_RESTART_SERVICES` in both resident services; `check --fix` does not rewrite an existing allow-list.
 
+The first OCR beta pair is Composer `1.9.0b1` and DjangoLux `1.15.0b1`. DjangoLux requires this Composer floor and a rebuilt project image containing the optional OCR engine/models; the OCR service does not use a separate registry image.
+
 `PROTECTED_LIFECYCLE_SERVICES` additionally protects `web`, `celery`, `celery-beat`, `celery_beat`, `beat`, `worker`, `nginx`, `caddy`, `proxy`; their restart/recreate capabilities stay unchanged. This preserves the browser and worker path needed for Start. DjangoLux requires superuser, POST/CSRF, password and audit; its operation floor is `1.8.0b1`. Older pairs fail closed for these actions. Accept the paired beta before promotion.
 
 Published 1.8.0b1 was accepted with DjangoLux 1.14.0b3 on the owner-requested isolated testbed (8096), including real password-confirmed SMTP stop/start in EN/AR at desktop/mobile widths. The published image matched all 59 source payload files; `beta` points to b1 and `latest` stays on stable 1.7.0. The paired DjangoLux b2 → b3 inline update and post-relocation service cycle passed. See DjangoLux `docs/operations.md` for the evidence and active runtime location.
