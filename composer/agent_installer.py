@@ -35,11 +35,13 @@ DEPLOYER_READ_CAP = "DAC_OVERRIDE"
 RETIRED_DEPLOYER_READ_CAP = "DAC_READ_SEARCH"
 # Socket-proxy switches that grant Docker write authority.
 PROXY_WRITE_SWITCHES = ("POST", "EXEC", "NETWORKS", "VOLUMES")
-SAFE_RESTART_CANDIDATES = ("web", "celery", "smtp-relay", "caddy", "nginx")
+# `ocr` (DjangoLux 1.15 OCR) is also startable/stoppable from the Operations panel.
+SAFE_RESTART_CANDIDATES = ("web", "celery", "smtp-relay", "caddy", "nginx", "ocr")
 RESTART_LABELS = {
     "web": "safe",
     "celery": "safe",
     "smtp-relay": "safe",
+    "ocr": "safe",
     "caddy": "safe",
     "nginx": "safe",
     "db": "protected",
