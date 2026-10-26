@@ -27,3 +27,19 @@ does not inject it into containers.
 
 Older DjangoLux releases do not recognize this variable and still auto-import
 the file. Upgrade the app image before relying on the option.
+
+## Secrets access differs between processes
+
+The terminal launcher and deployment executor can map to different host UIDs,
+especially with Docker user-namespace remapping. A readable file in your shell
+therefore does not establish that the executor can read it. `./start.sh check`
+verifies executor access too. Operations routes its read-only deployment check
+through that executor; the network-facing agent does not need secrets access.
+
+An unreadable file prevents the executor from validating deployment configuration
+and can block recreates/updates that need those values. The finding identifies
+the affected host UID and prints specific `sudo setfacl` commands for the Linux
+VM. Run those commands in the VM project directory. sudo asks for the VM account
+password locally, never in DjangoLux. Install the host's `acl` package if needed,
+then rerun `./start.sh check`. Keep the file restricted; do not make it
+world-readable or give the network-facing agent access to silence a warning.

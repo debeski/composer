@@ -35,7 +35,7 @@ _LENGTH_PREFIX_BYTES = 4
 # absence of image_update (file-triggered), backup (DLUX-side), and
 # rotate_credentials (agent-local) — none of them belong on this surface.
 EXECUTOR_OPS = frozenset(
-    {"start", "stop", "restart", "recreate", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback", "check_fix", "agent_update"}
+    {"start", "stop", "restart", "recreate", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback", "check_fix", "agent_update", "deployment_check"}
 )
 
 REQUEST_FIELDS = frozenset({"protocol_version", "operation_id", "op", "payload"})
@@ -145,6 +145,15 @@ def validate_executor_request(value: Any) -> Dict[str, Any]:
         if not _TOKEN_RE.fullmatch(token):
             raise ProtocolError("The operation token is invalid.")
         payload = {"token": token}
+    elif op == "deployment_check":
+        _require_payload_fields(payload, {'dev', 'file'})
+        if not isinstance(payload.get('dev', False), bool):
+            raise ProtocolError('dev must be a JSON boolean.')
+        filename = payload.get('file', '')
+        if (not isinstance(filename, str) or '/' in filename or '\\' in filename
+                or (filename and not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml', filename))):
+            raise ProtocolError('file must be a Compose filename in the project directory.')
+        payload = {'dev': payload.get('dev', False), 'file': filename}
     elif op == "check_fix":
         # The digest of the deployment files DjangoLux previewed. It is the only
         # input: the repair itself is whatever `check --fix` decides, and the

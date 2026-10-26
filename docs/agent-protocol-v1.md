@@ -86,3 +86,17 @@ instead of being derived from the Compose `name:`, so pre-1.5 scaffolds keep
 DjangoLux `agent enable` command is a one-cycle compatibility forwarder, not a
 second implementation. The transformer reads and writes only the Compose file,
 so it runs unchanged on a deployment host that carries no project sources.
+
+### Read-only deployment checks in executor mode
+
+Composer 1.9.0b2 adds the private-socket `deployment_check` operation. Its only
+inputs are `dev` (a strict boolean) and an optional project-local Compose filename;
+commands, arbitrary paths and symlinks escaping the project are rejected. It
+performs check/repair-preview inspection without applying repairs, and returns
+already-redacted findings and diffs in a bounded executor frame. A check that
+finds failures is a successfully completed inspection, with failures retained in
+the report. A missing/older executor returns an actionable failure, never a clean
+result. Update both resident services together.
+
+The agent forwards this report to DjangoLux. It does not read deployment secrets
+or gain Docker-exec authority. Post-repair verification follows the same route.

@@ -272,6 +272,19 @@ def default_operation_handler(request: Dict) -> Dict:
     operation_id = request["operation_id"]
     op = request["op"]
     payload = request.get("payload", {})
+    if op == 'deployment_check':
+        from types import SimpleNamespace
+        from pathlib import Path
+        from .ops import _run_check_local
+
+        filename = payload.get('file') or None
+        if filename and Path(filename).resolve().parent != Path.cwd().resolve():
+            return proto.build_result(operation_id, 'rejected', exit_code=2, detail='Compose file must stay within the project directory.')
+        runtime = SimpleNamespace(args=SimpleNamespace(file=filename, dev=payload['dev']))
+        report = _run_check_local(runtime)
+        result = proto.build_result(operation_id, 'succeeded')
+        result['report'] = report
+        return result
     if op in ("start", "stop"):
         exit_code, detail = _run_service_lifecycle(operation_id, payload["service"], op)
     elif op == "restart":

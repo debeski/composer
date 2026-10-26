@@ -115,8 +115,10 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             return _result(
                 FAIL,
                 "secrets",
-                f"Secrets file {path} exists but is not readable: {exc}",
-                fix="Fix file permissions/ownership (see start.sh's readability guard).",
+                f"This Composer process cannot open {path}: {exc}. "
+                "Operations cannot validate the deployment's configuration values. "
+                "A terminal check may still pass when its launcher has different permissions.",
+                fix=self.unreadable_secret_hint(Path(path)),
             )
         except ValueError as exc:
             return _result(FAIL, "secrets", f"Secrets file {path} could not be parsed: {exc}")
@@ -127,7 +129,45 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 f"Secrets file {path} contains no environment values.",
                 fix="Populate the env file; an empty file silently falls through to compose defaults.",
             )
+        if not getattr(self, "resident_check", False) and "composer-executor" in self.services:
+            resident = self._check_executor_secret_access(Path(path))
+            if resident is not None:
+                return resident
         return _result(OK, "secrets", f"Secrets source {path} readable ({len(values)} value(s)).")
+
+    def _check_executor_secret_access(self, path: Path) -> Dict[str, Any]:
+        # Open without reading or returning values, under the executor's own identity.
+        probe = """import json,os,sys
+from pathlib import Path
+uid=os.geteuid(); host_uid=None
+for line in Path('/proc/self/uid_map').read_text().splitlines():
+ start,host,length=map(int,line.split())
+ if start<=uid<start+length: host_uid=host+uid-start; break
+try:
+ with open(sys.argv[1],'rb'): pass
+ readable=True
+except OSError: readable=False
+print(json.dumps({'readable':readable,'host_uid':host_uid}))
+"""
+        ok, out, _err = self.run_docker_compose(
+            ["exec", "-T", "composer-executor", "python", "-c", probe, str(path.absolute())], timeout=15,
+        )
+        try:
+            data = json.loads(out) if ok else {}
+        except (ValueError, TypeError):
+            data = {}
+        if data.get("readable") is True:
+            return _result(OK, "secrets", f"Secrets source {path} is readable by the launcher and deployment executor.")
+        if data.get("readable") is not False:
+            return _result(WARN, "secrets", f"The launcher can read {path}, but deployment-executor access could not be verified.",
+                           fix="Ensure composer-executor is running, then run ./start.sh check again.")
+        uid = data.get("host_uid")
+        if not isinstance(uid, int) or isinstance(uid, bool) or uid < 0:
+            return _result(FAIL, "secrets", f"The launcher can read {path}, but the deployment executor cannot.",
+                           fix="Check the deployment executor's host UID and file/directory access on the VM; keep secrets restricted.")
+        return _result(FAIL, "secrets", f"The launcher can read {path}, but the deployment executor (host UID {uid}) cannot. "
+                       "Operations cannot validate the deployment configuration under that identity.",
+                       fix=self.unreadable_secret_hint(path, mapped_uid=uid))
 
     def _check_required_vars(self) -> Dict[str, Any]:
         required = self.required_compose_vars()
@@ -497,7 +537,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if "composer-agent" not in set(self.services):
             return None
         ok, out, _ = self.run_docker_compose(
-            ["exec", "-T", "composer-agent", "cat", "/app/VERSION"], timeout=10
+            ["exec", "-T", "composer-executor", "cat", "/app/VERSION"], timeout=10
         )
         if ok and out.strip():
             return out.strip().splitlines()[0]
@@ -510,15 +550,15 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             return _result(
                 OK,
                 "versions",
-                f"Deploying composer {deployer}; resident agent version unavailable (not running or not enrolled).",
+                f"Deploying composer {deployer}; deployment executor version unavailable (not running or not enrolled).",
             )
         if resident == deployer:
-            return _result(OK, "versions", f"Deploying composer and resident agent both {deployer}.")
+            return _result(OK, "versions", f"Deploying composer and deployment executor both {deployer}.")
         return _result(
             WARN,
             "versions",
-            f"Version drift: deploying composer {deployer}, resident composer-agent {resident}.",
-            fix="Update the resident agent's image so both match, if that matters for the change you're shipping.",
+            f"Version drift: deploying composer {deployer}, deployment executor {resident}.",
+            fix="Update the deployment executor's image so both match, if that matters for the change you're shipping.",
         )
 
     def _check_stack_schema(self) -> Dict[str, Any]:
@@ -584,7 +624,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         if page_dir.parents[1].is_dir():
             return (page_dir / name).is_file()
         ok, _out, _err = self.run_docker_compose(
-            ["exec", "-T", "composer-agent", "test", "-f", f"{page_dir}/{name}"],
+            ["exec", "-T", "composer-executor", "test", "-f", f"{page_dir}/{name}"],
             timeout=10,
         )
         return ok
@@ -801,7 +841,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
         """Run the checks (and any fixes ``args`` asks for) and return them.
 
         Split out of ``run_checkup`` so a caller that is not a terminal — the
-        resident agent answering DjangoLux's Operations card — gets the same
+        deployment executor answering DjangoLux's Operations card — gets the same
         results without the printing, and without a second list of checks that
         could drift from this one.
         """

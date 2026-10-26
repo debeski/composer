@@ -218,6 +218,7 @@ class FixPreviewAndApplyTests(unittest.TestCase):
         with patch("composer.launcher.DockerComposeLauncher", return_value=launcher), \
              patch.object(ops_module, "compose_digest", return_value="d" * 64), \
              patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.send_request", return_value={'state':'succeeded','report':{'findings':[], 'repairs':[]}}), \
              patch("composer.executor_client.run_operation", return_value=(0, "")) as delegated:
             self.responder.answer()
         self.assertEqual(delegated.call_args[0][0], "check_fix")
