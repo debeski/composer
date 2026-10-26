@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.9.0b2
+
+- **Executor Deployment Checks**: Add the bounded, read-only `deployment_check` socket operation. Operations checks, previews and post-repair checks run with deployment-executor permissions; strict relative Compose-file and boolean payload validation reject arbitrary commands/paths.
+- **Secrets Access Diagnostics**: Terminal checks verify executor readability, report inaccessible parent directories accurately, and show mapped-UID Linux ACL recovery commands with a terminal-only sudo explanation. The network-facing agent needs no new secrets permissions.
+
 ## v1.9.0b1
 
 Paired with DjangoLux 1.15 OCR (`1.15/ocr`).

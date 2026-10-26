@@ -4,6 +4,7 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import patch
 
 from composer.checkup import FAIL, OK, WARN
@@ -74,6 +75,40 @@ class CheckupCheckTests(unittest.TestCase):
         self.assertEqual(result["level"], FAIL)
         self.assertIn("DB_PASSWORD", result["message"])
         self.assertIn("SECRET_KEY", result["message"])
+
+    def test_terminal_check_detects_a_resident_only_permission_failure(self):
+        self.launcher.services = ['composer-executor']
+        with (
+            patch.object(self.launcher, 'plaintext_env_candidates', return_value=[Path('.secrets/.env')]),
+            patch.object(self.launcher, 'parse_env_file', return_value={'PASSWORD': 'never-display-this'}),
+            patch.object(self.launcher, 'run_docker_compose', return_value=(True, '{"readable":false,"host_uid":231072}', '')),
+        ):
+            result = self.launcher._check_secrets()
+        self.assertEqual(result['level'], FAIL)
+        self.assertIn('launcher can read', result['message'])
+        self.assertIn('231072', result['fix'])
+        self.assertIn('sudo setfacl', result['fix'])
+        self.assertNotIn('never-display-this', str(result))
+        self.assertNotIn('composer-updater', result['fix'])
+
+    def test_terminal_check_does_not_claim_resident_access_when_probe_unavailable(self):
+        self.launcher.services = ['composer-executor']
+        with patch.object(self.launcher, 'run_docker_compose', return_value=(False, '', 'not running')):
+            result = self.launcher._check_executor_secret_access(Path('.secrets/.env'))
+        self.assertEqual(result['level'], WARN)
+
+    def test_resident_check_uses_its_own_access_without_docker_exec(self):
+        self.launcher.resident_check = True
+        self.launcher.services = ['composer-executor']
+        with (
+            patch.object(self.launcher, 'plaintext_env_candidates', return_value=[Path('.secrets/.env')]),
+            patch.object(self.launcher, 'parse_env_file', side_effect=PermissionError('denied')),
+            patch.object(self.launcher, 'mapped_host_uid', return_value=231072),
+            patch.object(self.launcher, 'run_docker_compose', side_effect=AssertionError('must not exec')),
+        ):
+            result = self.launcher._check_secrets()
+        self.assertEqual(result['level'], FAIL)
+        self.assertIn('231072', result['fix'])
 
     def test_required_vars_satisfied_by_env_and_secrets(self):
         with (

@@ -73,6 +73,20 @@ def _trim(findings) -> list:
 
 
 def _run_check(runtime) -> dict:
+    from . import executor_client
+
+    if executor_client.executor_configured():
+        result = executor_client.send_request('deployment_check', {
+            'dev': bool(getattr(runtime.args, 'dev', False)), 'file': getattr(runtime.args, 'file', None) or '',
+        })
+        if result.get('state') != 'succeeded' or not isinstance(result.get('report'), dict):
+            raise ValueError('Deployment check could not run in the executor. Update both Composer resident services and retry. '
+                             + str(result.get('detail') or ''))
+        return result['report']
+    return _run_check_local(runtime)
+
+
+def _run_check_local(runtime) -> dict:
     """`composer check` plus the repairs it would apply. Read-only: never `--fix`.
 
     One operation on purpose. Splitting "what is wrong" from "what would fix it"
@@ -84,6 +98,7 @@ def _run_check(runtime) -> dict:
     from .launcher import DockerComposeLauncher
 
     launcher = DockerComposeLauncher()
+    launcher.resident_check = True
     args = SimpleNamespace(
         file=getattr(runtime.args, "file", None),
         dev=getattr(runtime.args, "dev", False),
@@ -215,6 +230,7 @@ def _apply_fixes(runtime, request) -> dict:
     if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
         raise ValueError("This repair must be previewed before it is applied.")
     launcher = DockerComposeLauncher()
+    launcher.resident_check = True
     args = _checkup_args(runtime, fix=True)
     # resolve_active_compose_files() is what fills the file list the digest is
     # taken over; collect_checkup does it too, but the guard has to come first.
@@ -241,8 +257,7 @@ def _apply_fixes(runtime, request) -> dict:
         )
         if exit_code != 0:
             raise ValueError(detail or f"The repair could not be applied (exit {exit_code}).")
-        launcher = DockerComposeLauncher()
-        results, fixed = launcher.collect_checkup(_checkup_args(runtime))
+        return _run_check(runtime)
     else:
         results, fixed = launcher.collect_checkup(args)
     return {

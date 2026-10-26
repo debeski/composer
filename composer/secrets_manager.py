@@ -42,7 +42,18 @@ class SecretsMixin(SubprocessRunnerMixin):
     # --- source discovery / resolution -------------------------------------
 
     def plaintext_env_candidates(self) -> List[Path]:
-        return [Path(c) for c in PLAINTEXT_ENV_CANDIDATES if Path(c).exists()]
+        candidates = []
+        for name in PLAINTEXT_ENV_CANDIDATES:
+            path = Path(name)
+            try:
+                path.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # Inaccessible parents must produce an access failure, not "no secrets".
+                pass
+            candidates.append(path)
+        return candidates
 
     def inherited_secret_keys(self) -> Optional[List[str]]:
         raw = os.environ.get(INHERITED_SECRET_KEYS_ENV)
@@ -76,8 +87,9 @@ class SecretsMixin(SubprocessRunnerMixin):
                 return host_start + (effective_uid - container_start)
         return None
 
-    def unreadable_secret_hint(self, path: Path) -> str:
-        mapped_uid = self.mapped_host_uid()
+    def unreadable_secret_hint(self, path: Path, *, mapped_uid=None) -> str:
+        if mapped_uid is None:
+            mapped_uid = self.mapped_host_uid()
         if mapped_uid is None:
             return (
                 "   Check the file and parent-directory permissions/ownership. "
@@ -87,13 +99,14 @@ class SecretsMixin(SubprocessRunnerMixin):
         parent = shlex.quote(str(path.parent))
         target = shlex.quote(str(path))
         return (
-            "   Refusing to deploy on compose defaults. This updater maps to "
+            "   This Composer process maps to "
             f"host UID {mapped_uid}. From the project root, grant only that UID "
             "access (install the host's `acl` package if `setfacl` is missing):\n"
             f"     sudo setfacl -m u:{mapped_uid}:--x {parent}\n"
             f"     sudo setfacl -m u:{mapped_uid}:r-- {target}\n"
-            f"   Verify without printing secrets: docker compose exec -T "
-            f"composer-updater test -r {target}\n"
+            "   sudo asks for your Linux VM account password in the terminal, not "
+            "your application password. Then run ./start.sh check again. "
+            "The terminal launcher and deployment executor can have different permissions.\n"
             "   Do not make the secrets file world-readable."
         )
 

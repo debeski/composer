@@ -395,3 +395,9 @@ legacy page.
 
 ## why
 Installing Python and a compose toolchain on every host is friction, and letting an application container hold the Docker socket to update itself is a risk. Composer keeps the toolchain inside its own image, leaves the project root alone, and splits the resident work across a network-facing agent and a privileged executor, so the application can ask for an update or a repair without ever being able to perform one.
+
+Operations deployment checks run in the executor's identity. Terminal `check`
+also verifies that executor can open the configured secrets file, so a readable
+host-side file cannot conceal a resident-only permission failure. See
+[secrets access recovery](docs/first-deploy.md#secrets-access-differs-between-processes)
+for mapped-UID diagnostics and terminal-side sudo instructions.
