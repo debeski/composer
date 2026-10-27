@@ -1,13 +1,11 @@
 {
   "schema_version": 1,
-  "version": "1.9.0",
-  "summary": "Deployment checks use executor permissions, with consistent terminal diagnostics and actionable secrets recovery.",
+  "version": "1.9.1b1",
+  "summary": "One update command: `update` refreshes the Composer deployer before the stack; `update self` refreshes only the deployer.",
   "highlights": [
-    "Operations deployment checks run in the executor without granting the network-facing agent access to secrets.",
-    "Terminal checks verify executor access too; restricted files report the affected host UID and a precise Linux recovery command.",
-    "The optional OCR service joins generated restart and lifecycle allowlists; project-image updates include OCR with the application services.",
-    "Wrapper 4 keeps Windows PowerShell 5.1 launchers ASCII-safe and matches the DjangoLux scaffold.",
-    "Retains verified Composer 1.8 stable service protections and existing restart, recreate, update and maintenance behavior."
+    "Wrapper 5: `./start.sh update` with no named services pulls the deployer first, so the stack and resident pair update on the new Composer.",
+    "`./start.sh update self` updates only the deployer; naming services keeps the deployer as is.",
+    "`self update` stays as a deprecated alias with a note pointing to `update self`."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.0"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.1b1"
 }

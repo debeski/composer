@@ -19,12 +19,15 @@ def parse_args():
             "      Restart running containers (short alias: composer -r).\n"
             "      Run 'composer restart --help' for details.\n"
             "  update [-b] [--force] [-f FILE] [-d] [service...]\n"
-            "      Pull the latest image(s), then recreate, health-check, and run\n"
-            "      post-start tasks. Name services to scope it.\n"
+            "      Update the Composer deployer first (wrapper 5+), then pull the\n"
+            "      latest image(s), recreate, health-check, and run post-start tasks.\n"
+            "      Name services to update only those; the deployer is left as is.\n"
             "  pull [-f FILE] [-d] [service...]\n"
             "      Pull images without recreating containers.\n"
+            "  update self\n"
+            "      Update only the Composer deployer image, not the stack.\n"
             "  self update\n"
-            "      Pull the Composer deployer image.\n"
+            "      Deprecated alias of 'update self'.\n"
             "  stop [-v] [-p] [-y] [-f FILE] [-d] [service...]\n"
             "      Stop and remove containers, or only the named services.\n"
             "      -v/--volumes and -p/--purge are destructive and ask for\n"
@@ -156,9 +159,11 @@ def parse_update_args(argv):
     parser = argparse.ArgumentParser(
         prog="composer update",
         description=(
-            "Pull the latest image(s), then recreate the affected containers, "
+            "Update the Composer deployer first (through wrapper 5 or newer), "
+            "then pull the latest image(s), recreate the affected containers, "
             "wait for health checks, and run post-start tasks. Name services to "
-            "scope both the pull and the recreate."
+            "scope both the pull and the recreate; the deployer is then left as is. "
+            "'composer update self' updates only the deployer."
         ),
     )
     parser.add_argument("-f", "--file", help="Specify an alternate compose file")
@@ -244,7 +249,7 @@ def parse_pull_args(argv):
 
 def parse_update_self_args(argv):
     parser = argparse.ArgumentParser(
-        prog="composer self update",
+        prog="composer update self",
         description="Pull the latest Composer deployer image.",
     )
     return parser.parse_args(argv)

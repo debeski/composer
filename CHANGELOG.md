@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.9.1b1
+
+- **Update Refreshes The Deployer First (Wrapper 5)**: `start.sh`/`start.ps1` pull the Composer deployer before an unscoped `update`, so the stack and resident `composer-agent`/`composer-executor` update on the new Composer in one command. Named services (`update web celery`) and `-h`/`--help` skip the refresh; a failed deployer pull warns and updates the stack with the installed deployer. The refresh lives only in the wrapper: the resident agent and executor run their own unscoped `composer update` and must not pull deployer images.
+- **`update self`**: Updates only the deployer and reports the old and new version (`composer update self`, also through an older wrapper, where it applies from the next command). It honours `COMPOSER_SELF_IMAGE` and the `.composer-channel` beta channel.
+- **`self update` Deprecated**: Kept as an alias that prints a note pointing to `update self`, because DjangoLux tells stacks with older Composer to run it. `check` hints, help and docs use `update self`. `wrappers-history.json` records wrapper 5; `composer check --fix` installs it.
+
 ## v1.9.0
 
 - **Stable 1.9 For DjangoLux 1.15**: Promote the published and accepted 1.9.0b2 implementation, which includes 1.9.0b1: OCR in the generated restart and lifecycle allowlists, ASCII-safe wrapper 4, Operations deployment checks through the read-only `deployment_check` executor operation, and secrets diagnostics with the mapped host UID and `setfacl` recovery. Paired with DjangoLux 1.15.1 (`composer >=1.9.0b2`). No runtime changes from the beta.

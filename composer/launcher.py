@@ -55,8 +55,8 @@ DEFAULT_SELF_IMAGE = "debeski/composer:latest"
 # running when the terminal closes and only stops on Ctrl+C.
 TERMINAL_BOUND_COMMANDS = {"run", "migrate", "log", "logs"}
 REMOVED_COMMANDS = {
-    "--update": "self update",
-    "update-self": "self update",
+    "--update": "update self",
+    "update-self": "update self",
     "agent-check": "agent check",
     "agent-update": "agent update",
     "agent-restart": "agent restart",
@@ -270,8 +270,10 @@ class DockerComposeLauncher(
         sys.exit(code)
 
     def handle_update_self(self, argv):
+        from .channel_config import resolve_self_image
+
         parse_update_self_args(argv)
-        image = os.environ.get("COMPOSER_SELF_IMAGE") or DEFAULT_SELF_IMAGE
+        image = resolve_self_image()
         print(f"Current Composer version: {self.composer_version}")
         print(f"Pulling {image}...")
         self.pull_progress.reset()
@@ -295,6 +297,7 @@ class DockerComposeLauncher(
             )
             sys.exit(1)
         print(f"Installed Composer version: {out.strip()}")
+        print("The updated deployer runs from the next command.")
 
     def configure_update(self, argv):
         """Configure `composer update [opts] [service...]` for the update pipeline."""
@@ -501,7 +504,17 @@ class DockerComposeLauncher(
                 if argv[1] != "update":
                     print(_group_usage("self", ["update"]), file=sys.stderr)
                     sys.exit(2)
+                print("Note: 'self update' is deprecated; use 'composer update self'.", file=sys.stderr)
                 self.handle_update_self(argv[2:])
+                return
+            # Wrapper 5 refreshes the deployer itself and never passes this on;
+            # an older wrapper does, and still gets the pull for its next run.
+            if argv and argv[0] == "update" and "self" in argv[1:]:
+                extra = [token for token in argv[1:] if token not in {"-d", "--dev", "self"}]
+                if argv[1:].count("self") != 1 or any(token not in {"-h", "--help"} for token in extra):
+                    print("Usage: composer update self  (updates only the deployer; takes no other arguments)", file=sys.stderr)
+                    sys.exit(2)
+                self.handle_update_self(extra)
                 return
             if argv and argv[0] == "run":
                 self.handle_run(argv[1:])

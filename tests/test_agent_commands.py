@@ -234,6 +234,49 @@ class UpdateSelfCommandTests(unittest.TestCase):
 
         update_self.assert_called_once_with([])
 
+    def test_update_self_routes_to_the_deployer_refresh(self):
+        for argv, expected in (
+            (["update", "self"], []),
+            (["update", "-d", "self"], []),
+            (["-d", "update", "self"], []),
+            (["update", "self", "--help"], ["--help"]),
+        ):
+            with self.subTest(argv=argv):
+                launcher = DockerComposeLauncher()
+                with (
+                    patch.object(sys, "argv", ["composer", *argv]),
+                    patch.object(launcher, "handle_update_self", side_effect=SystemExit(32)) as update_self,
+                    patch.object(launcher, "configure_update") as configure_update,
+                    self.assertRaisesRegex(SystemExit, "32"),
+                ):
+                    launcher.run()
+                update_self.assert_called_once_with(expected)
+                configure_update.assert_not_called()
+
+    def test_update_self_takes_no_services(self):
+        launcher = DockerComposeLauncher()
+        with (
+            patch.object(sys, "argv", ["composer", "update", "self", "web"]),
+            patch("sys.stderr", new_callable=io.StringIO) as errors,
+            patch.object(launcher, "handle_update_self") as update_self,
+            self.assertRaises(SystemExit) as exit_code,
+        ):
+            launcher.run()
+        self.assertEqual(exit_code.exception.code, 2)
+        self.assertIn("composer update self", errors.getvalue())
+        update_self.assert_not_called()
+
+    def test_self_update_alias_points_to_update_self(self):
+        launcher = DockerComposeLauncher()
+        with (
+            patch.object(sys, "argv", ["composer", "self", "update"]),
+            patch("sys.stderr", new_callable=io.StringIO) as errors,
+            patch.object(launcher, "handle_update_self", side_effect=SystemExit(32)),
+            self.assertRaisesRegex(SystemExit, "32"),
+        ):
+            launcher.run()
+        self.assertIn("'self update' is deprecated; use 'composer update self'", errors.getvalue())
+
     def test_removed_flat_commands_fail_before_root_argparse_help(self):
         for command in ("update-self", "--update", "agent-update", "dlux-update"):
             with self.subTest(command=command):
