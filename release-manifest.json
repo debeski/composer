@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "1.9.0b2",
+  "version": "1.9.0",
   "summary": "Deployment checks use executor permissions, with consistent terminal diagnostics and actionable secrets recovery.",
   "highlights": [
     "Operations deployment checks run in the executor without granting the network-facing agent access to secrets.",
@@ -9,5 +9,5 @@
     "Wrapper 4 keeps Windows PowerShell 5.1 launchers ASCII-safe and matches the DjangoLux scaffold.",
     "Retains verified Composer 1.8 stable service protections and existing restart, recreate, update and maintenance behavior."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.0b2"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.0"
 }

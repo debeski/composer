@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.9.0
+
+- **Stable 1.9 For DjangoLux 1.15**: Promote the published and accepted 1.9.0b2 implementation, which includes 1.9.0b1: OCR in the generated restart and lifecycle allowlists, ASCII-safe wrapper 4, Operations deployment checks through the read-only `deployment_check` executor operation, and secrets diagnostics with the mapped host UID and `setfacl` recovery. Paired with DjangoLux 1.15.1 (`composer >=1.9.0b2`). No runtime changes from the beta.
+
 ## v1.9.0b2
 
 - **Executor Deployment Checks**: Add the bounded, read-only `deployment_check` socket operation. Operations checks, previews and post-repair checks run with deployment-executor permissions; strict relative Compose-file and boolean payload validation reject arbitrary commands/paths.
