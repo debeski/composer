@@ -13,7 +13,7 @@ There is no local Python setup. Composer runs from a container, so the only thin
 - **Diagnoses and repairs** the outside of a stack with `check` / `check --fix`: topology, obsolete services and proxy routes, retired wiring, wrapper drift, and deployer/resident version drift, always archived under `.xclude/` first.
 - **Runs resident inside the stack** as a privilege-split pair, `composer-agent` (network-facing, read-only Docker) and `composer-executor` (sole holder of Docker write authority), so an update or repair can be triggered from the DjangoLux admin UI without giving the web-facing side the Docker socket. See [Agent Protocol v1](docs/agent-protocol-v1.md) and [executor hardening](docs/executor-hardening.md).
 - **Publishes state for the application to show**: deploy status and a console log, image and package availability, the active DjangoLux channel, and results for the Operations card. Composer writes these files; DjangoLux reads them.
-- **Manages release channels** for both Composer itself and DjangoLux (stable or beta, independently), and updates itself with `self update`.
+- **Manages release channels** for both Composer itself and DjangoLux (stable or beta, independently), and updates itself with `update self` (plain `update` refreshes it first).
 
 ## how it fits
 
@@ -39,7 +39,7 @@ Three faces of one image (`debeski/composer`):
 | **agent** | resident (`composer agent run`) | watches triggers and registries, stages verified packages, publishes availability, delegates every write |
 | **executor** | resident (`composer executor run`) | applies updates, restarts, repairs and package activations over a private socket |
 
-The wrappers, the image, and the resident pair are versioned separately, so `check` reports drift between them and `self update` / `agent update` bring them back in line.
+The wrappers, the image, and the resident pair are versioned separately, so `check` reports drift between them and `update self` / `agent update` bring them back in line.
 
 ## setup
 
@@ -71,7 +71,8 @@ supplies every variable the compose file requires.
 | see or request the DjangoLux channel | `./start.sh dlux channel [stable\|beta]` |
 | diagnose, then repair, a deployment | `./start.sh check` / `check --fix` |
 | switch Composer's own channel | `./start.sh check --beta` / `--stable` |
-| update Composer itself | `./start.sh self update` |
+| update Composer, then the stack and resident pair | `./start.sh update` |
+| update only Composer itself | `./start.sh update self` |
 | manage the resident pair | `agent update\|restart\|off\|enable`, `executor enable` |
 | run a command in a service | `./start.sh run -m web migrate --noinput` |
 | run DjangoLux's migrator | `./start.sh migrate` |
@@ -129,7 +130,7 @@ When the command is DjangoLux's `migrator`, `-a APP`, `-mm`, and `-nm` are forwa
 
 `composer pull [--status-file PATH] [-f FILE] [-d] [service...]` only downloads images. It never recreates containers, runs health checks, or executes post-start tasks. This replaces the retired `-uo` and `update -o` forms.
 
-`composer self update` pulls `debeski/composer:latest`, the Composer deployer used by `start.sh`. Set `COMPOSER_SELF_IMAGE` only when using a compatible Composer image mirror.
+`composer update self` pulls the Composer deployer used by `start.sh` (`debeski/composer:latest`, or `:beta` on the beta channel) and leaves the stack alone. With wrapper 5 or newer, a plain `composer update` with no named services does this first, so the stack update that follows runs on the new deployer; naming services skips it. `self update` remains a deprecated alias. Set `COMPOSER_SELF_IMAGE` only when using a compatible Composer image mirror.
 
 `composer check [--fix] [-y] [--deep] [--json] [--beta|--stable] [-f FILE] [-d]` is the doctor for the *outside* of a DLUX stack. It verifies Docker + Compose v2, that the compose config resolves, that a secrets source is present/readable/non-empty, that every externally-required compose variable has a value, the topology mode (hardened `composer-agent` + `composer-executor`, agent-only, legacy `composer-updater`, or unmanaged), obsolete DLUX services and proxy routes, whether the generated stack files agree on their DjangoLux stack schema stamp, and version drift between the deploying composer and the resident `composer-agent`. A mixed `composer-agent` + `composer-updater` topology fails closed. It warns when `pgadmin`, `db-backup`, or the legacy `db_backup` spelling is present, and independently detects recognized pgAdmin routes in `.proxy/Caddyfile`, `.proxy/default.conf.template`, and `.nginx/nginx.conf`. Guarded `--fix` validates the complete cleaned Compose candidate, archives every changed deployment/proxy file under `.xclude/composer-check/`, validates each changed proxy mounted by Caddy or Nginx, stops and removes only detected obsolete containers with targeted `docker compose rm -sf`, applies the service and route cleanup, rediscovers services, and verifies every pre-existing named Docker volume remains. A running Caddy or direct-config Nginx service is reloaded; template-backed Nginx is restarted and checked so its live rendered configuration is regenerated. This proxy-only path also repairs projects whose obsolete services were removed by v1.2.6. Unrecognized customized pgAdmin routes fail closed for manual review. The fix never uses a broad orphan-cleaning redeploy and never removes volumes; it also migrates legacy `composer-updater` stacks straight to the hardened `composer-agent` + `composer-executor` topology, hardens agent-only stacks, normalizes generated resident commands to `agent run`/`executor run`, rewrites retired local DLUX tools commands (`tools.dlux_runtime_supervisor`, `tools.smtp_relay`) to package-owned modules, removes generated local `tools/` bind mounts, adds missing `org.dlux.restart` labels, strips updater-era `web.post_start` hooks when `dlux-updater` is retired into `celery.pre_start`, and installs or normalizes the `org.dlux.post-start` migrator label only for stacks that still need that compatibility path. Runtime-command rewrites are gated on the project image shipping the needed DLUX module (`1.6.2+` for `dlux.updater.supervisor`, `1.7.0+` for `dlux.smtp_relay`). With `-d`, `--fix` also validates and normalizes `compose.dev.yml` against the merged base/dev config: it removes dev `dlux-updater` overrides, keeps Celery's runtime mount writable, and disables inline updates in dev containers. `--deep` relays the in-container app-level doctor — `python manage.py dlux_doctor` in the `web` service by default, overridable with `--deep-service`/`--deep-command` — and prints its output. When that service runs under DjangoLux's runtime supervisor, the doctor does too (`--no-watch`), so it reports the active release rather than the package baked into the image. `--json` emits structured results; exit is non-zero on a blocking problem or failed fix/postflight. This is the single evolving check that replaces per-change `enable-*` one-offs: composer owns the outside and hands the rest to the container(s). See `composer check --help`.
 
@@ -160,7 +161,7 @@ Composer 1.3.10 accepts DjangoLux release-manifest schemas 1 and 2. Schema-2 pac
 Migrate an existing generated DLUX project with Composer itself:
 
 ```bash
-./start.sh self update
+./start.sh update self
 ./start.sh agent enable
 ./start.sh agent enable --apply
 ./start.sh executor enable
@@ -256,7 +257,7 @@ tail -f composer-detached.log
 
 Composer owns `start.sh` and `start.ps1`. Every line in them is composer's own
 invocation contract — the self image, `-i`/`-t`, the `--env-file` secrets
-handoff, the `self update` route — and composer is the only component still
+handoff, the `update self` route and the deployer refresh before `update` — and composer is the only component still
 running in a project after it is created: the DLUX scaffold writes the wrappers
 once and then refuses to overwrite them. DLUX's `scaffold_templates/project/`
 copies are mirrors of the files here, not the source.
@@ -284,7 +285,7 @@ locally*:
 | `is wrapper version N, this composer ships M` | stale; `check --fix` updates it |
 | `predates wrapper versioning` | older than the marker itself; `check --fix` updates it |
 | `contents do not match what that version shipped` | local edits — diff before replacing |
-| `newer than the M this composer ships` | the **image** is behind; run `self update`, not `--fix` |
+| `newer than the M this composer ships` | the **image** is behind; run `update self`, not `--fix` |
 
 `check --fix` archives the current file under `.xclude/composer-check/<stamp>/`
 and then swaps it via `os.replace`, so a `start.sh` that is executing the very
@@ -389,7 +390,7 @@ legacy page.
 - **Version**: Every service gets `COMPOSER_VERSION`.
 - **Runtime override**: The generated Compose override is a private system-temp file, not a project-root file, so Composer supports host-owned and read-only project mounts without extra Linux capabilities.
 - **Service exclusions**: `COMPOSER_EXCLUDE_SERVICES` is a comma/space-separated service list omitted from generated runtime overrides, bulk pulls, bulk `up -d`, health checks, and diagnostics. Explicit `update SERVICE`, `pull SERVICE`, and `-u SERVICE` still target the named service.
-- **UI**: Progress stays on one status line. Image pulls (`self update`, `update`/`-u`, and any `up` that has to fetch an image) draw an aggregated bar — `web ████████░░░░ 62% · 2/4 layers (2 cached) · 144MB/240MB` — built from the per-layer phases Docker reports. It names every image still in flight and drops each one as Compose reports it pulled, because Compose interleaves layers without saying which service they belong to; `(n cached)` counts the layers already on the host, so a full re-download is visible as `0 cached`. Progress only moves forward and reaches 100% when the pull actually reports it. Non-pull output keeps the plain status line, and a detached run logs coarse summaries instead of redrawing.
+- **UI**: Progress stays on one status line. Image pulls (`update self`, `update`/`-u`, and any `up` that has to fetch an image) draw an aggregated bar — `web ████████░░░░ 62% · 2/4 layers (2 cached) · 144MB/240MB` — built from the per-layer phases Docker reports. It names every image still in flight and drops each one as Compose reports it pulled, because Compose interleaves layers without saying which service they belong to; `(n cached)` counts the layers already on the host, so a full re-download is visible as `0 cached`. Progress only moves forward and reaches 100% when the pull actually reports it. Non-pull output keeps the plain status line, and a detached run logs coarse summaries instead of redrawing.
 - **Service circles**: ⚪ not seen · 🔵 updating · 🟡 starting · 🟢 healthy · 🔴 failed. A service stops showing 🟢 the moment its pull/recreate/restart starts — the health it last reported belongs to the container being replaced — and health monitoring resolves it back.
 - **Image**: Wrapper scripts target `debeski/composer:latest`, overridable with `COMPOSER_SELF_IMAGE`.
 

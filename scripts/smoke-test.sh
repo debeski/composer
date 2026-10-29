@@ -33,7 +33,7 @@ for subcommand in run restart update pull stop check log; do
     exit 1
   }
 done
-for group_command in "self update" "agent check" "agent update" "agent restart" "agent off" "agent watch" "agent run" "agent enable" "executor run" "executor enable" "dlux check" "dlux update" "dlux rollback" "dlux channel" "relay list" "relay approve"; do
+for group_command in "update self" "self update" "agent check" "agent update" "agent restart" "agent off" "agent watch" "agent run" "agent enable" "executor run" "executor enable" "dlux check" "dlux update" "dlux rollback" "dlux channel" "relay list" "relay approve"; do
   read -r first second <<< "$group_command"
   run "$first" "$second" --help >/dev/null || {
     echo "::error::'$group_command --help' failed"

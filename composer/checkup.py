@@ -729,7 +729,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         f"wrapper:{name}",
                         f"{name} is wrapper version {found}, newer than the {baked} this composer "
                         "ships — the image is behind, not the wrapper.",
-                        fix="Run './start.sh self update'. Do not 'check --fix' this; it would downgrade the wrapper.",
+                        fix="Run './start.sh update self'. Do not 'check --fix' this; it would downgrade the wrapper.",
                     )
                 )
         return results
