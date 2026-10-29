@@ -2,6 +2,8 @@
 
 ## v1.9.1b1
 
+- **CI Action Pins**: Refresh SHA-pinned `actions/setup-python` 7.0.0 → 7.1.0 and `docker/login-action` 4.6.0 → 4.7.0 in CI/release workflows; no application runtime or image-dependency changes.
+
 - **Update Refreshes The Deployer First (Wrapper 5)**: `start.sh`/`start.ps1` pull the Composer deployer before an unscoped `update`, so the stack and resident `composer-agent`/`composer-executor` update on the new Composer in one command. Named services (`update web celery`) and `-h`/`--help` skip the refresh; a failed deployer pull warns and updates the stack with the installed deployer. The refresh lives only in the wrapper: the resident agent and executor run their own unscoped `composer update` and must not pull deployer images.
 - **`update self`**: Updates only the deployer and reports the old and new version (`composer update self`, also through an older wrapper, where it applies from the next command). It honours `COMPOSER_SELF_IMAGE` and the `.composer-channel` beta channel.
 - **`self update` Deprecated**: Kept as an alias that prints a note pointing to `update self`, because DjangoLux tells stacks with older Composer to run it. `check` hints, help and docs use `update self`. `wrappers-history.json` records wrapper 5; `composer check --fix` installs it.

@@ -23,6 +23,10 @@ Add two repository secrets (Settings → Secrets and variables → Actions):
 > The wrapper scripts (`start.sh`, `start.ps1`) pull `debeski/composer:latest`,
 > so the image must stay on Docker Hub under that name for `update self` to work.
 
+CI and release actions remain pinned to full commit SHAs. The 1.9.1b1 candidate
+uses `actions/setup-python` 7.1.0 and `docker/login-action` 4.7.0; grouped action
+updates are validated together with the release candidate before publication.
+
 ## Cutting a release
 
 1. Update `CHANGELOG.md`: add a new `## vX.Y.Z` section at the top describing the
