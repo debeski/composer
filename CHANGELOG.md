@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.9.1
+
+- **Stable 1.9.1 For DjangoLux 1.15.2**: Promote the published and accepted 1.9.1b2 implementation, which includes 1.9.1b1: wrapper 6 (`./start.sh update` refreshes the deployer first, `update self` updates only the deployer and accepts `-f`/`-d` anywhere, `self update` stays a deprecated alias, the refresh compares image IDs), and `dlux check` publishing the offered release's notes (`display`) in `package-available.json`. Paired with DjangoLux 1.15.2 (`composer >=1.9.0b2`). No runtime changes from the beta.
+
 ## v1.9.1b2
 
 - **Release Notes In The Availability Report**: `build_availability_payload()` publishes the offered release's `display` (`summary`, `highlights`, `release_url`, from the verified wheel's manifest, or its `display` block) in `state/package-available.json` through new `dlux_package_cli.release_display()`. DjangoLux 1.15.2b2+ shows them in the review dialog instead of only "Bug fixes and improvements"; older DjangoLux ignores the key.

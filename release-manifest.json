@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "1.9.1b2",
+  "version": "1.9.1",
   "summary": "One update command: `update` refreshes the Composer deployer before the stack; `update self` refreshes only the deployer.",
   "highlights": [
     "Wrapper 6: `./start.sh update` with no named services pulls the deployer first, so the stack and resident pair update on the new Composer.",
@@ -9,5 +9,5 @@
     "DjangoLux's update review shows the offered release's own notes: `dlux check` publishes its summary and highlights in `package-available.json`.",
     "`self update` stays as a deprecated alias with a note pointing to `update self`."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.1b2"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.1"
 }
