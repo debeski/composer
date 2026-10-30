@@ -146,14 +146,37 @@ class WrapperSecretsTests(unittest.TestCase):
         self.assertIn("-t", args)
 
 
-if __name__ == "__main__":
-    unittest.main()
+FAKE_DOCKER = r"""#!/bin/sh
+printf "%s\n" "$*" >> "$DOCKER_CALLS_FILE"
+case "$1" in
+  pull)
+    if [ "$PULL_EXIT" != 0 ]; then exit "$PULL_EXIT"; fi
+    if [ -n "$PULLED_ID" ]; then printf "%s" "$PULLED_ID" > "$DOCKER_IMAGE_ID_FILE"; fi
+    ;;
+  image)
+    if [ -s "$DOCKER_IMAGE_ID_FILE" ]; then cat "$DOCKER_IMAGE_ID_FILE"; echo; fi
+    ;;
+  run)
+    if [ "$3" = --entrypoint ]; then
+      image="$5"
+      if [ "$image" = "$COMPOSER_SELF_IMAGE" ]; then image="$(cat "$DOCKER_IMAGE_ID_FILE" 2>/dev/null)"; fi
+      echo "v-$image"
+    fi
+    ;;
+esac
+"""
 
-@unittest.skipIf(os.name == "nt", "Bash wrapper test")
-class WrapperDeployerRefreshTests(unittest.TestCase):
+
+class DeployerRefreshCases:
+    """Routing and reporting both wrappers share; subclasses say how to run one."""
+
     IMAGE = "registry.example/composer:test"
+    WRAPPER = ""
 
-    def _run(self, *argv, pull_exit=0):
+    def _command(self, wrapper):
+        raise NotImplementedError
+
+    def _run(self, *argv, pull_exit=0, installed="", pulled=""):
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -161,36 +184,93 @@ class WrapperDeployerRefreshTests(unittest.TestCase):
             fake_bin = root / "bin"
             project.mkdir()
             fake_bin.mkdir()
-            shutil.copy2(repo_root / "start.sh", project / "start.sh")
+            shutil.copy2(repo_root / self.WRAPPER, project / self.WRAPPER)
             calls_path = root / "docker-calls.txt"
+            image_id_path = root / "image-id"
+            image_id_path.write_text(installed, encoding="utf-8")
             fake_docker = fake_bin / "docker"
-            fake_docker.write_text(
-                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALLS_FILE"\n'
-                'if [ "$1" = pull ]; then exit "$PULL_EXIT"; fi\n',
-                encoding="utf-8",
-            )
+            fake_docker.write_text(FAKE_DOCKER, encoding="utf-8")
             fake_docker.chmod(0o755)
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
             env["DOCKER_CALLS_FILE"] = str(calls_path)
+            env["DOCKER_IMAGE_ID_FILE"] = str(image_id_path)
             env["PULL_EXIT"] = str(pull_exit)
+            env["PULLED_ID"] = pulled
             env["COMPOSER_SELF_IMAGE"] = self.IMAGE
             result = subprocess.run(
-                ["bash", str(project / "start.sh"), *argv],
+                [*self._command(project / self.WRAPPER), *argv],
                 cwd=project, env=env, capture_output=True, text=True, check=False,
             )
             calls = calls_path.read_text(encoding="utf-8").splitlines() if calls_path.exists() else []
             return result, calls
 
+    def _launches(self, calls):
+        return [call for call in calls if call.startswith("run -i")]
+
+    def test_update_self_refreshes_only_the_deployer(self):
+        for argv in (
+            ("update", "self"),
+            ("update", "-d", "self"),
+            ("update", "self", "--dev"),
+            ("-d", "update", "self"),
+            ("-f", "compose.prod.yml", "update", "self"),
+            ("update", "self", "-f", "compose.prod.yml"),
+            ("update", "--file=compose.prod.yml", "self"),
+        ):
+            with self.subTest(argv=argv):
+                result, calls = self._run(*argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"pull {self.IMAGE}", calls)
+                self.assertFalse(self._launches(calls))
+
+    def test_update_self_with_services_or_options_is_left_to_composer(self):
+        for argv in (("update", "self", "web"), ("update", "self", "--force"), ("update", "self", "self")):
+            with self.subTest(argv=argv):
+                _result, calls = self._run(*argv)
+                self.assertFalse([call for call in calls if call.startswith("pull")])
+
+    def test_named_services_skip_the_deployer_refresh(self):
+        for argv in (("update", "web", "celery"), ("update", "web", "self"), ("update", "--help")):
+            with self.subTest(argv=argv):
+                _result, calls = self._run(*argv)
+                self.assertFalse([call for call in calls if call.startswith("pull")])
+
+    def test_self_update_is_a_deprecated_alias(self):
+        result, calls = self._run("self", "update")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("deprecated", result.stderr)
+        self.assertIn(f"pull {self.IMAGE}", calls)
+        self.assertFalse(self._launches(calls))
+
+    def test_a_failed_update_self_pull_fails(self):
+        result, _calls = self._run("update", "self", pull_exit=1)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_an_unchanged_image_is_up_to_date_and_read_once(self):
+        result, calls = self._run("update", "self", installed="sha256:same", pulled="sha256:same")
+        self.assertIn("Composer deployer is up to date (v-sha256:same).", result.stdout)
+        self.assertEqual(len([call for call in calls if "--entrypoint cat" in call]), 1, calls)
+
+    def test_a_rebuilt_tag_is_reported_by_image_not_version(self):
+        result, _calls = self._run("update", "self", installed="sha256:old", pulled="sha256:new")
+        self.assertIn("Composer deployer: v-sha256:old -> v-sha256:new", result.stdout)
+
+    def test_a_first_install_reports_not_installed(self):
+        result, _calls = self._run("update", "self", pulled="sha256:new")
+        self.assertIn("Composer deployer: not installed -> v-sha256:new", result.stdout)
+
+
+@unittest.skipIf(os.name == "nt", "Bash wrapper test")
+class WrapperDeployerRefreshTests(DeployerRefreshCases, unittest.TestCase):
+    WRAPPER = "start.sh"
+
+    def _command(self, wrapper):
+        return ["bash", str(wrapper)]
+
     def _launch_index(self, calls, command):
         launches = [i for i, call in enumerate(calls) if call.startswith("run -i") and f"{self.IMAGE} {command}" in call]
         return launches[0] if launches else None
-
-    def test_update_self_refreshes_only_the_deployer(self):
-        result, calls = self._run("update", "self")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"pull {self.IMAGE}", calls)
-        self.assertFalse([call for call in calls if call.startswith("run -i")])
 
     def test_unscoped_update_refreshes_the_deployer_before_the_stack(self):
         for argv in (("update",), ("-d", "update"), ("update", "-d", "--force")):
@@ -202,18 +282,12 @@ class WrapperDeployerRefreshTests(unittest.TestCase):
                 self.assertIsNotNone(launch, calls)
                 self.assertLess(pull, launch)
 
-    def test_named_services_skip_the_deployer_refresh(self):
-        result, calls = self._run("update", "web", "celery")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse([call for call in calls if call.startswith("pull")])
-        self.assertIsNotNone(self._launch_index(calls, "update web celery"))
-
-    def test_self_update_is_a_deprecated_alias(self):
-        result, calls = self._run("self", "update")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("deprecated", result.stderr)
-        self.assertIn(f"pull {self.IMAGE}", calls)
-        self.assertFalse([call for call in calls if call.startswith("run -i")])
+    def test_skipped_refreshes_still_launch_composer(self):
+        for argv in (("update", "web", "celery"), ("update", "self", "web")):
+            with self.subTest(argv=argv):
+                result, calls = self._run(*argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIsNotNone(self._launch_index(calls, " ".join(argv)), calls)
 
     def test_a_failed_deployer_pull_still_updates_the_stack(self):
         result, calls = self._run("update", pull_exit=1)
@@ -221,6 +295,23 @@ class WrapperDeployerRefreshTests(unittest.TestCase):
         self.assertIn("could not refresh the Composer deployer", result.stderr)
         self.assertIsNotNone(self._launch_index(calls, "update"))
 
-    def test_a_failed_update_self_pull_fails(self):
-        result, _calls = self._run("update", "self", pull_exit=1)
-        self.assertNotEqual(result.returncode, 0)
+
+# PowerShell 7 runs start.ps1 off Windows far enough to test its routing: the
+# refresh happens before the Windows-only project path is resolved.
+@unittest.skipIf(os.name == "nt", "the fake docker is a POSIX shell script")
+@unittest.skipUnless(shutil.which("pwsh"), "pwsh is not installed")
+class PowerShellDeployerRefreshTests(DeployerRefreshCases, unittest.TestCase):
+    WRAPPER = "start.ps1"
+
+    def _command(self, wrapper):
+        return ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(wrapper)]
+
+    def test_unscoped_update_refreshes_the_deployer(self):
+        for argv in (("update",), ("-d", "update"), ("update", "-d", "--force")):
+            with self.subTest(argv=argv):
+                _result, calls = self._run(*argv)
+                self.assertIn(f"pull {self.IMAGE}", calls)
+
+
+if __name__ == "__main__":
+    unittest.main()
