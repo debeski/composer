@@ -6,6 +6,7 @@
     "Wrapper 6: `./start.sh update` with no named services pulls the deployer first, so the stack and resident pair update on the new Composer.",
     "`./start.sh update self` updates only the deployer and accepts the global `-f`/`-d` options anywhere; naming services keeps the deployer as is.",
     "The deployer refresh compares image IDs, so a rebuilt tag is reported as an update even when its version string is unchanged.",
+    "DjangoLux's update review shows the offered release's own notes: `dlux check` publishes its summary and highlights in `package-available.json`.",
     "`self update` stays as a deprecated alias with a note pointing to `update self`."
   ],
   "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.1b2"

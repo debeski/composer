@@ -43,7 +43,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Pair 1.9.1b2 with DjangoLux 1.15.2b2 (owner 2026-10-30): wrapper 6 mirrored in DjangoLux PR #30; `1.9/availability_notes` publishes `display` in `package-available.json` for DjangoLux #29's review dialog. Beta-tag both together with the owner's OK.
+  - [ ] Pair 1.9.1b2 with DjangoLux 1.15.2b2 (owner 2026-10-30): wrapper 6 mirrored in DjangoLux #30, availability `display` notes in #10 (781259c); release state on `1.9/release_1_9_1b2` (classifier: beta, `:beta`, prerelease). Accept both on testbed, then tag together with the owner's OK.
   - [ ] A pinned `dlux update --version X` right after X is published fails "not published" while PyPI's CDN serves a stale simple index (seen 2026-10-09 with 1.11.0b6); the stale-index re-read only covers unpinned updates. Retry pinned resolution the same way.
   - [ ] TAG THE REHEARSAL: `v1.3.14b1` must be published BEFORE Dlux `v1.8.14b1` — that manifest requires `>=1.3.14b1`. Nothing pushed yet. Then verify `:beta` and `:v1.3.14b1` both appear and `:latest` did NOT move.
   - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
