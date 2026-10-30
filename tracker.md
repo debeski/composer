@@ -2,7 +2,7 @@
 
 ## Part 1: Project Related
 ### Current Verified Snapshot:
-- 2026-10-30: v1.9.1b1 tagged+published (`:beta`, tag on main 0e6a7eb). `1.9/update_self_fixes` = 1.9.1b2 from the main review: wrapper 6 (`update self` with -f/-d anywhere, image-ID refresh compare), launcher drops hoisted -f for `update self`, README migration back to `self update`. Not yet merged/tagged; DjangoLux scaffold mirrors still wrapper 5.
+- 2026-10-30: v1.9.1b1 tagged+published (`:beta`, tag 0e6a7eb). 1.9.1b2 review fixes merged to main via PR9 (3e33d72): wrapper 6 (`update self` with -f/-d anywhere, image-ID refresh compare), launcher drops hoisted -f for `update self`, README migration back to `self update`. Branch retired. Not tagged; DjangoLux scaffold mirrors still wrapper 5.
 - **v1.7.0 stable published 2026-10-23**: latest remains1.7.0 after1.8.0b1; maintenance-page ownership, schema3, restart/recreate/logs and image manifest support retained. Paired DjangoLux stable1.13.0 accepted earlier; official testbed now1.13.2.
 - **v1.7.0b1 (beta, published + accepted 2026-10-21; `:v1.7.0b1` + `:beta`, tag `d51d7bf` on `1.7/maintenance_page`)**: maintenance page in the image (`composer/assets/maintenance/`, agent publishes on start, `composer maintenance publish [--override]`), `check`/`check --fix` migration to stack schema 3 (validated proxy rewrite, mount dropped, custom page kept as `.proxy/maintenance/`, restamp 2->3), override publishing for new stacks, `release-manifest.json` replaces `VERSION` (image derives `/app/VERSION`, label `org.dlux.composer.release-manifest`). 834 tests OK; smoke test OK; pre-publish testbed migration accepted (evidence `pkg-django-lux/main/.xclude/validation/composer-1.7.0b1-prepublish-2026-10-21/`). Pairs with DjangoLux 1.13.0b1 (schema 3 scaffold).
 - **Composer 1.7.0 plan (owner, 2026-10-21)**: betas first (`v1.7.0bN`, `:beta`), paired with DjangoLux 1.13.0 betas on `testbed-dlux`. Scope: stack hardening (above); maintenance page owned by the Composer image (agent publishes to the runtime volume, proxy serves it, optional project `.proxy/maintenance/` override, stack schema 3, `check --fix` migrates); operations-centre operations (restart/recreate allow-listed services, `logs tail`, "update everything"); **`VERSION` replaced by a `release-manifest.json`** like DjangoLux and projects (version, summary, highlights, release URL), exposed as an image label so DjangoLux's Updates card can show what a Composer update brings (used by DjangoLux 1.14).
@@ -43,7 +43,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Pair 1.9.1b2 with DjangoLux: copy wrapper 6 `start.sh`/`start.ps1` byte-identical into `dlux/scaffold_templates/project/`; run the `start.ps1` deployer tests on CI (no local arm64 pwsh).
+  - [ ] Pair 1.9.1b2 with DjangoLux: copy wrapper 6 `start.sh`/`start.ps1` byte-identical into `dlux/scaffold_templates/project/`, then beta-tag 1.9.1b2 with the owner's OK.
   - [ ] A pinned `dlux update --version X` right after X is published fails "not published" while PyPI's CDN serves a stale simple index (seen 2026-10-09 with 1.11.0b6); the stale-index re-read only covers unpinned updates. Retry pinned resolution the same way.
   - [ ] TAG THE REHEARSAL: `v1.3.14b1` must be published BEFORE Dlux `v1.8.14b1` — that manifest requires `>=1.3.14b1`. Nothing pushed yet. Then verify `:beta` and `:v1.3.14b1` both appear and `:latest` did NOT move.
   - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
@@ -71,7 +71,7 @@
   - [x] v1.3.8 released: schema-2 DjangoLux manifests enforce inline install safety, migration rollback compatibility, supported service requirements, and the Composer version floor.
   - [x] v1.3.6: missing-label DLUX compatibility migrator + guarded label repair; post-start uses `exec -T`, streams progress, and fails the run; direct `migrate` subcommand with service/arg passthrough. +9 tests.
 ### One-line info about last verified Tests:
-- 2026-10-30: 1.9.1b2 fixes — full suite (see Validation) with bash wrapper deployer tests; `start.ps1` cases skip locally (amd64 pwsh image crashes under qemu), run on CI.
+- 2026-10-30: 1.9.1b2 PR9 CI 41019288934 PASS: 896 OK/11 skips incl. 9 `start.ps1` deployer tests on Ubuntu pwsh; Docker/runtime smoke in the same CI run.
 - 2026-09-30: 1.5.4b1 — suite 709 OK (6 skips) in a venv with packaging/pyyaml/pypi-attestations; local image has buildx v0.37.1, and a buildx build created no per-step containers.
 - 2026-09-25: 1.5.3 on `testbed-dlux` — b2 local build then published: unpinned `dlux update` resolves beta 1.9.4b1 / stable 1.9.3 by policy, the agent->executor handoff applied 1.9.4b1 (ack exit 0); stable 1.5.3 installed stable 1.9.4 over 1.9.3. Suite 705/709 (4 need a Docker CLI in the container).
 - 2026-09-24: `--skip-config` live on the decrees rig from a locally built 1.5.3b1 image — `./start.sh --skip-config` put `DLUX_SKIP_CONFIG_IMPORT=True` into web, celery and composer-agent, DjangoLux returned `skipped` with `config.json` byte-identical, and a plain `./start.sh` left the variable unset. 704 tests OK (beta-first now gates patches too).
