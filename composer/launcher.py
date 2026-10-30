@@ -106,6 +106,30 @@ def _normalize_leading_global_options(argv: List[str]) -> List[str]:
     return rest[:1] + leading + rest[1:]
 
 
+def _update_self_help_args(argv: List[str]) -> Optional[List[str]]:
+    """The -h/--help among `update ... self` arguments, or None if they name more.
+
+    Global -f/-d options may sit anywhere, since leading ones are moved behind
+    the command. A deployer pull has no Compose file to scope, so they drop.
+    """
+    help_args: List[str] = []
+    selves = 0
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in {"-f", "--file"}:
+            index += 2
+            continue
+        if token == "self":
+            selves += 1
+        elif token in {"-h", "--help"}:
+            help_args.append(token)
+        elif token not in {"-d", "--dev"} and not token.startswith("--file="):
+            return None
+        index += 1
+    return help_args if selves == 1 else None
+
+
 class DockerComposeLauncher(
     PostStartHooksMixin,
     HealthMonitorMixin,
@@ -507,14 +531,18 @@ class DockerComposeLauncher(
                 print("Note: 'self update' is deprecated; use 'composer update self'.", file=sys.stderr)
                 self.handle_update_self(argv[2:])
                 return
-            # Wrapper 5 refreshes the deployer itself and never passes this on;
-            # an older wrapper does, and still gets the pull for its next run.
+            # Wrappers 5+ refresh the deployer themselves and never pass this
+            # on; an older wrapper does, and still gets the pull for its next run.
             if argv and argv[0] == "update" and "self" in argv[1:]:
-                extra = [token for token in argv[1:] if token not in {"-d", "--dev", "self"}]
-                if argv[1:].count("self") != 1 or any(token not in {"-h", "--help"} for token in extra):
-                    print("Usage: composer update self  (updates only the deployer; takes no other arguments)", file=sys.stderr)
+                help_args = _update_self_help_args(argv[1:])
+                if help_args is None:
+                    print(
+                        "Usage: composer update self  (updates only the deployer; "
+                        "takes no services or update options)",
+                        file=sys.stderr,
+                    )
                     sys.exit(2)
-                self.handle_update_self(extra)
+                self.handle_update_self(help_args)
                 return
             if argv and argv[0] == "run":
                 self.handle_run(argv[1:])

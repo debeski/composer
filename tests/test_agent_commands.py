@@ -239,6 +239,9 @@ class UpdateSelfCommandTests(unittest.TestCase):
             (["update", "self"], []),
             (["update", "-d", "self"], []),
             (["-d", "update", "self"], []),
+            (["-f", "compose.prod.yml", "update", "self"], []),
+            (["update", "self", "--file", "compose.prod.yml"], []),
+            (["update", "--file=compose.prod.yml", "self", "--dev"], []),
             (["update", "self", "--help"], ["--help"]),
         ):
             with self.subTest(argv=argv):
@@ -253,18 +256,26 @@ class UpdateSelfCommandTests(unittest.TestCase):
                 update_self.assert_called_once_with(expected)
                 configure_update.assert_not_called()
 
-    def test_update_self_takes_no_services(self):
-        launcher = DockerComposeLauncher()
-        with (
-            patch.object(sys, "argv", ["composer", "update", "self", "web"]),
-            patch("sys.stderr", new_callable=io.StringIO) as errors,
-            patch.object(launcher, "handle_update_self") as update_self,
-            self.assertRaises(SystemExit) as exit_code,
+    def test_update_self_takes_no_services_or_update_options(self):
+        for argv in (
+            ["update", "self", "web"],
+            ["update", "self", "--force"],
+            ["update", "self", "-a", "core"],
+            ["update", "self", "self"],
+            ["update", "-f", "self"],
         ):
-            launcher.run()
-        self.assertEqual(exit_code.exception.code, 2)
-        self.assertIn("composer update self", errors.getvalue())
-        update_self.assert_not_called()
+            with self.subTest(argv=argv):
+                launcher = DockerComposeLauncher()
+                with (
+                    patch.object(sys, "argv", ["composer", *argv]),
+                    patch("sys.stderr", new_callable=io.StringIO) as errors,
+                    patch.object(launcher, "handle_update_self") as update_self,
+                    self.assertRaises(SystemExit) as exit_code,
+                ):
+                    launcher.run()
+                self.assertEqual(exit_code.exception.code, 2)
+                self.assertIn("composer update self", errors.getvalue())
+                update_self.assert_not_called()
 
     def test_self_update_alias_points_to_update_self(self):
         launcher = DockerComposeLauncher()

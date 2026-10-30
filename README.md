@@ -158,10 +158,12 @@ Composer 1.3.10 accepts DjangoLux release-manifest schemas 1 and 2. Schema-2 pac
 
 `composer executor run` runs the privileged half of the hardened topology. The executor is the sole holder of Docker write authority: it owns the real `docker.sock`, runs the trigger-watched image-update loop, and serves typed restart/recovery operations to the agent over a private Unix socket (`COMPOSER_EXECUTOR_SOCKET`). The network-facing `composer-agent` keeps only read-only Docker access through a `docker-socket-proxy` with POST and exec disabled, and delegates every write. The generated Compose block starts it; it is not for interactive use. See [docs/executor-hardening.md](docs/executor-hardening.md).
 
-Migrate an existing generated DLUX project with Composer itself:
+Migrate an existing generated DLUX project with Composer itself. Its wrapper
+may predate `update self` (wrapper 5), so refresh the deployer with
+`self update`, which every wrapper still accepts:
 
 ```bash
-./start.sh update self
+./start.sh self update
 ./start.sh agent enable
 ./start.sh agent enable --apply
 ./start.sh executor enable
