@@ -2,6 +2,7 @@
 
 ## v1.9.1b2
 
+- **Release Notes In The Availability Report**: `build_availability_payload()` publishes the offered release's `display` (`summary`, `highlights`, `release_url`, from the verified wheel's manifest, or its `display` block) in `state/package-available.json` through new `dlux_package_cli.release_display()`. DjangoLux 1.15.2b2+ shows them in the review dialog instead of only "Bug fixes and improvements"; older DjangoLux ignores the key.
 - **Wrapper 6 `update self` Routing**: `start.sh`/`start.ps1` route `update self` with the global `-f FILE`/`--file`/`-d` options in any position (`update -d self`, `update self -f compose.prod.yml`), matching the launcher, instead of handing those forms to the old deployer for an in-container pull. `update self` with services or update options is left to composer, which rejects it.
 - **Launcher `update self` Accepts Hoisted `-f`**: `composer update self` (reached through wrappers 1-4) drops global `-f`/`--file`/`--file=`/`-d` options via `_update_self_help_args`, so `./start.sh -f FILE update self` no longer exits with a usage error after `_normalize_leading_global_options` moves `-f FILE` behind the command.
 - **Deployer Refresh Compares Image IDs**: the wrapper refresh compares `docker image inspect --format '{{.Id}}'` before and after the pull, so a rebuilt tag with an unchanged `/app/VERSION` reports the update; it starts a container for a version only when reporting one (one instead of two when up to date) and reads the replaced version by image ID.

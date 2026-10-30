@@ -218,6 +218,31 @@ class PackageAvailabilityPublicationTests(unittest.TestCase):
         self.assertEqual(published["version"], "1.9.0")
         self.assertTrue(published["available"])
 
+    def test_the_report_carries_the_release_notes(self):
+        # DjangoLux's review dialog read only "Bug fixes and improvements": the
+        # manifest describe() verified never reached the report.
+        url = "https://github.com/debeski/django-lux/releases/tag/v1.9.0"
+        manifest = {
+            "version": "1.9.0", "summary": "Patch.", "highlights": ["One", 2, "Two"],
+            "release_url": url, "requires": {"services": {"composer": ">=1.9.0"}},
+        }
+        with self._describe(manifest=manifest):
+            self._runtime().maybe_check_package_availability()
+
+        published = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(
+            published["display"],
+            {"summary": "Patch.", "highlights": ["One", "Two"], "release_url": url},
+        )
+
+    def test_a_manifest_display_block_wins(self):
+        manifest = {"version": "1.9.0", "summary": "Prose.", "display": {"summary": "Short.", "highlights": "x"}}
+        with self._describe(manifest=manifest):
+            self._runtime().maybe_check_package_availability()
+
+        published = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual(published["display"], {"summary": "Short."})
+
     def test_the_resident_check_resolves_the_deployment_channel(self):
         # Seen live: every resident check resolved stable, so a deployment that
         # opted in from Options was only offered a beta after a manual CLI check.

@@ -110,6 +110,22 @@ def write_availability(runtime, payload, path=None) -> Path:
     return target
 
 
+def release_display(manifest) -> dict:
+    """The offered release's own notes, for DjangoLux's review dialog.
+
+    Only the display fields leave the verified wheel's manifest. DjangoLux bounds
+    them again and keeps the link only when it is that release's own page.
+    """
+    if not isinstance(manifest, dict):
+        return {}
+    source = manifest.get("display") if isinstance(manifest.get("display"), dict) else manifest
+    display = {key: source[key] for key in ("summary", "release_url") if isinstance(source.get(key), str)}
+    highlights = source.get("highlights")
+    if isinstance(highlights, list):
+        display["highlights"] = [item for item in highlights if isinstance(item, str)]
+    return display
+
+
 def build_availability_payload(target_version="", *, channel=None, runtime=None, state_dir=None) -> dict:
     """Resolve and verify the newest release, as a publishable report.
 
@@ -155,6 +171,7 @@ def build_availability_payload(target_version="", *, channel=None, runtime=None,
         "channel": described.get("channel", channel),
         "prerelease": bool(described.get("prerelease")),
         "reason": described["reason"],
+        "display": release_display(described.get("manifest")),
         "error": policy_error,
     }
 

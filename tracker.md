@@ -43,7 +43,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Pair 1.9.1b2 with DjangoLux: copy wrapper 6 `start.sh`/`start.ps1` byte-identical into `dlux/scaffold_templates/project/`, then beta-tag 1.9.1b2 with the owner's OK.
+  - [ ] Pair 1.9.1b2 with DjangoLux 1.15.2b2 (owner 2026-10-30): wrapper 6 mirrored in DjangoLux PR #30; `1.9/availability_notes` publishes `display` in `package-available.json` for DjangoLux #29's review dialog. Beta-tag both together with the owner's OK.
   - [ ] A pinned `dlux update --version X` right after X is published fails "not published" while PyPI's CDN serves a stale simple index (seen 2026-10-09 with 1.11.0b6); the stale-index re-read only covers unpinned updates. Retry pinned resolution the same way.
   - [ ] TAG THE REHEARSAL: `v1.3.14b1` must be published BEFORE Dlux `v1.8.14b1` — that manifest requires `>=1.3.14b1`. Nothing pushed yet. Then verify `:beta` and `:v1.3.14b1` both appear and `:latest` did NOT move.
   - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
@@ -78,6 +78,7 @@
 - 2026-09-24: the card-driven `agent-update` ran against PUBLISHED images for the first time — rig on 1.5.2b1, card offered 1.5.2 from `:beta`, the executor's detached helper pulled and recreated both containers and wrote its own ack (exit 0, 164s). Resident is 1.5.2, `deployer_version` reads 1.5.2b1 (the helper that performed it), and a re-check answers "the beta channel's current version".
 - 2026-09-24: 1.5.2b1 published to `:beta`; the decrees rig was put back on published 1.5.1, then host-updated to `:beta` from the registry (resident 1.5.2b1, deployer 1.5.1 published in agent-status). From there DjangoLux's card ran `agent-check` (tick: resident == the beta channel's current version) and the deployment check (15/15 OK). 701 tests OK.
 ### One-line info about last time edited Docs:
+- 2026-10-30: `1.9/availability_notes`: README `dlux check` paragraph + CHANGELOG 1.9.1b2 document the report's `display` notes.
 - 2026-10-30: CHANGELOG 1.9.1b2; README migration uses `self update` for pre-wrapper-5 stacks; RELEASING drops per-release action pins.
 - 2026-09-30: README `--build` row notes buildx/BuildKit; 1.5.4b1 changelog/version opened after verifying the 1.5.3 tag.
 
