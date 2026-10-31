@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.9.2
+
+- **Stable 1.9.2 For DjangoLux 1.15.3: SECURITY (High Priority)**: Promote the published and accepted 1.9.2b2, which includes 1.9.2b1. `composer check` reports a proxy that serves stored files without authorization (`stored-files` FAIL; a hand-edited `/media/` section is a WARN). `composer check --fix` makes them private once DjangoLux is 1.15.3+ (validated, archived, proxy recreated) and exits 0 after fixing. Accepted on testbed-dlux 2026-10-31: the fix was refused on DjangoLux 1.15.1 and applied on 1.15.3b1; afterwards signed-out requests got 403 and signed-in ones 200, and with 1.9.2b2 `check --fix` exits 0. Paired with DjangoLux 1.15.3. No runtime changes from the beta.
+
 ## v1.9.2b2
 
 - **`check --fix` Exits 0 After Making Stored Files Private**: The `stored-files` finding joins the post-fix re-checks (`resident-commands`, `docker-proxy`), so a successful `fix:stored-files` replaces the stale SECURITY FAIL and `composer check --fix` exits 0. Found by the 1.9.2b1 acceptance on testbed-dlux, where the fix itself worked (proxy rewritten, validated, recreated; signed-out `/media/` 403, signed-in 200) but the command still exited 1.
