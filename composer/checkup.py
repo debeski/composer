@@ -8,7 +8,7 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from . import maintenance_migration, maintenance_page
+from . import maintenance_migration, maintenance_page, media_migration
 from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -632,6 +632,53 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
     def _maintenance_page_published(self) -> bool:
         return self._published_page_has("index.html")
 
+    def _running_dlux_version(self):
+        """(major, minor, patch) of the DjangoLux serving requests: the active
+        inline release on the runtime volume, else the one baked into the image."""
+        from .agent_installer import parse_dlux_version
+
+        if "web" in set(self.services):
+            ok, out, _ = self.run_docker_compose(
+                ["exec", "-T", "web", "cat", "/opt/dlux-runtime/state/active.json"], timeout=10
+            )
+            if ok:
+                try:
+                    active = json.loads(out)
+                except ValueError:
+                    active = {}
+                if isinstance(active, dict) and active.get("source") == "volume":
+                    return parse_dlux_version(active.get("version"))
+            return self._dlux_runtime_version("web")
+        return self._dlux_runtime_version()
+
+    def _check_media_privacy(self) -> Dict[str, Any]:
+        """Stored files must not be served past the app (DjangoLux 1.15.3 security
+        fix, stack schema 4); ``check --fix`` switches a generated proxy over."""
+        state = media_migration.inspect(Path("."))
+        exposed = sorted(name for name, kind in state["files"].items() if kind == media_migration.LEGACY)
+        if exposed:
+            return _result(
+                FAIL,
+                "stored-files",
+                "SECURITY: the proxy serves every /media/ file without authorization ("
+                + ", ".join(exposed)
+                + "), so anyone who can reach this site can download stored files by URL without signing in.",
+                fix="Update DjangoLux to 1.15.3 or later ('./start.sh dlux update', or an image built on it), "
+                "then run 'composer check --fix' to make stored files private (stack schema 4).",
+            )
+        if state["custom"]:
+            return _result(
+                WARN,
+                "stored-files",
+                "The proxy has its own /media/ rules (" + ", ".join(state["custom"]) + "), which Composer leaves "
+                "alone; make sure private stored files are not served to signed-out visitors.",
+                fix="Compare them with the /media/ blocks of DjangoLux 1.15.3's scaffold .proxy files "
+                "(stack schema 4), or replace them with those blocks.",
+            )
+        if not state["files"]:
+            return _result(OK, "stored-files", "No /media/ route in the proxy config.")
+        return _result(OK, "stored-files", "Stored files go through DjangoLux's access check (stack schema 4).")
+
     def _check_maintenance_page(self) -> Dict[str, Any]:
         """Composer publishes the page (stack schema 3); a legacy stack still serves
         the project's ``.proxy/maintenance.html`` and is migrated by ``check --fix``."""
@@ -877,6 +924,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             results.append(self._check_proxy_routes())
             results.append(self._check_stack_schema())
             results.append(self._check_maintenance_page())
+            results.append(self._check_media_privacy())
             results.append(self._check_versions())
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
@@ -1095,11 +1143,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
             return fixes
         proxy_routes = proxy_inspection["recognized"]
+        media_exposed = media_migration.inspect(Path("."))["exposed"]
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
                 and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
-                and not needs_restart_labels and not needs_dev_override_migration):
+                and not needs_restart_labels and not needs_dev_override_migration and not media_exposed):
             return fixes
         consequences = []
         if maintenance_legacy:
@@ -1110,6 +1159,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         if maintenance_unpublished:
             consequences.append("Publish the maintenance page through composer-agent.")
+        if media_exposed:
+            consequences.append(
+                "SECURITY: make stored files private (DjangoLux stack schema 4). The proxy will serve only "
+                "media/public/, branding and managed images and fonts to everyone, and ask DjangoLux before "
+                "serving any other /media/ file. Uploads your site shows to signed-out visitors (product "
+                "photos, for example) must first be listed in DLUX_PUBLIC_MEDIA or moved under media/public/. "
+                "The proxy config is validated, archived under .xclude/composer-check/ and the proxy recreated."
+            )
         if stale_wrappers:
             consequences.append(
                 "Replace launcher wrappers with the copies baked into this composer image: "
@@ -1290,6 +1347,32 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 )
             except StackCleanupError as exc:
                 fixes.append(_result(FAIL, "fix:maintenance-page", str(exc)))
+
+        if media_exposed:
+            from .stack_cleanup import StackCleanupError
+
+            running = self._running_dlux_version()
+            if running is None or tuple(running) < media_migration.MEDIA_ACCESS_FLOOR:
+                fixes.append(
+                    _result(
+                        FAIL,
+                        "fix:stored-files",
+                        f"DjangoLux {'.'.join(map(str, running)) if running else 'version unknown'} has no "
+                        "media access check, so switching the proxy now would refuse every private file. Update "
+                        "DjangoLux to 1.15.3 or later, then run 'composer check --fix' again.",
+                    )
+                )
+            else:
+                try:
+                    outcome = media_migration.migrate(
+                        ".", self._maintenance_compose_files(), environment=self.build_compose_env()
+                    )
+                    detail = f"Made stored files private: {', '.join(outcome['files'])}"
+                    if outcome["recreated"]:
+                        detail += f"; recreated {', '.join(outcome['recreated'])}"
+                    fixes.append(_result(OK, "fix:stored-files", f"{detail}. Backup: {outcome['backup_root']}"))
+                except (OSError, StackCleanupError) as exc:
+                    fixes.append(_result(FAIL, "fix:stored-files", str(exc)))
 
         if obsolete or proxy_routes:
             from .stack_cleanup import StackCleanupError, remove_obsolete_services

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.9.2b1
+
+- **SECURITY (High Priority): Make Stored Files Private**: DjangoLux stacks generated before 1.15.3 have a proxy that serves every `/media/` file without authorization (DjangoLux security fix 1.15.3, stack schema 4). `composer check` now reports this as a `stored-files` FAIL (a hand-edited `/media/` section is a WARN). Once the running DjangoLux is 1.15.3+ (the active inline release from `state/active.json`, else the image's), `composer check --fix` rewrites an unmodified generated `.proxy/Caddyfile` / `.proxy/default.conf.template` to the schema 4 `/media/` blocks through new `media_migration`:
+  - public folders stay public, and every other `/media/` file goes through `forward_auth` / `auth_request` to `/sys/files/media-access/`;
+  - the new config is validated first, files stamped 3 are restamped 4, the originals are archived under `.xclude/composer-check/`, and the proxy is recreated.
+
+  With an older DjangoLux the fix refuses rather than lock every private file. The blocks are byte-identical to DjangoLux's scaffold (`tests/test_media_migration.py` compares them when a schema 4 DjangoLux checkout is alongside).
+
 ## v1.9.1
 
 - **Stable 1.9.1 For DjangoLux 1.15.2**: Promote the published and accepted 1.9.1b2 implementation, which includes 1.9.1b1: wrapper 6 (`./start.sh update` refreshes the deployer first, `update self` updates only the deployer and accepts `-f`/`-d` anywhere, `self update` stays a deprecated alias, the refresh compares image IDs), and `dlux check` publishing the offered release's notes (`display`) in `package-available.json`. Paired with DjangoLux 1.15.2 (`composer >=1.9.0b2`). No runtime changes from the beta.
