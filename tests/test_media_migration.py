@@ -184,6 +184,35 @@ class CheckTests(unittest.TestCase):
         stored = [entry for entry in fixes if entry["name"] == "fix:stored-files"]
         self.assertEqual(stored[0]["level"], OK)
 
+    def test_a_successful_fix_replaces_the_stale_failure(self):
+        from contextlib import ExitStack
+
+        self.write(LEGACY_CADDY)
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "caddy"]
+
+        def fix(args, results):
+            self.write(media.migrate_caddyfile(LEGACY_CADDY))
+            return [{"level": OK, "name": "fix:stored-files", "message": "Made stored files private."}]
+
+        ok = {"level": OK, "name": "other", "message": ""}
+        with ExitStack() as stack:
+            for name in ("_check_compose_files", "_check_compose_parses", "_check_secrets", "_check_composer_channel",
+                         "_check_required_vars", "_check_topology", "_check_removed_services",
+                         "_check_dlux_updater_executor", "_check_proxy_routes", "_check_stack_schema",
+                         "_check_maintenance_page", "_check_versions"):
+                stack.enter_context(patch.object(launcher, name, return_value=ok))
+            for name in ("_check_docker", "_check_wrappers"):
+                stack.enter_context(patch.object(launcher, name, return_value=[]))
+            for name in ("_check_resident_commands", "_check_docker_proxy", "resolve_active_compose_files",
+                         "_requested_channel"):
+                stack.enter_context(patch.object(launcher, name, return_value=None))
+            stack.enter_context(patch.object(launcher, "_maybe_fix", side_effect=fix))
+            results, fixed = launcher.collect_checkup(SimpleNamespace(file="", dev=False, fix=True, deep=False))
+        stored = [entry for entry in results if entry["name"] == "stored-files"]
+        self.assertEqual(stored[0]["level"], OK)
+        self.assertFalse(any(entry["level"] == FAIL for entry in results + fixed))
+
     def test_the_running_version_prefers_the_active_inline_release(self):
         launcher = DockerComposeLauncher()
         launcher.services = ["web"]

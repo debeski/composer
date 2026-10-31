@@ -935,6 +935,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             rechecks = {
                 "resident-commands": self._check_resident_commands,
                 "docker-proxy": self._check_docker_proxy,
+                # A successful fix:stored-files must not leave the stale SECURITY
+                # FAIL behind, or `check --fix` exits 1 after fixing it.
+                "stored-files": self._check_media_privacy,
             }
             for index, result in enumerate(results):
                 if result["name"] in rechecks and result["level"] == FAIL:
