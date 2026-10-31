@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.9.2b2
+
+- **`check --fix` Exits 0 After Making Stored Files Private**: The `stored-files` finding joins the post-fix re-checks (`resident-commands`, `docker-proxy`), so a successful `fix:stored-files` replaces the stale SECURITY FAIL and `composer check --fix` exits 0. Found by the 1.9.2b1 acceptance on testbed-dlux, where the fix itself worked (proxy rewritten, validated, recreated; signed-out `/media/` 403, signed-in 200) but the command still exited 1.
+
 ## v1.9.2b1
 
 - **SECURITY (High Priority): Make Stored Files Private**: DjangoLux stacks generated before 1.15.3 have a proxy that serves every `/media/` file without authorization (DjangoLux security fix 1.15.3, stack schema 4). `composer check` now reports this as a `stored-files` FAIL (a hand-edited `/media/` section is a WARN). Once the running DjangoLux is 1.15.3+ (the active inline release from `state/active.json`, else the image's), `composer check --fix` rewrites an unmodified generated `.proxy/Caddyfile` / `.proxy/default.conf.template` to the schema 4 `/media/` blocks through new `media_migration`:
