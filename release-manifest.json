@@ -1,13 +1,11 @@
 {
   "schema_version": 1,
-  "version": "1.9.1",
-  "summary": "One update command: `update` refreshes the Composer deployer before the stack; `update self` refreshes only the deployer.",
+  "version": "1.9.2b1",
+  "summary": "Security: `check` reports a proxy that serves stored files without authorization, and `check --fix` makes them private once DjangoLux is 1.15.3+.",
   "highlights": [
-    "Wrapper 6: `./start.sh update` with no named services pulls the deployer first, so the stack and resident pair update on the new Composer.",
-    "`./start.sh update self` updates only the deployer and accepts the global `-f`/`-d` options anywhere; naming services keeps the deployer as is.",
-    "The deployer refresh compares image IDs, so a rebuilt tag is reported as an update even when its version string is unchanged.",
-    "DjangoLux's update review shows the offered release's own notes: `dlux check` publishes its summary and highlights in `package-available.json`.",
-    "`self update` stays as a deprecated alias with a note pointing to `update self`."
+    "SECURITY: `composer check` fails a stack whose proxy serves every /media/ file without authorization (DjangoLux stacks generated before 1.15.3).",
+    "`composer check --fix` switches an unmodified generated proxy to private media (DjangoLux stack schema 4) once the running DjangoLux is 1.15.3 or later; it validates first and archives the originals.",
+    "Folders your site shows to signed-out visitors go in DjangoLux's DLUX_PUBLIC_MEDIA (or under media/public/) before running the fix."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.1"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.2b1"
 }
