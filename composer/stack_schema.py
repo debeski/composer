@@ -43,6 +43,22 @@ def restamp(text: str, schema: int) -> str:
     return text[: match.start(1)] + str(schema) + text[match.end(1):]
 
 
+def deployment_schema(root: str = ".") -> Optional[int]:
+    """The stack schema the deployment's compose file declares, or None.
+
+    compose.yml's stamp is the one DjangoLux reads at runtime. Composer runs from
+    the project root, on the host and in its resident services alike.
+    """
+    for name in ("compose.yml", "docker-compose.yml"):
+        path = Path(root) / name
+        if path.is_file():
+            try:
+                return read_stamp(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                return None
+    return None
+
+
 def collect_stamps(root: str, compose_file: str, extra: Iterable[str] = ()) -> Dict[str, Optional[int]]:
     """``{relative path: schema or None}`` for each stamped file that exists."""
     base = Path(root)

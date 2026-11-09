@@ -9,6 +9,10 @@ services:
     image: ${WEB_IMAGE:-registry.example/demo:latest}
     networks:
       - internal
+  worker:
+    image: ${WEB_IMAGE:-registry.example/demo:latest}
+    networks:
+      - internal
   celery:
     image: ${WEB_IMAGE:-registry.example/demo:latest}
     networks:
@@ -88,7 +92,7 @@ services:
       COMPOSER_STATUS_FILE: "/opt/dlux-runtime/state/deploy-status.json"
       COMPOSER_WATCH_SELF_SERVICE: "composer-agent"
       COMPOSER_EXCLUDE_SERVICES: "composer-agent,docker-socket-proxy,db"
-      COMPOSER_AGENT_RESTART_SERVICES: "web,celery,caddy"
+      COMPOSER_AGENT_RESTART_SERVICES: "web,worker,celery,caddy"
     volumes:
       - "${PWD}:${PWD}:ro"
       - dlux_runtime:/opt/dlux-runtime:rw

@@ -16,8 +16,9 @@ import json
 from typing import Optional, Tuple
 
 BACKUP_SCOPES = ("data", "full", "skip")
-# Celery first: the backup is long-running work and web is serving requests.
-BACKUP_SERVICES = ("celery", "web")
+# The task service first (worker from stack schema 5, else celery): the backup is
+# long-running work and web is serving requests.
+BACKUP_SERVICES = ("worker", "celery", "web")
 
 _COMMAND = ["python", "manage.py", "dlux_backup", "--trigger", "update", "--requested-by", "composer"]
 
@@ -65,7 +66,7 @@ def take_snapshot(launcher, scope: str = "data") -> Tuple[bool, str]:
     """Take a DjangoLux system backup in the stack; ``(ok, detail)``."""
     service = _backup_service(launcher)
     if not service:
-        return False, "the stack has no celery or web service to take the backup in"
+        return False, "the stack has no worker, celery or web service to take the backup in"
     ok, out, err = _exec(launcher, service, _COMMAND + ["--scope", scope])
     combined = f"{out}\n{err}"
     if not ok and "Unknown command" in combined and "dlux_backup" in combined:

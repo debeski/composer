@@ -1,0 +1,216 @@
+name: oldstack
+
+x-environment:
+  # Database settings
+  &de
+  WEB_IMAGE: "${WEB_IMAGE:-registry.example/oldstack:latest}"
+  POSTGRES_DB: "${POSTGRES_DB:-oldstack_db}"
+  POSTGRES_PORT: "5432"
+  POSTGRES_HOST: "db"
+  # Redis / Celery
+  REDIS_URL_DB: "redis://redis:6379/1"
+  CELERY_BROKER_URL: "redis://redis:6379/2"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/3"
+  DEBUG_STATUS: "${DEBUG_STATUS:-False}"
+  # Django Lux verified inline updater
+  DLUX_INLINE_UPDATES_ENABLED: "True"
+  DLUX_UPDATE_RUNTIME_ROOT: "/opt/dlux-runtime"
+
+services:
+  db:
+    image: postgres:17
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-oldstack_db}"
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_pass}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - oldstack_internal
+
+  redis:
+    image: redis:7
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - oldstack_internal
+
+  dlux-updater:
+    image: ${WEB_IMAGE:-registry.example/oldstack:latest}
+    restart: always
+    command: ["python", "-m", "tools.dlux_runtime_supervisor", "--no-watch", "--", "bash", "-c", "python -m tools.initialize && exec python manage.py dlux_update_worker"]
+    entrypoint: ["/app/entrypoint.sh"]
+    volumes:
+      - dlux_runtime:/opt/dlux-runtime:rw
+      - static:/app/staticfiles:rw
+      - ./media/:/app/media:rw
+      - ./logs/:/app/logs:rw
+    environment:
+      <<: *de
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_pass}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local_secret}
+    healthcheck:
+      test: ["CMD", "python", "-m", "dlux.updater.health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - oldstack_internal
+
+  caddy:
+    image: caddy:latest
+    restart: always
+    ports:
+      - target: 80
+        published: "${CADDY_PORT:-81}"
+        protocol: tcp
+    volumes:
+      - ./.proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - static:/app/staticfiles:ro
+      - ./media/:/app/media:ro
+      - dlux_runtime:/opt/dlux-runtime:ro
+      - ./.proxy/maintenance.html:/usr/share/caddy/maintenance/maintenance.html:ro
+    depends_on:
+      web:
+        condition: service_started
+    networks:
+      - oldstack_internal
+
+  web:
+    image: ${WEB_IMAGE:-registry.example/oldstack:latest}
+    restart: always
+    command: >
+      python -m tools.dlux_runtime_supervisor -- bash -c ' if [ "$$DEBUG_STATUS" = "True" ]; then
+          python manage.py runserver 0.0.0.0:8000
+      else
+          gunicorn -c gunicorn.py config.wsgi:application
+      fi'
+    entrypoint: ["/app/entrypoint.sh"]
+    volumes:
+      - ./tools/:/app/tools:ro
+      - static:/app/staticfiles:rw
+      - ./media/:/app/media:rw
+      - ./logs/:/app/logs:rw
+      - dlux_runtime:/opt/dlux-runtime:ro
+    environment:
+      <<: *de
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_pass}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local_secret}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dlux-updater:
+        condition: service_healthy
+    networks:
+      - oldstack_internal
+
+  celery:
+    image: ${WEB_IMAGE:-registry.example/oldstack:latest}
+    restart: always
+    command: ["python", "-m", "tools.dlux_runtime_supervisor", "--", "python", "-m", "celery", "-A", "config", "worker", "-B", "--loglevel=info"]
+    entrypoint: ["/app/entrypoint.sh"]
+    volumes:
+      - ./tools/:/app/tools:ro
+      - static:/app/staticfiles:ro
+      - ./media/:/app/media:rw
+      - ./logs/:/app/logs:rw
+      - ./imports/:/app/imports:ro
+      - dlux_runtime:/opt/dlux-runtime:ro
+    environment:
+      <<: *de
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_pass}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local_secret}
+    healthcheck:
+      test: ["CMD", "python", "-m", "celery", "-A", "config", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dlux-updater:
+        condition: service_healthy
+    networks:
+      - oldstack_internal
+
+  # DjangoLux Composer agent start
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: always
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy
+
+  composer-agent:
+    image: debeski/composer:latest
+    restart: unless-stopped
+    working_dir: "${PWD}"
+    command:
+      - agent
+      - --trigger-file
+      - /opt/dlux-runtime/state/image-update-request.json
+    environment:
+      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
+      WEB_IMAGE: "${WEB_IMAGE:-registry.example/oldstack:latest}"
+      COMPOSER_EXCLUDE_SERVICES: "composer-agent,docker-socket-proxy,db,redis"
+      COMPOSER_AGENT_RESTART_SERVICES: "web,celery,caddy"
+    volumes:
+      - "${PWD}:${PWD}:ro"
+      - dlux_runtime:/opt/dlux-runtime:rw
+      - composer_agent_state:/var/lib/composer-agent:rw
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
+    networks:
+      - egress
+      - docker_proxy
+  # DjangoLux Composer agent end
+
+volumes:
+  postgres_data:
+  static:
+  dlux_runtime:
+  composer_agent_state:
+
+networks:
+  oldstack_internal:
+    internal: true
+  egress:
+    driver: bridge
+  docker_proxy:
+    internal: true

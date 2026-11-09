@@ -165,6 +165,8 @@ class AgentEnableHardensTests(unittest.TestCase):
         updated = _transform_compose(AGENT_ONLY_COMPOSE, "demo_project")
         self.assertEqual(updated, _transform_to_hardened(AGENT_ONLY_COMPOSE, "demo_project"))
         self.assertNotIn("POST: 1", updated)
+        # worker (stack schema 5) right after web, celery kept for project tasks.
+        self.assertEqual(updated.count('COMPOSER_AGENT_RESTART_SERVICES: "web,worker,celery,caddy"'), 2)
 
 
 class HardenedComposeValidityTests(unittest.TestCase):

@@ -1,0 +1,51 @@
+#!/bin/sh
+# dlux stack schema 4
+set -e
+
+until nc -z -v -w30 db 5432; do
+  echo "Waiting for database..."
+  sleep 1
+done
+
+# Do not serve against an unmigrated database. Compose applies migrations as
+# init containers (celery's pre_start) before that service starts; this gate is
+# the net for the path pre_start does NOT cover — Compose skips a step when the
+# container restarts under its restart policy, which is what a host reboot does.
+# It is also what lets `web` wait for the migrations themselves rather than
+# declaring a dependency on the service that applies them.
+#
+# Self-validating on purpose: `migrate --check` exits non-zero only while
+# unapplied migrations exist, so there is no readiness flag to set, clear, or
+# leave stale. Once they are applied it returns immediately and costs nothing.
+# Run under the supervisor so it evaluates the runtime-active release rather
+# than the copy baked into the image.
+# Three modes:
+#   off    - the pre_start steps that APPLY the migrations. A step inherits this
+#            entrypoint, so without it that container would wait on itself.
+#   apply  - the designated applier (celery). Waiting was not enough: Compose
+#            skips pre_start on a restart-policy restart, and then NOTHING
+#            applies while web and celery both wait, so the stack wedges until
+#            someone migrates by hand. The applier now applies.
+#   on     - everyone else. Wait; never apply, so only one service migrates.
+case "${DLUX_BOOT_GATE:-on}" in
+  off)
+    ;;
+  apply)
+    if ! python -m dlux.updater.supervisor --no-watch -- python manage.py migrate --check >/dev/null 2>&1; then
+      echo "Unapplied migrations and no pre_start ran - applying them here..."
+      python -m dlux.updater.supervisor --no-watch -- python manage.py dlux_reconcile || true
+      if ! python -m dlux.updater.supervisor --no-watch -- python manage.py migrate --noinput; then
+        echo "Migrations failed; refusing to serve against an unmigrated database." >&2
+        exit 1
+      fi
+    fi
+    ;;
+  *)
+    until python -m dlux.updater.supervisor --no-watch -- python manage.py migrate --check >/dev/null 2>&1; do
+      echo "Waiting for migrations (celery applies them)..."
+      sleep 2
+    done
+    ;;
+esac
+
+exec "$@"

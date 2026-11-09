@@ -14,6 +14,7 @@ from composer.watcher import WatchRuntime
 
 CONFIG = json.dumps({"services": {
     "web": {"labels": {"org.dlux.restart": "safe"}},
+    "worker": {"labels": {"org.dlux.restart": "safe"}},
     "celery": {"labels": {"org.dlux.restart": "safe"}},
     "db": {"labels": {"org.dlux.restart": "protected"}},
     "composer-agent": {"labels": {"org.dlux.restart": "protected"}},
@@ -22,6 +23,7 @@ CONFIG = json.dumps({"services": {
 }})
 PS = "\n".join(json.dumps(row) for row in (
     {"Service": "web", "State": "running", "Health": "healthy", "Status": "Up 2 hours (healthy)"},
+    {"Service": "worker", "State": "running", "Health": "healthy", "Status": "Up 2 hours (healthy)"},
     {"Service": "db", "State": "running", "Health": "healthy", "Status": "Up 2 hours"},
     {"Service": "metrics", "State": "running", "Health": "healthy", "Status": "Up 2 hours"},
     {"Service": "locked", "State": "running", "Health": "healthy", "Status": "Up 2 hours"},
@@ -63,7 +65,7 @@ class ServiceOpsTests(unittest.TestCase):
         patches = [
             patch("composer.launcher.DockerComposeLauncher.run_docker_compose", autospec=True, side_effect=self.compose),
             patch("composer.launcher.DockerComposeLauncher.resolve_active_compose_files", autospec=True),
-            patch.dict(os.environ, {"COMPOSER_AGENT_RESTART_SERVICES": "web,celery,db,metrics,locked"}),
+            patch.dict(os.environ, {"COMPOSER_AGENT_RESTART_SERVICES": "web,worker,celery,db,metrics,locked"}),
         ]
         for p in patches:
             p.start()
@@ -84,6 +86,7 @@ class ServiceOpsTests(unittest.TestCase):
         rows = {row["name"]: row for row in result["services"]}
         self.assertEqual(rows["web"]["state"], "running")
         self.assertTrue(rows["web"]["can_restart"])
+        self.assertTrue(rows["worker"]["can_restart"])
         self.assertEqual(rows["celery"]["state"], "absent")
         self.assertFalse(rows["db"]["can_restart"], "protected even when allow-listed")
         self.assertFalse(rows["composer-agent"]["can_restart"])
@@ -119,7 +122,7 @@ class ServiceOpsTests(unittest.TestCase):
         rows = {row['name']: row for row in self._ask('services')['services']}
         self.assertTrue(rows['metrics']['can_stop'])
         self.assertFalse(rows['metrics']['can_start'])
-        for name in ('web', 'celery', 'db', 'composer-agent', 'locked'):
+        for name in ('web', 'worker', 'celery', 'db', 'composer-agent', 'locked'):
             self.assertFalse(rows[name]['can_start'], name)
             self.assertFalse(rows[name]['can_stop'], name)
 

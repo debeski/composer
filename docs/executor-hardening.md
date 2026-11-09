@@ -177,9 +177,9 @@ So the halves each do what they can:
    deployment does not come back healthy — without one outbound connection.
 
 The digest travels over the socket rather than in a file beside the wheel because
-`celery` mounts that volume read-write too: a record kept next to the bytes is a
-record a planted wheel's author could write. Bytes may come from the volume; what
-they must hash to may not.
+`worker` and `celery` mount that volume read-write too: a record kept next to the
+bytes is a record a planted wheel's author could write. Bytes may come from the
+volume; what they must hash to may not.
 
 The agent still holds no Docker authority — it stages a file and asks. Exit 3
 ("rolled back and still unhealthy") crosses back unchanged, so a caller that

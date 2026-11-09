@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "version": "1.9.2",
-  "summary": "Security: `check` reports a proxy that serves stored files without authorization, and `check --fix` makes them private once DjangoLux is 1.15.3+.",
+  "version": "1.10.0b1",
+  "summary": "For DjangoLux 1.16: `check --fix` gives a stack DjangoLux's `worker` service (stack schema 5), and inline updates honour a release's required stack schema.",
   "highlights": [
-    "SECURITY: `composer check` fails a stack whose proxy serves every /media/ file without authorization (DjangoLux stacks generated before 1.15.3).",
-    "`composer check --fix` switches an unmodified generated proxy to private media (DjangoLux stack schema 4) once the running DjangoLux is 1.15.3 or later; it validates first and archives the originals.",
-    "Folders your site shows to signed-out visitors go in DjangoLux's DLUX_PUBLIC_MEDIA (or under media/public/) before running the fix."
+    "`composer check --fix` adds the `worker` service that runs DjangoLux 1.16's tasks (stack schema 5) once the stack's DjangoLux has it, and keeps `celery` for the project's own tasks.",
+    "A stack still on the old layout (`dlux-updater`, the `tools/` runtime) reaches stack schema 5 in one `check --fix`.",
+    "Inline DjangoLux updates, restarts, backups and the Operations panel know `worker`; a release that needs a newer stack schema is not installed inline."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.9.2"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.0b1"
 }

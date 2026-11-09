@@ -36,9 +36,11 @@ RETIRED_DEPLOYER_READ_CAP = "DAC_READ_SEARCH"
 # Socket-proxy switches that grant Docker write authority.
 PROXY_WRITE_SWITCHES = ("POST", "EXEC", "NETWORKS", "VOLUMES")
 # `ocr` (DjangoLux 1.15 OCR) is also startable/stoppable from the Operations panel.
-SAFE_RESTART_CANDIDATES = ("web", "celery", "smtp-relay", "caddy", "nginx", "ocr")
+# `worker` runs DjangoLux's tasks from stack schema 5; `celery` is project-only there.
+SAFE_RESTART_CANDIDATES = ("web", "worker", "celery", "smtp-relay", "caddy", "nginx", "ocr")
 RESTART_LABELS = {
     "web": "safe",
+    "worker": "safe",
     "celery": "safe",
     "smtp-relay": "safe",
     "ocr": "safe",
@@ -548,7 +550,8 @@ DLUX_UPDATER_START = "  # DjangoLux updater start"
 DLUX_UPDATER_END = "  # DjangoLux updater end"
 
 # The init containers a migrated stack gains, mirroring the 1.8.0 scaffold.
-# Declared on celery, not web: a pre_start step inherits its service's mounts and
+# Declared on worker (stack schema 5), else celery, never on web: a pre_start
+# step inherits its service's mounts and
 # dlux_reconcile writes the runtime pointer, which is read-only on web — there it
 # swallows the error and no-ops forever. DLUX_BOOT_GATE=off is required because a
 # step also inherits the entrypoint, whose gate waits on these very migrations.
@@ -587,25 +590,33 @@ def _drop_depends_on_entry(block: str, service: str) -> str:
     )
 
 
+def init_container_host(services) -> str:
+    """The service that carries DjangoLux's init containers: `worker` from stack
+    schema 5, `celery` before it."""
+    return "worker" if "worker" in services else "celery"
+
+
 def _transform_to_init_containers(contents: str, project_slug: str) -> str:
     """Retire the dlux-updater service in favour of Compose init containers.
 
     DjangoLux 1.8.0 hands update execution to Composer, which left that service
     with only boot work — runtime reconcile and migrations — and small JSON
-    writes the Celery beat schedule now carries. Both become `pre_start` steps on
-    celery, so Compose enforces the ordering and a failed migration stops the
-    stack instead of half-starting it.
+    writes the task schedule now carries. Both become `pre_start` steps on the
+    task service (`init_container_host`), so Compose enforces the ordering and a
+    failed migration stops the stack instead of half-starting it.
 
     A no-op when the stack has already been migrated, so `check --fix` may call
     it unconditionally.
     """
     services = _service_names(contents)
-    celery = _service_block_span(contents, "celery")
-    if celery is None:
+    host = init_container_host(services)
+    span = _service_block_span(contents, host)
+    if span is None:
         raise AgentInstallError(
-            "No 'celery' service found; the DjangoLux init containers have nowhere to run."
+            "No 'worker' or 'celery' service found; the DjangoLux init containers "
+            "have nowhere to run."
         )
-    if "dlux-updater" not in services and "    pre_start:" in contents[celery[0]:celery[1]]:
+    if "dlux-updater" not in services and "    pre_start:" in contents[span[0]:span[1]]:
         return contents
 
     updated = contents
@@ -644,12 +655,12 @@ def _transform_to_init_containers(contents: str, project_slug: str) -> str:
         stripped = re.sub(r"(?m)^    labels:[ \t]*\n(?=(?:^    \S|^  \S|\Z))", "", stripped)
         updated = updated[:web[0]] + stripped + updated[web[1]:]
 
-    span = _service_block_span(updated, "celery")
+    span = _service_block_span(updated, host)
     block = updated[span[0]:span[1]]
     if "    pre_start:" not in block:
         anchor = re.search(r"(?m)^    volumes:[ \t]*$", block)
         if not anchor:
-            raise AgentInstallError("The 'celery' service declares no volumes block.")
+            raise AgentInstallError(f"The '{host}' service declares no volumes block.")
         block = block[:anchor.start()] + DLUX_PRE_START_BLOCK + block[anchor.start():]
     # The steps write the runtime pointer and collect static.
     block = block.replace("dlux_runtime:/opt/dlux-runtime:ro", "dlux_runtime:/opt/dlux-runtime:rw")
@@ -672,19 +683,19 @@ def _ensure_environment_value(block: str, key: str, value: str) -> str:
 
 
 def _transform_dev_init_override(contents: str, project_slug: str) -> str:
-    """Normalize compose.dev.yml after dlux-updater moves to celery pre_start."""
+    """Normalize compose.dev.yml after dlux-updater moves to init containers."""
     updated = contents
     if "  dlux-updater:\n" in updated:
         from .stack_cleanup import remove_obsolete_service_blocks
 
         updated, _removed = remove_obsolete_service_blocks(updated, {"dlux-updater"})
     updated = _migrate_dlux_updater_command(updated, project_slug)
-    for service in ("web", "celery"):
+    for service in ("web", "worker", "celery"):
         span = _service_block_span(updated, service)
         if span is None:
             continue
         block = updated[span[0]:span[1]]
-        if service == "celery":
+        if service != "web":
             block = block.replace(
                 "dlux_runtime:/opt/dlux-runtime:ro",
                 "dlux_runtime:/opt/dlux-runtime:rw",
@@ -1219,12 +1230,14 @@ def migrate_dlux_init_containers(
     include_diff: bool = False,
     command_runner=subprocess.run,
 ) -> Dict[str, Any]:
-    """Retire dlux-updater in favour of Compose init containers on celery."""
+    """Retire dlux-updater in favour of Compose init containers on worker or celery."""
+    _root, _selected, compose_path = _selected_compose_path(project_dir, compose_file)
+    host = init_container_host(_service_names(compose_path.read_text(encoding="utf-8")))
     return _apply_stack_migration(
         project_dir,
         compose_file=compose_file,
         transform=_transform_to_init_containers,
-        redeploy_command="docker compose up -d --force-recreate celery web",
+        redeploy_command=f"docker compose up -d --force-recreate {host} web",
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,

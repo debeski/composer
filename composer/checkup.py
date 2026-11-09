@@ -8,7 +8,7 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from . import maintenance_migration, maintenance_page, media_migration
+from . import maintenance_migration, maintenance_page, media_migration, worker_migration
 from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -895,6 +895,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         self.compose_file = args.file
         self.dev_mode = args.dev
         self.resolve_active_compose_files()
+        self._worker_gate_cache = None
 
         # Before the diagnosis, so the checks below report the state the
         # operator asked for rather than the one they are leaving.
@@ -925,6 +926,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             results.append(self._check_stack_schema())
             results.append(self._check_maintenance_page())
             results.append(self._check_media_privacy())
+            worker = self._check_task_worker()
+            if worker is not None:
+                results.append(worker)
             results.append(self._check_versions())
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
@@ -1027,10 +1031,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 )
             except Exception:
                 needs_install = False
-        # Retire dlux-updater into Compose init containers on celery. Gated on
-        # the dlux the IMAGE ships: on an older release that service still owns
+        # Retire dlux-updater into Compose init containers on worker, or on celery
+        # before stack schema 5 (the worker step below then moves them). Gated
+        # on the dlux the IMAGE ships: on an older release that service still owns
         # the update path, and on Compose older than 5.3.0 `pre_start` is
         # silently ignored, which would leave the stack unmigrated on boot.
+        from .agent_installer import init_container_host
+
+        init_host = init_container_host(set(self.services))
         needs_init_containers = False
         init_containers_blocked = ""
         if "dlux-updater" in set(self.services):
@@ -1116,12 +1124,15 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         except Exception:
             needs_restart_labels = False
+        needs_worker, worker_blocked = self._worker_fix_plan(needs_init_containers, init_containers_blocked)
         if updater_migration_blocked:
             fixes.append(_result(WARN, "dlux-updater-runtime", updater_migration_blocked))
         if init_containers_blocked:
             fixes.append(_result(WARN, "dlux-init-containers", init_containers_blocked))
         if dev_override_blocked:
             fixes.append(_result(WARN, "dev-compose", dev_override_blocked))
+        if worker_blocked:
+            fixes.append(_result(WARN, "task-worker", worker_blocked))
         # An AHEAD wrapper is deliberately not fixable: the image is the stale
         # side there, and writing the baked copy would downgrade the project.
         stale_wrappers = [
@@ -1151,7 +1162,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
                 and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
-                and not needs_restart_labels and not needs_dev_override_migration and not media_exposed):
+                and not needs_restart_labels and not needs_dev_override_migration and not media_exposed
+                and not needs_worker):
             return fixes
         consequences = []
         if maintenance_legacy:
@@ -1211,8 +1223,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if needs_init_containers:
             consequences.append(
                 "Retire the dlux-updater service: its runtime reconcile and migrations "
-                "become Compose init containers (pre_start) on celery, its depends_on "
-                "edges are removed, celery gains write access to the runtime volume and "
+                f"become Compose init containers (pre_start) on {init_host}, its depends_on "
+                f"edges are removed, {init_host} gains write access to the runtime volume and "
                 "staticfiles, and web's org.dlux.post-start migrator hook is dropped "
                 "(it would now be a second, redundant run). The dlux_runtime volume and "
                 "its releases are kept."
@@ -1220,8 +1232,22 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if needs_dev_override_migration:
             consequences.append(
                 "Normalize compose.dev.yml for the init-container topology: remove the "
-                "development dlux-updater override, keep celery's dlux_runtime mount "
-                "read-write, and disable inline updates in dev containers."
+                "development dlux-updater override, keep the dlux_runtime mount of worker "
+                "and celery read-write, and disable inline updates in dev containers."
+            )
+        if needs_worker == "add":
+            consequences.append(
+                "Add DjangoLux's task worker (stack schema 5): copy celery, with its mounts and "
+                "environment, to a new 'worker' service that runs 'manage.py dlux_worker', and "
+                "move the init containers (dlux_reconcile, migrator) and DLUX_BOOT_GATE=apply "
+                "to it. celery stays for the project's own tasks. Add worker to "
+                "COMPOSER_AGENT_RESTART_SERVICES, mirror a compose.dev.yml celery override in "
+                "development, and restamp schema 4 files to 5. The next deploy starts worker."
+            )
+        elif needs_worker:
+            consequences.append(
+                "Finish stack schema 5: mirror the compose.dev.yml celery override for worker "
+                "in development, and bring the stack's schema stamps to 5."
             )
         if needs_install:
             consequences.append(
@@ -1440,7 +1466,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     ".", compose_file=args.file or "", apply=True)
                 fixes.append(_result(
                     OK, "fix:dlux-init-containers",
-                    "Retired dlux-updater into Compose init containers on celery. "
+                    f"Retired dlux-updater into Compose init containers on {init_host}. "
                     f"Apply with '{outcome.get('command')}'. Backup: "
                     + (outcome.get("backup_root") or "n/a"),
                 ))
@@ -1583,7 +1609,108 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:restart-labels", f"Restart-label repair failed: {exc}"))
+        # Last: it builds on what the steps above made of an older layout.
+        if needs_worker:
+            from .stack_cleanup import StackCleanupError
+
+            try:
+                outcome = worker_migration.migrate(
+                    ".", self._maintenance_compose_files(), environment=self.build_compose_env()
+                )
+                if needs_worker == "add":
+                    detail = (
+                        f"Added the worker service (stack schema 5): {', '.join(outcome['files'])}. "
+                        "Deploy to start it ('./start.sh', or './start.sh -d -b' in development)."
+                    )
+                else:
+                    detail = f"Brought the stack to schema 5: {', '.join(outcome['files'])}."
+                if outcome["notes"]:
+                    detail += " " + " ".join(outcome["notes"])
+                fixes.append(_result(OK, "fix:task-worker", f"{detail} Backup: {outcome['backup_root'] or 'n/a'}"))
+            except (OSError, StackCleanupError) as exc:
+                fixes.append(_result(FAIL, "fix:task-worker", str(exc)))
         return fixes
+
+    def _worker_gate(self) -> Tuple[bool, str]:
+        """``(ready, why not)``: may ``worker`` be added to this stack now?
+
+        Only once the stack's DjangoLux has ``dlux_worker``, or ``worker`` would
+        crash-loop: the running release, or in development (``-d``, built from
+        the project source) the version the project requires.
+        """
+        if getattr(self, "_worker_gate_cache", None) is not None:
+            return self._worker_gate_cache
+        floor = worker_migration.WORKER_FLOOR
+        minimum = ".".join(map(str, floor))
+        running = self._running_dlux_version()
+        self._worker_running = running
+        declared = worker_migration.declared_dlux(Path(".")) if getattr(self, "dev_mode", False) else None
+        if running is not None and tuple(running) >= floor:
+            gate = (True, "")
+        elif declared is not None and declared >= floor:
+            gate = (True, "")
+        else:
+            got = ".".join(map(str, running)) if running else "an unknown DjangoLux"
+            gate = (False, (
+                f"The stack runs {'DjangoLux ' + got if running else got}, which has no dlux_worker: "
+                f"'worker' is added once the project image is on DjangoLux {minimum} or later "
+                "(in development, once the project requires it)."
+            ))
+        self._worker_gate_cache = gate
+        return gate
+
+    def _worker_fix_plan(self, needs_init_containers: bool, init_containers_blocked: str) -> Tuple[str, str]:
+        """``(step, blocked)`` for ``check --fix``: step is ``"add"`` (worker),
+        ``"finish"`` (development override or stamps) or ``""``. Quiet on a stack
+        whose DjangoLux has no worker yet: nothing is wrong with it."""
+        pending = worker_migration.pending(".", self._maintenance_compose_files())
+        services = set(self.services)
+        if not pending["compose"]:
+            # The base file has worker: what is left is the development override
+            # or the stamps, neither of which needs the version gate.
+            finish = "worker" in services and (pending["dev"] or pending["stamp"])
+            return ("finish" if finish else ""), ""
+        ready, _why = self._worker_gate()
+        if not ready:
+            return "", ""
+        if "dlux-updater" in services:
+            if needs_init_containers:
+                return "add", ""
+            return "", (
+                "'worker' is added once 'dlux-updater' is retired into init containers"
+                + (f": {init_containers_blocked}" if init_containers_blocked else ".")
+            )
+        try:
+            preview = worker_migration.preview(".", self._maintenance_compose_files())
+        except Exception as exc:
+            return "", f"Cannot add the worker service: {exc}"
+        return ("add" if preview["files"] else ""), ""
+
+    def _check_task_worker(self) -> Optional[Dict[str, Any]]:
+        """Does DjangoLux have its ``worker`` service (stack schema 5)?"""
+        services = set(self.services)
+        if "worker" in services:
+            return _result(OK, "task-worker", "DjangoLux's tasks run in the worker service (stack schema 5).")
+        if "celery" not in services:
+            return None
+        ready, why = self._worker_gate()
+        running = self._worker_running
+        if ready and running is not None and tuple(running) >= worker_migration.WORKER_FLOOR:
+            return _result(
+                WARN,
+                "task-worker",
+                f"DjangoLux {'.'.join(map(str, running))} runs its tasks in a 'worker' service, which this "
+                "stack does not have, so they are queued and never run.",
+                fix="Run 'composer check --fix' to add it (stack schema 5), then deploy.",
+            )
+        if ready:
+            return _result(
+                OK,
+                "task-worker",
+                "No 'worker' service yet; the project requires a DjangoLux that runs its tasks there, so "
+                "'composer check --fix' adds it (stack schema 5). Rebuild with './start.sh -d -b' afterwards.",
+            )
+        return _result(OK, "task-worker", f"celery runs DjangoLux's tasks (stack schema 4 layout). {why}")
 
     @staticmethod
     def _print_checkup(results: List[Dict[str, Any]], fixes: List[Dict[str, Any]]):
