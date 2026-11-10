@@ -289,6 +289,79 @@ class AssessAndUnpackTests(unittest.TestCase):
         self.assertIn("unsafe path", str(ctx.exception))
 
 
+class StackSchemaRequirementTests(unittest.TestCase):
+    """`requires.stack_schema` (DjangoLux 1.16): the stack stamp a release needs.
+
+    `check --fix` migrates a stack; an inline update cannot. Below the floor the
+    release is reported but not installed inline, with the reason saying so.
+    """
+
+    @staticmethod
+    def _manifest(requirement=">=5", inline="allowed"):
+        return {
+            "schema_version": 2,
+            "version": "1.16.1",
+            "requires": {"stack_schema": requirement},
+            "migrations": {"effect": "none", "rollback_compatible": True},
+            "install": {"inline": inline},
+        }
+
+    def _normalize(self, stamp, **kwargs):
+        with patch("composer.stack_schema.deployment_schema", return_value=stamp):
+            return source.normalize_manifest(self._manifest(**kwargs), "1.16.1")
+
+    def test_the_key_is_understood(self):
+        self.assertIn("stack_schema", source.KNOWN_REQUIREMENT_KEYS)
+
+    def test_a_stack_at_the_floor_installs_inline(self):
+        manifest = self._normalize(5)
+        self.assertTrue(manifest["inline_safe"])
+        self.assertEqual(manifest["minimum_stack_schema"], 5)
+        self.assertNotIn("stack_schema_reason", manifest)
+
+    def test_an_older_stack_is_sent_to_check_fix(self):
+        manifest = self._normalize(4)
+        self.assertFalse(manifest["inline_safe"])
+        self.assertIn("needs stack schema 5 (this stack is on 4)", manifest["stack_schema_reason"])
+        self.assertIn("check --fix", manifest["stack_schema_reason"])
+
+    def test_an_unstamped_stack_is_below_every_floor(self):
+        manifest = self._normalize(None)
+        self.assertFalse(manifest["inline_safe"])
+        self.assertIn("unstamped", manifest["stack_schema_reason"])
+
+    def test_a_release_that_forbids_inline_says_to_rebuild_after(self):
+        manifest = self._normalize(4, inline="forbidden")
+        self.assertIn("then rebuild the project image", manifest["stack_schema_reason"])
+
+    def test_a_bare_number_is_a_floor_too(self):
+        self.assertTrue(self._normalize(5, requirement=5)["inline_safe"])
+
+    def test_an_invalid_requirement_is_refused(self):
+        for requirement in ("five", ">=0"):
+            with self.assertRaises(ReleaseSourceError):
+                self._normalize(5, requirement=requirement)
+
+    def test_assess_refuses_with_the_reason(self):
+        with TemporaryDirectory() as tmp:
+            wheel = Path(tmp) / "w.whl"
+            wheel.write_bytes(_wheel_bytes(manifest=self._manifest()))
+            candidate = ReleaseCandidate("1.16.1", wheel.name, "https://files.pythonhosted.org/w.whl", "a" * 64)
+            with patch("composer.stack_schema.deployment_schema", return_value=4), \
+                    self.assertRaises(ReleaseSourceError) as ctx:
+                source.assess(candidate, wheel)
+        self.assertIn("stack schema 5", str(ctx.exception))
+
+    def test_the_stamp_is_read_from_the_project_compose_file(self):
+        from composer import stack_schema
+
+        with TemporaryDirectory() as tmp:
+            self.assertIsNone(stack_schema.deployment_schema(tmp))
+            (Path(tmp) / "compose.yml").write_text('x-environment: &de\n  DLUX_STACK_SCHEMA: "5"\n')
+            self.assertEqual(stack_schema.deployment_schema(tmp), 5)
+
+
+
 if __name__ == "__main__":
     unittest.main()
 

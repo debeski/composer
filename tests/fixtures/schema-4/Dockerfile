@@ -1,0 +1,60 @@
+# Use Python 3.14 as per project standards
+FROM python:3.14-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Set work directory
+WORKDIR /app
+
+# Install system dependencies for Postgres and general tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    libffi-dev \
+    libssl-dev \
+    libjpeg-dev \
+    zlib1g-dev \
+    postgresql-client \
+    netcat-openbsd \
+    tzdata \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install python dependencies from requirements.txt
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# OCR models for the stack's `ocr` service (django-lux[ocr]), baked in so it runs
+# offline. Does nothing when requirements.txt leaves the `ocr` extra out.
+ENV INDRA_OCR_MODEL_DIR=/opt/indra/models
+RUN python -m dlux.ocr.fetch_models --if-installed
+
+# Surface the baked DjangoLux version as an image label so an external updater
+# (composer's preflight version gate) can refuse to recreate onto an image
+# older than the deployment's active runtime version. Passed at build time
+# (CI derives it from the pinned requirement); empty locally = gate skipped.
+ARG DLUX_BAKED_VERSION=""
+LABEL org.demo.dlux_baked_version="${DLUX_BAKED_VERSION}"
+
+# Optional project release notes for the image-update review dialog. CI should
+# pass `base64:<URL-safe-base64-JSON>` so build-tool quoting cannot corrupt it.
+ARG DLUX_PROJECT_RELEASE_MANIFEST=""
+LABEL org.dlux.project.release-manifest="${DLUX_PROJECT_RELEASE_MANIFEST}"
+
+# The stack contract schema this Dockerfile was generated for.
+LABEL org.dlux.stack-schema="4"
+
+# Copy the project files
+COPY . /app/
+
+# Create directories for volumes
+RUN mkdir -p /app/imports /app/logs /app/media /app/staticfiles
+
+# Make entrypoint script executable
+RUN chmod +x /app/entrypoint.sh
+
+# Entrypoint script handles migrations/waiting
+ENTRYPOINT ["/app/entrypoint.sh"]

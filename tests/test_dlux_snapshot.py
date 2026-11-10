@@ -176,10 +176,17 @@ class TakeSnapshotTests(unittest.TestCase):
         take_snapshot(launcher, "data")
         self.assertEqual(launcher.calls[0][2], "web")
 
+    def test_worker_takes_it_on_stack_schema_5(self):
+        """worker runs DjangoLux's tasks; a migrated stack's celery is project-only."""
+        for services in (("web", "worker"), ("web", "celery", "worker")):
+            launcher = _Launcher([(True, json.dumps({"ok": True, "token": "x"}), "")], services=services)
+            take_snapshot(launcher, "data")
+            self.assertEqual(launcher.calls[0][2], "worker", services)
+
     def test_no_service_to_back_up_in(self):
         ok, detail = take_snapshot(_Launcher([], services=("db",)), "data")
         self.assertFalse(ok)
-        self.assertIn("no celery or web service", detail)
+        self.assertIn("no worker, celery or web service", detail)
 
 
 class CliChoiceTests(unittest.TestCase):

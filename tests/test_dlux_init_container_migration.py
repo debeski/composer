@@ -11,7 +11,12 @@ import unittest
 
 import yaml
 
-from composer.agent_installer import AgentInstallError, _transform_to_init_containers
+from composer.agent_installer import (
+    AgentInstallError,
+    _transform_to_init_containers,
+    init_container_host,
+    migrate_dlux_init_containers,
+)
 
 DEPLOYED = """name: demoproj
 
@@ -257,6 +262,48 @@ class WithoutMarkersTests(unittest.TestCase):
 
         self.assertNotIn("dlux-updater", model["services"])
         self.assertIn("pre_start", model["services"]["celery"])
+
+
+class WorkerHostTests(unittest.TestCase):
+    """From stack schema 5 the init containers belong to `worker`, not celery."""
+
+    SOURCE = DEPLOYED.replace(
+        "  celery:\n",
+        """  worker:
+    image: ${WEB_IMAGE:-demoproj:latest}
+    command: ["python", "-m", "dlux.updater.supervisor", "--", "python", "manage.py", "dlux_worker"]
+    volumes:
+      - static:/app/staticfiles:ro
+      - dlux_runtime:/opt/dlux-runtime:ro
+    networks:
+      - internal
+
+  celery:
+""",
+        1,
+    )
+
+    def test_the_host_is_worker_when_the_stack_has_one(self):
+        self.assertEqual(init_container_host({"web", "worker", "celery"}), "worker")
+        self.assertEqual(init_container_host({"web", "celery"}), "celery")
+
+    def test_the_init_containers_land_on_worker(self):
+        services = yaml.safe_load(_migrate(self.SOURCE))["services"]
+
+        self.assertEqual(len(services["worker"]["pre_start"]), 2)
+        self.assertIn("dlux_runtime:/opt/dlux-runtime:rw", services["worker"]["volumes"])
+        self.assertNotIn("pre_start", services["celery"])
+        self.assertIn("dlux_runtime:/opt/dlux-runtime:ro", services["celery"]["volumes"])
+
+    def test_the_redeploy_hint_names_the_host(self):
+        import tempfile
+        from pathlib import Path
+
+        for source, host in ((DEPLOYED, "celery"), (self.SOURCE, "worker")):
+            with tempfile.TemporaryDirectory() as root:
+                (Path(root) / "compose.yml").write_text(source, encoding="utf-8")
+                outcome = migrate_dlux_init_containers(root)
+            self.assertEqual(outcome["command"], f"docker compose up -d --force-recreate {host} web")
 
 
 class RefusalTests(unittest.TestCase):

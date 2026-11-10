@@ -1,0 +1,34 @@
+# Development override for compose.yml
+# Usage: docker compose -f compose.yml -f compose.dev.yml up
+
+name: oldstack
+
+services:
+  dlux-updater:
+    build: .
+    image: !reset null
+    volumes: !override
+      - ./:/app:rw
+      - dlux_runtime:/opt/dlux-runtime:rw
+
+  web:
+    build: .
+    image: !reset null
+    volumes: !override
+      - ./:/app:rw
+      - static:/app/staticfiles:rw
+      - ./media/:/app/media/:rw
+      - ./logs/:/app/logs:rw
+      - dlux_runtime:/opt/dlux-runtime:ro
+    environment:
+      DEBUG_STATUS: "True"
+
+  celery:
+    build: .
+    image: !reset null
+    volumes: !override
+      - ./:/app:rw
+      - static:/app/staticfiles:rw
+      - ./media/:/app/media/:rw
+      - ./logs/:/app/logs:rw
+      - dlux_runtime:/opt/dlux-runtime:ro

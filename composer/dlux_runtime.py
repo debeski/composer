@@ -258,7 +258,8 @@ class DluxRuntime:
             raise DluxRuntimeError(str(exc)) from exc
         if not normalized.get("inline_safe"):
             raise DluxRuntimeError(
-                f"Release {version} may not be applied inline; refusing to activate it."
+                normalized.get("stack_schema_reason")
+                or f"Release {version} may not be applied inline; refusing to activate it."
             )
         return normalized
 

@@ -1,10 +1,12 @@
 """The egress relay: the agent makes the outbound calls, nothing else does.
 
-In a generated stack only ``composer-agent`` can reach the internet. ``web`` and
-``celery`` ask it, over the runtime volume, to perform a *named operation*:
+In a generated stack only ``composer-agent`` can reach the internet. The
+application services ask it, over the runtime volume, to perform a *named
+operation*. ``worker`` (stack schema 5) and ``celery`` mount the volume
+read-write, so they write requests; ``web`` mounts it read-only:
 
-    celery -> state/relay/requests/<uuid>.json
-    agent  -> state/relay/results/<uuid>.json      (web and celery read it)
+    worker, celery -> state/relay/requests/<uuid>.json
+    agent          -> state/relay/results/<uuid>.json   (web, worker and celery read it)
 
 The request names an operation and its parameters. It never carries a URL, a
 header or a command, so a compromised application can only ask for what an

@@ -326,6 +326,19 @@ class DevOverrideMigrationTests(unittest.TestCase):
         self.assertIn('      DLUX_INLINE_UPDATES_ENABLED: "False"', updated)
         self.assertEqual(_transform_dev_init_override(updated, "demo"), updated)
 
+    def test_dev_override_keeps_the_worker_runtime_writable_too(self):
+        from composer.agent_installer import _transform_dev_init_override
+
+        source = DEV_OVERRIDE_LEGACY.replace(
+            "  celery:\n",
+            "  worker:\n    build: .\n    volumes: !override\n      - dlux_runtime:/opt/dlux-runtime:ro\n\n  celery:\n",
+        )
+        updated = _transform_dev_init_override(source, "demo")
+        worker = updated.split("  worker:\n", 1)[1].split("\n\n", 1)[0]
+
+        self.assertIn("dlux_runtime:/opt/dlux-runtime:rw", worker)
+        self.assertIn('DLUX_INLINE_UPDATES_ENABLED: "False"', worker)
+
     def test_dev_override_apply_validates_the_merged_compose_candidate(self):
         from composer.agent_installer import migrate_dlux_dev_override
 

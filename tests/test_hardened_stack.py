@@ -71,6 +71,17 @@ class HardenedStackTests(unittest.TestCase):
         self.assertIn("cap_add:\n      - DAC_OVERRIDE\n", ex)
         self.assertNotIn("DAC_READ_SEARCH", self.block)
 
+    def test_restart_targets_follow_the_task_services_present(self):
+        """worker from stack schema 5, right after web; celery where it stays."""
+        cases = {
+            frozenset({"web", "celery", "db"}): "web,celery",
+            frozenset({"web", "worker", "celery", "db"}): "web,worker,celery",
+            frozenset({"web", "worker", "smtp-relay", "caddy", "ocr", "db"}): "web,worker,smtp-relay,caddy,ocr",
+        }
+        for services, expected in cases.items():
+            block = _hardened_stack("decrees", set(services), _topology())
+            self.assertEqual(block.count(f'COMPOSER_AGENT_RESTART_SERVICES: "{expected}"'), 2, expected)
+
     def test_proxy_image_is_pinned_by_digest(self):
         proxy = _section(self.block, "docker-socket-proxy")
         self.assertIn(f"image: {DOCKER_SOCKET_PROXY_IMAGE}\n", proxy)

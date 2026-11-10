@@ -71,6 +71,13 @@ class VolumeDiscoveryTests(unittest.TestCase):
         ]}}}
         self.assertEqual(access.find_runtime_volume(config, "/opt/dlux-runtime"), "")
 
+    def test_the_worker_mount_is_found_on_stack_schema_5(self):
+        config = {"services": {
+            "web": {"volumes": ["dlux_runtime:/opt/dlux-runtime:ro"]},
+            "worker": {"volumes": [{"type": "volume", "source": "dlux_runtime", "target": "/opt/dlux-runtime"}]},
+        }}
+        self.assertEqual(access.find_runtime_volume(config, "/opt/dlux-runtime"), "dlux_runtime")
+
     def test_short_string_mounts_are_read_too(self):
         config = {"services": {"celery": {"volumes": ["dlux_runtime:/opt/dlux-runtime:ro"]}}}
         self.assertEqual(access.find_runtime_volume(config, "/opt/dlux-runtime"), "dlux_runtime")

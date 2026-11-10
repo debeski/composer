@@ -200,6 +200,7 @@ def _dry_run_repairs(launcher, args):
             "note": "; ".join(str(w) for w in outcome.get("warnings") or [])[:MAX_MESSAGE_CHARS],
         })
     repairs.extend(_maintenance_repair(launcher))
+    repairs.extend(_worker_repair(launcher))
     return repairs, compose_digest(launcher)
 
 
@@ -216,6 +217,38 @@ def _maintenance_repair(launcher):
         return []
     return [{
         "name": "maintenance-page",
+        "files": outcome["files"],
+        "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
+        "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
+    }]
+
+
+def _worker_repair(launcher):
+    """The stack schema 5 `worker`, which `check --fix` adds outside agent_installer.
+
+    Shown only when `check --fix` would add it now. On a stack that still has
+    `dlux-updater` it follows that service's retirement, so it has no diff yet.
+    """
+    from . import worker_migration
+
+    if "dlux-updater" in set(getattr(launcher, "services", None) or []):
+        return []
+    compose_files = launcher._maintenance_compose_files()
+    pending = worker_migration.pending(".", compose_files)
+    if not any(pending.values()) or not hasattr(launcher, "_worker_fix_plan"):
+        return []
+    try:
+        needed, blocked = launcher._worker_fix_plan(False, "")
+        outcome = worker_migration.preview(".", compose_files) if needed else None
+    except Exception as exc:
+        blocked, outcome = str(exc), None
+    if blocked:
+        return [{"name": "task-worker", "files": [], "diff": "",
+                 "note": redact_text(blocked)[:MAX_MESSAGE_CHARS]}]
+    if not outcome or not outcome["files"]:
+        return []
+    return [{
+        "name": "task-worker",
         "files": outcome["files"],
         "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
         "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],

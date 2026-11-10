@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlparse
 
-from . import dlux_channel
+from . import dlux_channel, stack_schema
 from .version import read_composer_version
 from .versions import at_least, try_parse
 
@@ -47,9 +47,12 @@ SAFE_INLINE_EFFECTS = frozenset({"none", "state_only", "additive"})
 # 1.8.14, and until it appeared here every Composer rejected that manifest
 # outright. `migration_baseline` is informational to Composer (DjangoLux uses it
 # to warn that an update spans migrations an intermediate release introduced);
-# recognising it is what makes the release installable at all.
+# recognising it is what makes the release installable at all. `stack_schema`
+# (DjangoLux 1.16) is the stack schema stamp the release needs: below it the
+# release is not installed inline, because `check --fix` migrates a stack and an
+# inline update cannot.
 KNOWN_REQUIREMENT_KEYS = frozenset({
-    "baked_image", "updater_schema", "services", "migration_baseline",
+    "baked_image", "updater_schema", "services", "migration_baseline", "stack_schema",
 })
 
 _HREF_RE = re.compile(r'<a\s[^>]*href="([^"]+)"[^>]*>([^<]+)</a>', re.IGNORECASE)
@@ -294,6 +297,8 @@ def normalize_manifest(manifest, expected_version) -> dict:
             f"this deployment is running {composer_version}."
         )
 
+    stack_floor = _stack_schema_floor(requires.get("stack_schema"))
+
     migrations = manifest.get("migrations")
     install = manifest.get("install")
     if not isinstance(migrations, dict) or not isinstance(install, dict):
@@ -315,7 +320,37 @@ def normalize_manifest(manifest, expected_version) -> dict:
         and rollback_compatible
     )
     normalized["required_services"] = dict(services)
+    if stack_floor is not None:
+        normalized["minimum_stack_schema"] = stack_floor
+        stamp = stack_schema.deployment_schema()
+        if stamp is None or stamp < stack_floor:
+            normalized["inline_safe"] = False
+            on = f"this stack is on {stamp}" if stamp is not None else "this stack is unstamped"
+            then = "first" if inline == "allowed" else "then rebuild the project image"
+            normalized["stack_schema_reason"] = (
+                f"DjangoLux {expected_version} needs stack schema {stack_floor} ({on}): run "
+                f"'./start.sh check --fix' with Composer 1.10 or later, {then}."
+            )
     return normalized
+
+
+def _stack_schema_floor(value):
+    """``">=N"`` (or a bare N) as an integer, or None when not required."""
+    if value is None:
+        return None
+    try:
+        floor = int(str(value).strip().lstrip(">=").strip())
+    except ValueError as exc:
+        raise ReleaseSourceError("The release manifest has an invalid stack schema requirement.") from exc
+    if floor < 1:
+        raise ReleaseSourceError("The release manifest has an invalid stack schema requirement.")
+    return floor
+
+
+def _not_inline_reason(manifest, version) -> str:
+    return manifest.get("stack_schema_reason") or (
+        f"DjangoLux {version} requires a project image rebuild."
+    )
 
 
 def assess(candidate: ReleaseCandidate, wheel_path) -> dict:
@@ -326,6 +361,8 @@ def assess(candidate: ReleaseCandidate, wheel_path) -> dict:
     here, exactly as DjangoLux refuses it today.
     """
     manifest = normalize_manifest(read_wheel_manifest(wheel_path), candidate.version)
+    if manifest.get("stack_schema_reason"):
+        raise ReleaseSourceError(manifest["stack_schema_reason"])
     if not manifest["inline_safe"]:
         raise ReleaseSourceError(
             f"DjangoLux {candidate.version} requires a project image rebuild "
@@ -357,9 +394,7 @@ def describe(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
         "channel": dlux_channel.normalize_channel(channel),
         "prerelease": bool(try_parse(candidate.version) and try_parse(candidate.version).is_prerelease),
         "inline_safe": inline_safe,
-        "reason": "" if inline_safe else (
-            f"DjangoLux {candidate.version} requires a project image rebuild."
-        ),
+        "reason": "" if inline_safe else _not_inline_reason(manifest, candidate.version),
         "manifest": manifest,
     }
 

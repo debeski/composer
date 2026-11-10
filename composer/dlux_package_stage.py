@@ -10,9 +10,9 @@ private agent→executor socket and swaps the release in without a single outbou
 connection.
 
 The digest travels over the socket rather than in a file beside the wheel on
-purpose: `celery` mounts that volume read-write too, so a record kept on the
-volume is a record the planted wheel's author could write. Bytes may come from
-the volume; what they must hash to may not.
+purpose: `worker` and `celery` mount that volume read-write too, so a record kept
+on the volume is a record the planted wheel's author could write. Bytes may come
+from the volume; what they must hash to may not.
 """
 
 from __future__ import annotations

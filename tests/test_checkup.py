@@ -316,6 +316,15 @@ class InitContainerFixGatingTests(unittest.TestCase):
         fixes = self._fixes(services=["web", "celery", "dlux-updater", "composer-agent",
                                       "composer-executor"])
         self.assertIn("fix:dlux-init-containers", self._names(fixes))
+        retired = [f for f in fixes if f["name"] == "fix:dlux-init-containers"]
+        self.assertIn("init containers on celery", retired[0]["message"])
+
+    def test_a_stack_with_worker_gets_them_on_worker(self):
+        """Stack schema 5: worker carries the init containers, celery is project-only."""
+        fixes = self._fixes(services=["web", "worker", "celery", "dlux-updater", "composer-agent",
+                                      "composer-executor"])
+        retired = [f for f in fixes if f["name"] == "fix:dlux-init-containers"]
+        self.assertIn("init containers on worker", retired[0]["message"])
 
     def test_an_old_compose_plugin_blocks_it(self):
         """It would ignore pre_start and boot the stack unmigrated."""

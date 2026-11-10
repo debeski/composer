@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.10.0b1
+
+- **Stack Schema 5: DjangoLux's `worker` Service**: DjangoLux 1.16 runs its own tasks with `python manage.py dlux_worker` in a `worker` service. New `composer/worker_migration.py`, run by `composer check --fix` after every other step:
+  - copies `celery` to `worker` with the project's mounts, environment anchors, networks and dependencies;
+  - gives it the scaffold's command (under `dlux.updater.supervisor`), healthcheck (`dlux_worker --check`) and `stop_grace_period: 30s`;
+  - moves the `pre_start` init containers and `DLUX_BOOT_GATE: "apply"` to it, so `celery` stays for project tasks only: no init containers, gated like `web`, read-write runtime mount kept for relay requests;
+  - adds `worker` to `COMPOSER_AGENT_RESTART_SERVICES` after `web`, mirrors the `compose.dev.yml` celery override with `-d`, and restamps files stamped 4 to 5.
+
+  An unstamped `compose.yml` gets `DLUX_STACK_SCHEMA: "5"` once the stack meets schemas 2-4 (no `tools/` runtime, Composer's maintenance page, private stored files), so the old-layout stacks (dhub, dlux-panel, min-survey) reach 5 in one `check --fix`. The step runs only once the stack's DjangoLux has `dlux_worker` (running release 1.16+, or with `-d` the pinned `django-lux` requirement); before that it changes nothing, because `worker` would crash-loop. It validates the merged configuration with `docker compose config`, archives originals under `.xclude/composer-check/`, and recreates nothing. The migrated `worker` block is byte-identical to DjangoLux's schema 5 scaffold (`tests/test_worker_migration.py` compares them when a DjangoLux checkout is alongside).
+- **`task-worker` Check**: `composer check` warns when the running DjangoLux is 1.16+ and the stack has no `worker`, since its tasks are queued and never run. The Operations card's repair preview shows the migration's diff (`ops._worker_repair`).
+- **`requires.stack_schema` Release Requirement**: `stack_schema` joins `KNOWN_REQUIREMENT_KEYS` in `dlux_release_source`. A release whose floor is above the stack's stamp (`stack_schema.deployment_schema()`, read from the project's `compose.yml`) is reported with `inline_safe: false` and a reason that names `./start.sh check --fix`, and is refused by staging and activation. DjangoLux 1.16.0b1 ships `requires.stack_schema: ">=5"`, `requires.services.composer: ">=1.10.0b1"` and `install.inline: "forbidden"`.
+- **Services That Run DjangoLux Include `worker`**:
+  - `SAFE_RESTART_CANDIDATES` and `RESTART_LABELS` (`safe`) gain `worker` right after `web`.
+  - `dlux update`/`rollback` restart `web`, `worker` and `celery` by default, each only where the stack defines it (an explicit `--restart-service` or `COMPOSER_DLUX_RESTART_SERVICES` is used as given).
+  - The pre-update backup runs in `worker`, then `celery`, then `web`.
+  - The `dlux-updater` retirement puts the init containers on `worker` when the stack has one (`agent_installer.init_container_host`), and the dev override keeps `worker`'s runtime mount writable.
+- **Upgrade Order And Non-Interactive Fixes In The README**: the project image goes on DjangoLux 1.16 first (pull, or bump the pin and rebuild), then `check --fix`, then deploy; a development stack runs `./start.sh -d check --fix`, then `./start.sh -d -b`. Through `start.sh`/`start.ps1` a non-interactive `check --fix` needs `-y`, because the wrappers do not pass `COMPOSER_ASSUME_YES` into the deployer. The `stored-files` OK finding reads "(since stack schema 4)", so a schema 5 stack does not look like it is on 4.
+
 ## v1.9.2
 
 - **Stable 1.9.2 For DjangoLux 1.15.3: SECURITY (High Priority)**: Promote the published and accepted 1.9.2b2, which includes 1.9.2b1. `composer check` reports a proxy that serves stored files without authorization (`stored-files` FAIL; a hand-edited `/media/` section is a WARN). `composer check --fix` makes them private once DjangoLux is 1.15.3+ (validated, archived, proxy recreated) and exits 0 after fixing. Accepted on testbed-dlux 2026-10-31: the fix was refused on DjangoLux 1.15.1 and applied on 1.15.3b1; afterwards signed-out requests got 403 and signed-in ones 200, and with 1.9.2b2 `check --fix` exits 0. Paired with DjangoLux 1.15.3. No runtime changes from the beta.

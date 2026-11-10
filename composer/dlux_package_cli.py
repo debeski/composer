@@ -26,8 +26,10 @@ from .service_selection import parse_service_list
 
 DEFAULT_RUNTIME_ROOT = "/opt/dlux-runtime"
 # Services that load DjangoLux from the runtime volume and must pick up a new
-# release. `dlux-updater` is excluded on purpose (see the module docstring).
-DEFAULT_RESTART_SERVICES = ("web", "celery")
+# release, restarted where the stack defines them: `worker` from stack schema 5,
+# `celery` before it and, for project tasks, alongside it. `dlux-updater` is
+# excluded on purpose (see the module docstring).
+DEFAULT_RESTART_SERVICES = ("web", "worker", "celery")
 
 
 def parse_dlux_update_args(argv, *, action="update"):
@@ -55,7 +57,7 @@ def parse_dlux_update_args(argv, *, action="update"):
         parser.set_defaults(availability_file=None)
         parser.add_argument(
             "--restart-service", action="append", dest="restart_services", default=None,
-            metavar="SERVICE", help="Service to restart (repeatable; default: web, celery)",
+            metavar="SERVICE", help="Service to restart (repeatable; default: web, worker and celery, where defined)",
         )
     if action in {"update", "rollback"}:
         parser.add_argument(
@@ -246,20 +248,32 @@ def _utc_now() -> str:
 
 
 def _restart_services(args):
+    """``(services, explicit)``: the operator's list, else the defaults."""
     if args.restart_services:
-        return list(args.restart_services)
+        return list(args.restart_services), True
     configured = parse_service_list(os.environ.get("COMPOSER_DLUX_RESTART_SERVICES", ""))
-    return configured or list(DEFAULT_RESTART_SERVICES)
+    if configured:
+        return configured, True
+    return list(DEFAULT_RESTART_SERVICES), False
 
 
-def _build_operations(args, services):
-    """Return `(restart, health_check)` bound to a configured launcher."""
+def _build_operations(args, services, *, only_defined=False):
+    """Return `(restart, health_check)` bound to a configured launcher.
+
+    ``only_defined`` drops the services the stack does not define, so the
+    defaults fit a stack with `worker`, `celery` or both.
+    """
     from .launcher import DockerComposeLauncher
 
     launcher = DockerComposeLauncher()
     launcher.compose_file = args.file
     launcher.dev_mode = args.dev
     launcher.resolve_active_compose_files()
+    if only_defined:
+        config = launcher.compose_config_json() or {}
+        defined = config.get("services") if isinstance(config, dict) else None
+        if isinstance(defined, dict):
+            services = [name for name in services if name in defined]
     launcher.restart_mode = True
     launcher.restart_service = None
     launcher.restart_services = list(services)
@@ -389,7 +403,7 @@ def run_dlux_update(args, argv=None) -> int:
     if args.check:
         return run_availability_check(args, runtime)
 
-    services = _restart_services(args)
+    services, explicit = _restart_services(args)
 
     try:
         staged = _staged_source(args, runtime)
@@ -409,7 +423,7 @@ def run_dlux_update(args, argv=None) -> int:
         print(f"✔ {candidate.version} resolved and verified (dry run; nothing activated).")
         return 0
 
-    restart, health_check = _build_operations(args, services)
+    restart, health_check = _build_operations(args, services, only_defined=not explicit)
     progress = lambda message: print(f"⟳ {message}", flush=True)
     before_swap = _pre_update_backup(args)
 

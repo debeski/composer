@@ -407,10 +407,54 @@ class MigrationApplierRestartTests(unittest.TestCase):
         calls = self._restart(config)
         self.assertEqual(calls[0], ("recreate", []))
 
+    def _restart_defaults(self, config):
+        from composer import dlux_package_cli
+
+        services, explicit = dlux_package_cli._restart_services(_RestartArgs())
+        self.assertFalse(explicit)
+        calls = []
+        launcher = self._launcher(config, calls)
+        with unittest.mock.patch("composer.launcher.DockerComposeLauncher", return_value=launcher):
+            restart, _health = dlux_package_cli._build_operations(
+                _RestartArgs(), services, only_defined=not explicit)
+        ok, _detail = restart()
+        self.assertTrue(ok)
+        return calls
+
+    def test_on_schema_5_worker_applies_and_web_restarts(self):
+        """A stack generated on stack schema 5 has no celery to restart."""
+        config = {"services": {
+            "worker": {"pre_start": [{"command": ["sh", "-c", "python manage.py migrator"]}]},
+            "web": {}, "caddy": {},
+        }}
+        self.assertEqual(self._restart_defaults(config), [("recreate", ["worker"]), ("restart", ["web"])])
+
+    def test_a_migrated_stack_restarts_its_project_celery_too(self):
+        config = {"services": {
+            "worker": {"pre_start": [{"command": "python manage.py migrator"}]},
+            "celery": {}, "web": {},
+        }}
+        self.assertEqual(
+            self._restart_defaults(config), [("recreate", ["worker"]), ("restart", ["web", "celery"])]
+        )
+
+    def test_a_schema_4_stack_keeps_celery_as_the_applier(self):
+        config = {"services": {
+            "celery": {"pre_start": [{"command": "python manage.py migrator"}]}, "web": {},
+        }}
+        self.assertEqual(self._restart_defaults(config), [("recreate", ["celery"]), ("restart", ["web"])])
+
+    def test_an_operator_list_is_used_as_given(self):
+        from composer import dlux_package_cli
+
+        with unittest.mock.patch.dict("os.environ", {"COMPOSER_DLUX_RESTART_SERVICES": "web,metrics"}):
+            self.assertEqual(dlux_package_cli._restart_services(_RestartArgs()), (["web", "metrics"], True))
+
 
 class _RestartArgs:
     file = None
     dev = False
+    restart_services = None
 
 
 class PublishedAvailabilityTests(unittest.TestCase):

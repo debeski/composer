@@ -1,7 +1,7 @@
 """Reaching the DjangoLux runtime volume from a composer that cannot see it.
 
 ``/opt/dlux-runtime`` is a *container* path. The runtime volume is mounted there
-in `composer-executor`, `composer-agent`, `web` and `celery` — and nowhere else.
+in `composer-executor`, `composer-agent`, `web`, `worker` and `celery` — and nowhere else.
 A composer started from the project root (the `./start.sh` wrapper, or a native
 `python -m composer`) has no such mount, so `dlux update` failed with "No
 DjangoLux runtime volume" on every correctly deployed stack.

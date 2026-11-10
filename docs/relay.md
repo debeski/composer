@@ -1,17 +1,20 @@
 # The egress relay
 
 In a generated DjangoLux stack only `composer-agent` can reach the internet.
-`web` and `celery` ask it to make outbound calls, over the runtime volume, as
+The application services (`web`, `worker`, and `celery` where a project keeps it
+for its own tasks) ask it to make outbound calls, over the runtime volume, as
 *named operations*. This page is the agent's side of the contract; the project
 developer's side is `docs/outbound-requests.md` in the django-lux repository.
 
 ```
-celery  --requests/<uuid>.json-->  composer-agent  ---> internet
-web,celery  <--results/<uuid>.json--  composer-agent
+worker,celery      --requests/<uuid>.json-->  composer-agent  ---> internet
+web,worker,celery  <--results/<uuid>.json--   composer-agent
 ```
 
-Files live under `<runtime>/state/relay/`. `celery` mounts the volume read-write
-and `web` read-only, so only `celery` can write a request. The agent answers from
+Files live under `<runtime>/state/relay/`. `worker` and `celery` mount the volume
+read-write and `web` read-only, so only `worker` and `celery` can write a request.
+A stack before DjangoLux stack schema 5 has no `worker`; there `celery` writes
+them. The agent answers from
 the same loop that answers the Operations card (default poll: 2 s).
 
 ## Operations
@@ -84,7 +87,7 @@ sides cannot drift apart.
 
 | File | Written by | Purpose |
 | --- | --- | --- |
-| `requests/<uuid>.json` | celery | one request; `operation_id` equals the filename |
+| `requests/<uuid>.json` | worker or celery | one request; `operation_id` equals the filename |
 | `results/<uuid>.json` | agent | the answer, with `request_digest`; swept after 5 min |
 | `processed/` | agent | answered requests; swept after 1 h |
 | `public-key.json`, `capabilities.json`, `stats.json` | agent | key, what is available and why not, per-operation counters (never parameters) |
