@@ -16,6 +16,7 @@
   - `dlux update`/`rollback` restart `web`, `worker` and `celery` by default, each only where the stack defines it (an explicit `--restart-service` or `COMPOSER_DLUX_RESTART_SERVICES` is used as given).
   - The pre-update backup runs in `worker`, then `celery`, then `web`.
   - The `dlux-updater` retirement puts the init containers on `worker` when the stack has one (`agent_installer.init_container_host`), and the dev override keeps `worker`'s runtime mount writable.
+- **Upgrade Order And Non-Interactive Fixes In The README**: the project image goes on DjangoLux 1.16 first (pull, or bump the pin and rebuild), then `check --fix`, then deploy; a development stack runs `./start.sh -d check --fix`, then `./start.sh -d -b`. Through `start.sh`/`start.ps1` a non-interactive `check --fix` needs `-y`, because the wrappers do not pass `COMPOSER_ASSUME_YES` into the deployer. The `stored-files` OK finding reads "(since stack schema 4)", so a schema 5 stack does not look like it is on 4.
 
 ## v1.9.2
 

@@ -677,7 +677,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         if not state["files"]:
             return _result(OK, "stored-files", "No /media/ route in the proxy config.")
-        return _result(OK, "stored-files", "Stored files go through DjangoLux's access check (stack schema 4).")
+        return _result(OK, "stored-files", "Stored files go through DjangoLux's access check (since stack schema 4).")
 
     def _check_maintenance_page(self) -> Dict[str, Any]:
         """Composer publishes the page (stack schema 3); a legacy stack still serves
