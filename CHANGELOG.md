@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## v1.10.0b2
 
-- **`dlux rollback` Skips Releases The Image Would Shadow**: `rollback_package_update` takes a `baked_version` probe and drops staged releases at or below the DjangoLux baked into the project image, because DjangoLux's supervisor (`resolve_release`) runs a volume release only when it is strictly newer than the baked one. With nothing staged between the baked and active releases it returns to the image (`restore-image`, "Returning to the DjangoLux release baked into the image (X)"). The CLI's `_baked_version_probe` reads the version in a fresh `web` container (`docker compose run --rm --no-deps --entrypoint python`, `DLUX_BAKED_VERSION` else `dlux.__version__`, the supervisor's rule); an unreadable probe keeps the previous choice. Found on testbed-dlux: DjangoLux 1.16.0b2 active over an image baking 1.16.0b1, with 1.15.x still staged, printed "Activating DjangoLux 1.15.5b1" and pointed a schema-5 stack at a pre-1.16 release, while 1.16.0b1 is what ran.
+- **`dlux rollback` Skips Releases The Image Would Shadow**: DjangoLux's supervisor runs a staged release only when it is newer than the one baked into the project image, so `rollback_package_update(baked_version=)` drops staged releases at or below it and, with none left below the active release, returns to the image ("Returning to the DjangoLux release baked into the image (X)"). The CLI's `_baked_version_probe` reads the baked version in a fresh `web` container (`DLUX_BAKED_VERSION`, else `dlux.__version__`); if it cannot, rollback keeps the previous choice. Before, DjangoLux 1.16.0b2 over a 1.16.0b1 image rolled back to a staged 1.15.5b1 that never ran.
 
 ## v1.10.0b1
 
