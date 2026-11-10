@@ -43,6 +43,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
+  - [ ] `1.10/rollback_baked_floor` (committed, not pushed; owner OK for PR/release): `dlux rollback` skips staged releases at or below the image's baked DjangoLux (`_baked_version_probe` → `rollback_package_update(baked_version=)`). Found on testbed-dlux 2026-11-10: 1.16.0b2 over a 1.16.0b1 image said "Activating DjangoLux 1.15.5b1". Not yet run live.
   - [x] Paired 1.9.1b2 with DjangoLux 1.15.2b2: both tagged and published 2026-10-30, accepted on testbed-dlux (see snapshot).
   - [ ] A pinned `dlux update --version X` right after X is published fails "not published" while PyPI's CDN serves a stale simple index (seen 2026-10-09 with 1.11.0b6); the stale-index re-read only covers unpinned updates. Retry pinned resolution the same way.
   - [ ] TAG THE REHEARSAL: `v1.3.14b1` must be published BEFORE Dlux `v1.8.14b1` — that manifest requires `>=1.3.14b1`. Nothing pushed yet. Then verify `:beta` and `:v1.3.14b1` both appear and `:latest` did NOT move.
@@ -71,16 +72,15 @@
   - [x] v1.3.8 released: schema-2 DjangoLux manifests enforce inline install safety, migration rollback compatibility, supported service requirements, and the Composer version floor.
   - [x] v1.3.6: missing-label DLUX compatibility migrator + guarded label repair; post-start uses `exec -T`, streams progress, and fails the run; direct `migrate` subcommand with service/arg passthrough. +9 tests.
 ### One-line info about last verified Tests:
+- 2026-11-10: `1.10/rollback_baked_floor` suite 982 OK (13 skips, django-lux main venv for packaging/pyyaml); the probe script printed 1.16.0b1 from `testbed-dlux-app:2.2.0-dlux-1.16.0b1-pypi`, same as DjangoLux's `baked_version()`.
 - 2026-11-10: `1.10/dlux_worker` suite 974 OK (15 skips; the new `docker compose config` and DjangoLux-scaffold comparisons ran locally, Compose 5.6.1). One real `-d check --fix` on the old-layout fixture (scratch copy, version reads faked) reached schema 5. Image smoke test left to PR CI.
 - 2026-10-30: 1.9.1b2 PR9 CI 41019288934 PASS: 896 OK/11 skips incl. 9 `start.ps1` deployer tests on Ubuntu pwsh; Docker/runtime smoke in the same CI run.
 - 2026-09-30: 1.5.4b1 — suite 709 OK (6 skips) in a venv with packaging/pyyaml/pypi-attestations; local image has buildx v0.37.1, and a buildx build created no per-step containers.
 - 2026-09-25: 1.5.3 on `testbed-dlux` — b2 local build then published: unpinned `dlux update` resolves beta 1.9.4b1 / stable 1.9.3 by policy, the agent->executor handoff applied 1.9.4b1 (ack exit 0); stable 1.5.3 installed stable 1.9.4 over 1.9.3. Suite 705/709 (4 need a Docker CLI in the container).
-- 2026-09-24: the card-driven `agent-update` ran against PUBLISHED images for the first time — rig on 1.5.2b1, card offered 1.5.2 from `:beta`, the executor's detached helper pulled and recreated both containers and wrote its own ack (exit 0, 164s). Resident is 1.5.2, `deployer_version` reads 1.5.2b1 (the helper that performed it), and a re-check answers "the beta channel's current version".
-- 2026-09-24: 1.5.2b1 published to `:beta`; the decrees rig was put back on published 1.5.1, then host-updated to `:beta` from the registry (resident 1.5.2b1, deployer 1.5.1 published in agent-status). From there DjangoLux's card ran `agent-check` (tick: resident == the beta channel's current version) and the deployment check (15/15 OK). 701 tests OK.
 ### One-line info about last time edited Docs:
+- 2026-11-10: `1.10/rollback_baked_floor`: README `dlux rollback` target rule; CHANGELOG `## Unreleased`.
 - 2026-11-10: README (schema 5 `worker` fix and its upgrade order, `-y` through the wrappers, `dlux update` defaults, `requires.stack_schema`), docs/relay.md, agent-protocol-v1.md, executor-hardening.md; CHANGELOG v1.10.0b1.
 - 2026-10-30: `1.9/availability_notes`: README `dlux check` paragraph + CHANGELOG 1.9.1b2 document the report's `display` notes.
-- 2026-10-30: CHANGELOG 1.9.1b2; README migration uses `self update` for pre-wrapper-5 stacks; RELEASING drops per-release action pins.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

@@ -395,6 +395,48 @@ def _pre_update_backup(args):
     return snapshot
 
 
+# How DjangoLux's supervisor names the baked release: `DLUX_BAKED_VERSION`, else
+# the image package's own version (`dlux.updater.supervisor.runtime_environment`).
+BAKED_VERSION_SCRIPT = (
+    "import os, dlux; print(os.environ.get('DLUX_BAKED_VERSION') or dlux.__version__)"
+)
+
+
+def _baked_version_probe(args):
+    """``() -> str`` for the rollback: the DjangoLux baked into the project image.
+
+    The runtime volume cannot answer this: it records the baked version only
+    while the image copy is in force. A fresh `web` container started with
+    `run --no-deps` and a plain `python` entrypoint has no supervisor, so no
+    volume release on its path; it works while web is down and never starts db
+    or redis. Any failure reads as ``''`` (unknown), never as an error.
+    """
+
+    def probe() -> str:
+        from .launcher import DockerComposeLauncher
+        from .versions import try_parse
+
+        try:
+            launcher = DockerComposeLauncher()
+            launcher.compose_file = args.file
+            launcher.dev_mode = args.dev
+            launcher.resolve_active_compose_files()
+            launcher.resolve_secrets()
+            ok, out, _err = launcher.run_docker_compose(
+                ["run", "--rm", "--no-deps", "--entrypoint", "python", "-T",
+                 "web", "-c", BAKED_VERSION_SCRIPT],
+                timeout=60,
+            )
+        except Exception:
+            return ""
+        lines = [line.strip() for line in str(out or "").splitlines() if line.strip()]
+        if not ok or not lines or try_parse(lines[-1]) is None:
+            return ""
+        return lines[-1]
+
+    return probe
+
+
 def run_dlux_update(args, argv=None) -> int:
     runtime = DluxRuntime(args.runtime_root)
     if not runtime.exists():
@@ -430,7 +472,7 @@ def run_dlux_update(args, argv=None) -> int:
     if args.mode == "rollback":
         result = rollback_package_update(
             runtime, restart=restart, health_check=health_check, progress=progress,
-            before_swap=before_swap,
+            before_swap=before_swap, baked_version=_baked_version_probe(args),
         )
     else:
         result = apply_package_update(

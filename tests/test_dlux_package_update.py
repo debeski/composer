@@ -305,6 +305,144 @@ class RollbackTests(_Base):
         self.assertTrue(result.critical)
 
 
+class RollbackBakedFloorTests(_Base):
+    """A volume release runs only when it is newer than the image's own DjangoLux.
+
+    DjangoLux's supervisor (`resolve_release`) ignores a volume release at or
+    below the baked version. Seen on testbed-dlux: 1.16.0b2 active over an image
+    baking 1.16.0b1, with 1.15.x releases still staged, and the rollback said
+    "Activating DjangoLux 1.15.5b1" while 1.16.0b1 is what came up.
+    """
+
+    def _rollback(self, baked):
+        ops = _Ops()
+        said = []
+        probes = []
+
+        def baked_version():
+            probes.append(baked)
+            return baked
+
+        result = rollback_package_update(
+            self.runtime, restart=ops.restart, health_check=ops.health,
+            progress=said.append, baked_version=baked_version,
+        )
+        return result, said, probes
+
+    def test_staged_releases_below_the_baked_image_give_way_to_the_image(self):
+        for version in ("1.15.4", "1.15.4b4", "1.15.5b1", "1.16.0b2"):
+            self._stage(version)
+        self.runtime.activate("1.16.0b2")
+
+        result, said, _probes = self._rollback("1.16.0b1")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(self.runtime.read_active(), {}, "back to the image, not onto 1.15.5b1")
+        self.assertIn("restore-image", result.steps)
+        self.assertNotIn("activating", result.steps)
+        self.assertIn("Returning to the DjangoLux release baked into the image (1.16.0b1)", said)
+        self.assertFalse([line for line in said if "1.15.5b1" in line])
+
+    def test_the_release_equal_to_the_baked_one_is_not_a_target(self):
+        self._stage("1.16.0b1")
+        self._stage("1.16.0b2")
+        self.runtime.activate("1.16.0b2")
+
+        result, _said, _probes = self._rollback("1.16.0b1")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(self.runtime.read_active(), {})
+
+    def test_a_release_between_the_baked_and_active_ones_is_still_chosen(self):
+        for version in ("1.15.5b1", "1.16.0b2", "1.16.0b3"):
+            self._stage(version)
+        self.runtime.activate("1.16.0b3")
+
+        result, said, _probes = self._rollback("1.16.0b1")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(self.runtime.read_active()["version"], "1.16.0b2")
+        self.assertIn("Activating DjangoLux 1.16.0b2", said)
+
+    def test_an_unknown_baked_version_keeps_the_newest_release_below_the_active_one(self):
+        self._stage("1.15.5b1")
+        self._stage("1.16.0b2")
+        self.runtime.activate("1.16.0b2")
+
+        result, said, _probes = self._rollback("")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(self.runtime.read_active()["version"], "1.15.5b1")
+        self.assertTrue([line for line in said if line.startswith("Could not read it")])
+
+    def test_the_image_is_not_probed_when_nothing_is_staged_below_the_active_release(self):
+        self._stage("1.16.0b2")
+        self.runtime.activate("1.16.0b2")
+
+        result, _said, probes = self._rollback("1.16.0b1")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(probes, [])
+        self.assertEqual(self.runtime.read_active(), {})
+
+
+class BakedVersionProbeTests(unittest.TestCase):
+    """`dlux rollback` reads the baked DjangoLux from the image, not the volume."""
+
+    def _probe(self, result=None, error=None):
+        from composer import dlux_package_cli
+        from composer.launcher import DockerComposeLauncher
+
+        calls = []
+        launcher = DockerComposeLauncher()
+        launcher.resolve_active_compose_files = lambda: None
+        launcher.resolve_secrets = lambda: (True, "")
+
+        def run_docker_compose(args, timeout=None):
+            calls.append(list(args))
+            if error:
+                raise error
+            return result
+
+        launcher.run_docker_compose = run_docker_compose
+        with unittest.mock.patch("composer.launcher.DockerComposeLauncher", return_value=launcher):
+            return dlux_package_cli._baked_version_probe(_RestartArgs())(), calls
+
+    def test_reads_the_version_from_a_fresh_web_container(self):
+        version, calls = self._probe((True, "1.16.0b1\n", ""))
+
+        self.assertEqual(version, "1.16.0b1")
+        self.assertEqual(calls[0][:5], ["run", "--rm", "--no-deps", "--entrypoint", "python"])
+        self.assertIn("web", calls[0])
+        self.assertIn("DLUX_BAKED_VERSION", calls[0][-1])
+
+    def test_a_failed_or_unreadable_probe_is_unknown(self):
+        self.assertEqual(self._probe((False, "", "no such service: web"))[0], "")
+        self.assertEqual(self._probe((True, "Traceback (most recent call last)\n", ""))[0], "")
+        self.assertEqual(self._probe(error=OSError("docker is not running"))[0], "")
+
+    def test_the_rollback_command_hands_the_probe_to_the_rollback(self):
+        from composer import dlux_package_cli
+        from composer.dlux_package_cli import parse_dlux_update_args, run_dlux_update
+
+        with TemporaryDirectory() as tmp:
+            DluxRuntime(tmp).state_dir.mkdir(parents=True)
+            args = parse_dlux_update_args(
+                ["--runtime-root", tmp, "--backup", "skip"], action="rollback"
+            )
+            done = unittest.mock.Mock(ok=True, critical=False, message="Rolled back.")
+            with (
+                unittest.mock.patch.object(dlux_package_cli, "_build_operations",
+                                           return_value=(lambda: (True, ""), lambda: (True, ""))),
+                unittest.mock.patch.object(dlux_package_cli, "rollback_package_update",
+                                           return_value=done) as rollback,
+                unittest.mock.patch.object(dlux_package_cli, "_publish"),
+            ):
+                self.assertEqual(run_dlux_update(args, []), 0)
+
+        self.assertTrue(callable(rollback.call_args.kwargs["baked_version"]))
+
+
 class PruneTests(_Base):
     def test_prunes_oldest_but_never_the_active_or_protected_release(self):
         for version in ("1.5.0", "1.6.0", "1.7.0", "1.7.1", "1.8.0"):

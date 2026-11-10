@@ -236,10 +236,14 @@ def rollback_package_update(
     health_check: Callable[[], tuple],
     progress: Optional[Callable[[str], None]] = None,
     before_swap: Optional[Callable[[], tuple]] = None,
+    baked_version: Optional[Callable[[], str]] = None,
 ) -> PackageUpdateResult:
     """Operator-requested rollback to the newest staged release below the active one.
 
     ``before_swap`` is the pre-rollback backup, taken before the pointer moves.
+    ``baked_version`` (``() -> str``, ``''`` when unknown) reads the DjangoLux
+    version baked into the project image; it is called only when a staged
+    release is a candidate.
     """
     say = progress or _noop
     steps: List[str] = []
@@ -257,6 +261,21 @@ def rollback_package_update(
         version for version in runtime.staged_versions()
         if version_sort_key(version) < version_sort_key(current)
     ]
+    baked = ""
+    if targets and baked_version is not None:
+        say("Reading the DjangoLux version baked into the image")
+        baked = baked_version()
+        if baked:
+            # DjangoLux's supervisor runs a volume release only when it is
+            # strictly newer than the baked copy (`resolve_release`). Anything
+            # at or below it would be activated and never run: the image's
+            # release is the real rollback target then.
+            targets = [
+                version for version in targets
+                if version_sort_key(version) > version_sort_key(baked)
+            ]
+        else:
+            say("Could not read it; choosing among every staged release below the active one")
     if before_swap is not None:
         steps.append("backing-up")
         say("Taking a pre-rollback DjangoLux backup")
@@ -268,9 +287,11 @@ def rollback_package_update(
         say(backup_detail)
 
     if not targets:
-        # Nothing below the active release: fall back to the image copy.
+        # No staged release that would run below the active one: fall back to
+        # the image copy.
         steps.append("restore-image")
-        say("Returning to the DjangoLux release baked into the image")
+        say("Returning to the DjangoLux release baked into the image"
+            + (f" ({baked})" if baked else ""))
         runtime.restore({})
     else:
         target = targets[-1]
