@@ -43,7 +43,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] `1.10/rollback_baked_floor` (committed, not pushed; owner OK for PR/release): `dlux rollback` skips staged releases at or below the image's baked DjangoLux (`_baked_version_probe` → `rollback_package_update(baked_version=)`). Found on testbed-dlux 2026-11-10: 1.16.0b2 over a 1.16.0b1 image said "Activating DjangoLux 1.15.5b1". Not yet run live.
+  - [ ] `1.10/rollback_baked_floor` (PR #19 open, unmerged; ships in the next Composer beta with the owner's OK): `dlux rollback` skips staged releases at or below the image's baked DjangoLux (`_baked_version_probe` → `rollback_package_update(baked_version=)`). Found on testbed-dlux 2026-11-10: 1.16.0b2 over a 1.16.0b1 image said "Activating DjangoLux 1.15.5b1". Not yet run live.
   - [x] Paired 1.9.1b2 with DjangoLux 1.15.2b2: both tagged and published 2026-10-30, accepted on testbed-dlux (see snapshot).
   - [ ] A pinned `dlux update --version X` right after X is published fails "not published" while PyPI's CDN serves a stale simple index (seen 2026-10-09 with 1.11.0b6); the stale-index re-read only covers unpinned updates. Retry pinned resolution the same way.
   - [ ] TAG THE REHEARSAL: `v1.3.14b1` must be published BEFORE Dlux `v1.8.14b1` — that manifest requires `>=1.3.14b1`. Nothing pushed yet. Then verify `:beta` and `:v1.3.14b1` both appear and `:latest` did NOT move.
