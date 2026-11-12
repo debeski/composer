@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "version": "1.10.0b1",
+  "version": "1.10.0b2",
   "summary": "For DjangoLux 1.16: `check --fix` gives a stack DjangoLux's `worker` service (stack schema 5), and inline updates honour a release's required stack schema.",
   "highlights": [
     "`composer check --fix` adds the `worker` service that runs DjangoLux 1.16's tasks (stack schema 5) once the stack's DjangoLux has it, and keeps `celery` for the project's own tasks.",
     "A stack still on the old layout (`dlux-updater`, the `tools/` runtime) reaches stack schema 5 in one `check --fix`.",
-    "Inline DjangoLux updates, restarts, backups and the Operations panel know `worker`; a release that needs a newer stack schema is not installed inline."
+    "Inline DjangoLux updates, restarts, backups and the Operations panel know `worker`; a release that needs a newer stack schema is not installed inline.",
+    "`dlux rollback` no longer picks a staged DjangoLux release at or below the one baked into the project image, which would never run; it returns to the image's release instead."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.0b1"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.0b2"
 }
