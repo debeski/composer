@@ -17,14 +17,22 @@ proxy. Callers run it only once the running DjangoLux has the endpoint
 
 from __future__ import annotations
 
-import difflib
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
-from .stack_schema import STAMPED_FILES, read_stamp, restamp
+from .stack_schema import (
+    STAMPED_FILES,
+    preview_diff,
+    read_stamp,
+    restamp,
+    restamp_secrets,
+    secrets_file,
+    secrets_note,
+    write_updates,
+)
 from .stack_cleanup import (
     StackCleanupError,
     _active_proxy_mounts,
@@ -212,6 +220,7 @@ def _plan(project_root: Path, compose_files: Sequence[str]):
             text = updates.get(path, path.read_text(encoding="utf-8"))
             if read_stamp(text) == LEGACY_SCHEMA:
                 updates[path] = restamp(text, TARGET_SCHEMA)
+        restamp_secrets(project_root, updates, LEGACY_SCHEMA, TARGET_SCHEMA)
     return sources, updates
 
 
@@ -221,18 +230,14 @@ def preview(project_dir: str, compose_files: Sequence[str]) -> Dict[str, Any]:
     _sources, updates = _plan(project_root, compose_files)
     if not updates:
         return {"files": [], "diff": "", "note": ""}
-    diff = "".join(
-        "".join(difflib.unified_diff(
-            path.read_text(encoding="utf-8").splitlines(keepends=True),
-            updates[path].splitlines(keepends=True),
-            fromfile=f"a/{name}", tofile=f"b/{name}",
-        ))
-        for name, path in sorted((str(path.relative_to(project_root)), path) for path in updates)
-    )
+    secrets = secrets_note(project_root, updates, TARGET_SCHEMA)
     return {
         "files": sorted(str(path.relative_to(project_root)) for path in updates),
-        "diff": diff,
-        "note": "The proxy config is validated first; the proxy is then recreated so it reads it.",
+        "diff": preview_diff(project_root, updates),
+        "note": " ".join(
+            ["The proxy config is validated first; the proxy is then recreated so it reads it."]
+            + ([secrets] if secrets else [])
+        ),
     }
 
 
@@ -257,7 +262,10 @@ def migrate(
         raise StackCleanupError("Docker is required to validate the migrated proxy configuration.")
 
     model = _compose_model(command_runner, project_root, sources, environment, "Original configuration")
-    proxy_updates = {path: text for path, text in updates.items() if path not in sources}
+    secrets = secrets_file(project_root)
+    proxy_updates = {
+        path: text for path, text in updates.items() if path not in sources and path != secrets
+    }
     mounts = _active_proxy_mounts(model, project_root, proxy_updates)
     staged: Dict[Path, Path] = {}
     try:
@@ -273,13 +281,7 @@ def migrate(
 
     archive = _archive_root(project_root)
     result["backup_root"] = str(archive)
-    for path in updates:
-        destination = archive / "media-migration" / path.relative_to(project_root)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
-    for path, text in updates.items():
-        with path.open("w", encoding="utf-8", newline="\n") as stream:
-            stream.write(text)
+    write_updates(project_root, updates, archive / "media-migration")
 
     running = _running_services(command_runner, project_root, sources, environment)
     services = model.get("services") if isinstance(model.get("services"), dict) else {}

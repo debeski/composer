@@ -186,6 +186,31 @@ class MigrateTests(unittest.TestCase):
         self.assertIn("Dockerfile", outcome["files"])
         self.assertNotIn("gunicorn.py", outcome["files"])
 
+    def test_a_stamped_secrets_file_is_restamped_in_place_and_never_staged(self):
+        for target in ("compose.yml", ".proxy/Caddyfile"):
+            path = self.root / target
+            path.write_text(path.read_text(encoding="utf-8").replace("{{ stack_schema }}", "2"), encoding="utf-8")
+        env = self.root / ".secrets" / ".env"
+        env.parent.mkdir()
+        data = b"# dlux stack schema 2\nDJANGO_SECRET_KEY=test-secret-value-9f3c\n"
+        env.write_bytes(data)
+        self.assertNotIn("test-secret-value-9f3c", str(mm.preview(str(self.root), ["compose.yml"])))
+
+        staged = {}
+        validate = mm._validate_proxy_candidates
+
+        def capture(*args):
+            staged.update(args[-1])
+            return validate(*args)
+
+        with patch("composer.maintenance_migration._validate_proxy_candidates", side_effect=capture):
+            outcome = self._migrate()
+
+        self.assertIn(".secrets/.env", outcome["files"])
+        self.assertEqual(env.read_bytes(), data.replace(b"schema 2", b"schema 3", 1))
+        self.assertNotIn(env, staged, "the secrets are never written to a proxy candidate")
+        self.assertFalse((Path(outcome["backup_root"]) / "maintenance-migration" / ".secrets").exists())
+
     def test_a_migrated_stack_is_left_alone(self):
         self._migrate()
         self.docker.calls.clear()

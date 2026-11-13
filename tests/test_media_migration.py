@@ -118,6 +118,30 @@ class PlanTests(unittest.TestCase):
         self.assertIn("# dlux stack schema 4", by_name["Caddyfile"])
         self.assertIn('DLUX_STACK_SCHEMA: "4"', by_name["compose.yml"])
 
+    def test_a_stamped_secrets_file_is_restamped_but_never_staged_or_copied(self):
+        env = self.root / ".secrets" / ".env"
+        env.parent.mkdir()
+        data = b"# dlux stack schema 3\r\nDJANGO_SECRET_KEY=test-secret-value-9f3c\r\n"
+        env.write_bytes(data)
+        preview = media.preview(str(self.root), ["compose.yml"])
+        self.assertIn(".secrets/.env", preview["files"])
+        self.assertIn(".secrets/.env is restamped 4", preview["note"])
+        self.assertNotIn("test-secret-value-9f3c", preview["diff"] + preview["note"])
+
+        staged = {}
+        with patch("composer.media_migration.shutil.which", return_value="/usr/bin/docker"), \
+                patch("composer.media_migration._compose_model", return_value={"services": {}}), \
+                patch("composer.media_migration._active_proxy_mounts", return_value={}), \
+                patch("composer.media_migration._validate_proxy_candidates",
+                      side_effect=lambda *args: staged.update(args[-1])), \
+                patch("composer.media_migration._running_services", return_value=set()):
+            outcome = media.migrate(str(self.root), ["compose.yml"])
+
+        self.assertEqual(env.read_bytes(), data.replace(b"schema 3", b"schema 4", 1))
+        self.assertIn((self.root / ".proxy" / "Caddyfile").resolve(), staged)
+        self.assertNotIn(env.resolve(), staged, "the secrets are never written to a proxy candidate")
+        self.assertFalse((Path(outcome["backup_root"]) / "media-migration" / ".secrets").exists())
+
     def test_preview_writes_nothing(self):
         before = (self.root / ".proxy" / "Caddyfile").read_text(encoding="utf-8")
         result = media.preview(str(self.root), ["compose.yml"])
