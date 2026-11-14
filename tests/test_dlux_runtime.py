@@ -131,6 +131,59 @@ class StagingTests(unittest.TestCase):
         self.assertIn("health check failed", (moved / "quarantine-reason.txt").read_text())
 
 
+class QuarantineRecordTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.runtime = DluxRuntime(self.root / "dlux-runtime")
+        self.addCleanup(self._tmp.cleanup)
+
+    def _quarantine(self, version, reason="health check failed"):
+        self.runtime.stage_release(version, _stage_source(self.root, version))
+        return self.runtime.quarantine(version, reason=reason)
+
+    def test_only_quarantined_releases_count(self):
+        """DjangoLux archives its own leftovers in failed/ under names that are not versions."""
+        self._quarantine("1.8.10")
+        self._quarantine("1.8.9")
+        self.runtime.failed.joinpath("maintenance-3").write_text("{}", encoding="utf-8")
+        self.runtime.failed.joinpath("degraded-2").write_text("x", encoding="utf-8")
+        self.runtime.failed.joinpath("run_token_abc").mkdir()
+        self.runtime.failed.joinpath("1.7.0.retried-20261114T120000Z").mkdir()
+
+        self.assertEqual(self.runtime.quarantined_versions(), ["1.8.9", "1.8.10"])
+        self.assertEqual(self.runtime.quarantined_reason("1.8.9"), "health check failed")
+        self.assertIsNone(self.runtime.quarantined_reason("1.7.0"))
+        self.assertIsNone(self.runtime.quarantined_reason("../releases"))
+
+    def test_a_record_without_a_reason_is_still_a_quarantine(self):
+        self._quarantine("1.8.0", reason="")
+        self.assertEqual(self.runtime.quarantined_reason("1.8.0"), "")
+
+    def test_setting_a_record_aside_keeps_it(self):
+        self._quarantine("1.8.0")
+
+        first = self.runtime.set_aside_quarantine("1.8.0")
+        self._quarantine("1.8.0", reason="again")
+        second = self.runtime.set_aside_quarantine("1.8.0")
+
+        self.assertRegex(first.name, r"^1\.8\.0\.retried-\d{8}T\d{6}Z$")
+        self.assertNotEqual(first, second)
+        self.assertIn("again", (second / "quarantine-reason.txt").read_text(encoding="utf-8"))
+        self.assertTrue((first / "dlux").is_dir())
+        self.assertEqual(self.runtime.quarantined_versions(), [])
+        self.assertIsNone(self.runtime.set_aside_quarantine("1.8.0"))
+
+    def test_quarantining_a_release_again_sets_the_earlier_record_aside(self):
+        self._quarantine("1.8.0", reason="first failure")
+        self._quarantine("1.8.0", reason="second failure")
+
+        self.assertEqual(self.runtime.quarantined_reason("1.8.0"), "second failure")
+        earlier = list(self.runtime.failed.glob("1.8.0.retried-*"))
+        self.assertEqual(len(earlier), 1)
+        self.assertIn("first failure", (earlier[0] / "quarantine-reason.txt").read_text(encoding="utf-8"))
+
+
 class PackageOperationLockTests(unittest.TestCase):
     """The deployer CLI and the resident executor mount the same volume."""
 

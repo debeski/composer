@@ -84,8 +84,15 @@ def parse_dlux_update_args(argv, *, action="update"):
             "--staged-sha256", default="", metavar="HEX",
             help="The digest --staged-wheel must hash to; required with it",
         )
+        parser.add_argument(
+            "--retry-quarantined", action="store_true",
+            help=(
+                "Apply the --version an earlier failed update quarantined on this deployment "
+                "(refused otherwise); a healthy retry clears the quarantine"
+            ),
+        )
     else:
-        parser.set_defaults(dry_run=False, staged_wheel="", staged_sha256="")
+        parser.set_defaults(dry_run=False, staged_wheel="", staged_sha256="", retry_quarantined=False)
     parser.add_argument(
         # Set on the child composer this command starts when the runtime volume
         # is not mounted where it runs. Not for hand use: it turns the missing
@@ -140,6 +147,7 @@ def build_availability_payload(target_version="", *, channel=None, runtime=None,
     """
     from . import dlux_channel
     from . import dlux_release_source as source
+    from .dlux_package_update import quarantine_message
 
     policy_error = ""
     if channel is None:
@@ -149,8 +157,16 @@ def build_availability_payload(target_version="", *, channel=None, runtime=None,
             channel = dlux_channel.STABLE
         else:
             channel, policy_error = dlux_channel.read_policy(state_dir)
+    if runtime is None and state_dir is not None:
+        # state/ sits in the runtime root, beside failed/.
+        runtime = DluxRuntime(Path(state_dir).parent)
+    # Releases an update rolled back here: never offered as the newest release,
+    # or DjangoLux's Updates card would keep offering what already failed.
+    quarantined = runtime.quarantined_versions() if runtime is not None else []
     try:
-        described = source.describe(target_version, channel=channel)
+        described = source.describe(
+            target_version, channel=channel, exclude=() if target_version else quarantined,
+        )
     except Exception as exc:
         return {
             "checked_at": _utc_now(),
@@ -164,17 +180,24 @@ def build_availability_payload(target_version="", *, channel=None, runtime=None,
             # check ran on stable because the policy was unreadable, not just
             # that it found nothing.
             "error": " ".join(part for part in (str(exc), policy_error) if part),
+            "quarantined": quarantined,
         }
+    inline_safe, reason = described["inline_safe"], described["reason"]
+    # Only a pinned check can land on one.
+    held = quarantine_message(runtime, described["version"]) if runtime is not None else ""
+    if held:
+        inline_safe, reason = False, held
     return {
         "checked_at": _utc_now(),
         "available": True,
         "version": described["version"],
-        "inline_safe": described["inline_safe"],
+        "inline_safe": inline_safe,
         "channel": described.get("channel", channel),
         "prerelease": bool(described.get("prerelease")),
-        "reason": described["reason"],
+        "reason": reason,
         "display": release_display(described.get("manifest")),
         "error": policy_error,
+        "quarantined": quarantined,
     }
 
 
@@ -202,6 +225,8 @@ def availability_summary(payload: dict, installed: str = "", verified: bool = Tr
 
     latest = str(payload.get("version") or "")
     channel = payload.get("channel") or ""
+    if latest and latest in (payload.get("quarantined") or ()):
+        return str(payload.get("reason") or f"DjangoLux {latest} is quarantined on this deployment")
     current, candidate = versions.try_parse(installed), versions.try_parse(latest)
     if current is not None and candidate is not None and candidate <= current:
         where = f" on the {channel} channel" if channel else ""
@@ -230,6 +255,13 @@ def run_availability_check(args, runtime) -> int:
     print(f"✔ {availability_summary(payload, installed, verified)} — published to {path}")
     if payload.get("error"):
         print(f"  note: {payload['error']}", file=sys.stderr)
+    skipped = [version for version in payload.get("quarantined") or () if version != payload.get("version")]
+    if skipped and not args.version:
+        print(
+            f"  note: not offered, quarantined after a failed update here: {', '.join(skipped)} "
+            "(retry one with 'dlux update --version V --retry-quarantined')",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -444,13 +476,23 @@ def _dry_run(args, runtime, staged) -> int:
     ``staging/``, where a running update keeps the release it is about to stage.
     """
     from . import dlux_release_source
+    from .dlux_package_update import quarantine_message
 
     source = staged or dlux_release_source
+    extra = {}
+    if source is dlux_release_source and not args.version:
+        extra["exclude"] = runtime.quarantined_versions()
     try:
         with runtime.package_operation_lock():
-            candidate, _unpacked = source.obtain(args.version, channel=_resolved_channel(runtime))
+            candidate, _unpacked = source.obtain(
+                args.version, channel=_resolved_channel(runtime), **extra,
+            )
     except Exception as exc:
         print(f"✖ {exc}", file=sys.stderr)
+        return 1
+    held = "" if args.retry_quarantined else quarantine_message(runtime, candidate.version)
+    if held:
+        print(f"✖ {held}", file=sys.stderr)
         return 1
     print(f"✔ {candidate.version} resolved and verified (dry run; nothing activated).")
     return 0
@@ -467,6 +509,8 @@ def run_dlux_update(args, argv=None) -> int:
     services, explicit = _restart_services(args)
 
     try:
+        if args.retry_quarantined and not args.version:
+            raise ValueError("--retry-quarantined requires --version: name the release to retry.")
         staged = _staged_source(args, runtime)
     except ValueError as exc:
         print(f"✖ {exc}", file=sys.stderr)
@@ -488,6 +532,7 @@ def run_dlux_update(args, argv=None) -> int:
         result = apply_package_update(
             runtime, restart=restart, health_check=health_check,
             target_version=args.version, progress=progress, before_swap=before_swap,
+            retry_quarantined=args.retry_quarantined,
             **({"source": staged} if staged else {}),
         )
 

@@ -721,6 +721,219 @@ class OperationLockTests(_Base):
         self.assertLockFree()
 
 
+class QuarantineTests(_Base):
+    """A release that failed its health check stayed on offer, and asking for it
+    again cost another backup, restart and rollback (stress run 2026-11-14)."""
+
+    def setUp(self):
+        super().setUp()
+        self._stage("1.7.1")
+        self.runtime.activate("1.7.1")
+        result = self._apply(ops=_Ops(healths=[(False, "web unhealthy"), (True, "")]))[0]
+        self.assertTrue(result.rolled_back)
+        self.source.calls.clear()
+
+    def _apply(self, version="1.8.0", ops=None, **kwargs):
+        ops = ops or _Ops()
+        result = apply_package_update(
+            self.runtime, restart=ops.restart, health_check=ops.health,
+            target_version=version, source=self.source, workdir=self.root / f"w-{version}",
+            **kwargs,
+        )
+        return result, ops
+
+    def test_a_quarantined_release_is_refused_with_nothing_changed(self):
+        backup = unittest.mock.Mock(return_value=(True, "backup taken"))
+        generation = self.runtime.read_generation()
+
+        result, ops = self._apply(before_swap=backup)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.rolled_back)
+        self.assertEqual(result.steps, ["quarantined"])
+        self.assertIn("DjangoLux 1.8.0 is quarantined", result.message)
+        self.assertIn("(web unhealthy)", result.message)
+        self.assertIn("Nothing was changed.", result.message)
+        self.assertIn("--version 1.8.0 --retry-quarantined", result.message)
+        self.assertEqual(self.source.calls, [], "refused before anything is fetched")
+        backup.assert_not_called()
+        self.assertEqual(ops.restart_calls, 0)
+        self.assertEqual(self.runtime.read_active()["version"], "1.7.1")
+        self.assertEqual(self.runtime.read_generation(), generation)
+        self.assertEqual(self.runtime.quarantined_versions(), ["1.8.0"])
+
+    def test_an_unpinned_resolve_onto_it_is_refused_too(self):
+        result, ops = self._apply(version="")
+        self.assertFalse(result.ok)
+        self.assertIn("1.8.0 is quarantined", result.message)
+        self.assertEqual(ops.restart_calls, 0)
+
+    def test_a_retry_applies_it_and_keeps_the_record_aside(self):
+        result, _ops = self._apply(retry_quarantined=True)
+
+        self.assertTrue(result.ok, result.message)
+        self.assertIn("quarantine-cleared", result.steps)
+        self.assertEqual(self.runtime.read_active()["version"], "1.8.0")
+        self.assertEqual(self.runtime.quarantined_versions(), [])
+        kept = list(self.runtime.failed.glob("1.8.0.retried-*"))
+        self.assertEqual(len(kept), 1)
+        self.assertIn("web unhealthy", (kept[0] / "quarantine-reason.txt").read_text(encoding="utf-8"))
+
+    def test_a_retry_that_fails_again_is_quarantined_again(self):
+        result, _ops = self._apply(
+            retry_quarantined=True, ops=_Ops(healths=[(False, "still broken"), (True, "")]),
+        )
+
+        self.assertTrue(result.rolled_back)
+        self.assertEqual(self.runtime.read_active()["version"], "1.7.1")
+        self.assertIn("still broken", self.runtime.quarantined_reason("1.8.0"))
+        kept = list(self.runtime.failed.glob("1.8.0.retried-*"))
+        self.assertEqual(len(kept), 1, "the first failure's record is kept")
+        self.assertIn("web unhealthy", (kept[0] / "quarantine-reason.txt").read_text(encoding="utf-8"))
+
+    def test_other_releases_are_not_affected(self):
+        result, _ops = self._apply("1.8.1")
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(self.runtime.quarantined_versions(), ["1.8.0"])
+
+    def test_an_unpinned_update_skips_it(self):
+        from composer import dlux_release_source
+
+        self.runtime.state_dir.joinpath("package-available.json").write_text(
+            json.dumps({"available": True, "version": "1.8.0", "channel": "stable"}), encoding="utf-8",
+        )
+        seen = {}
+
+        def obtain(target_version="", **kwargs):
+            seen.update(kwargs)
+            return self.source.obtain("1.7.2")
+
+        with unittest.mock.patch.object(dlux_release_source, "obtain", side_effect=obtain):
+            result = apply_package_update(self.runtime, restart=_Ops().restart,
+                                          health_check=_Ops().health, workdir=self.root / "w")
+
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(seen["exclude"], ["1.8.0"])
+        self.assertNotIn("expected", seen, "no stale-index wait for a release it will skip")
+
+
+class RetryQuarantinedFlagTests(unittest.TestCase):
+    def test_only_update_takes_the_flag(self):
+        from composer.dlux_package_cli import parse_dlux_update_args
+
+        self.assertTrue(parse_dlux_update_args(
+            ["--version", "1.8.0", "--retry-quarantined"]).retry_quarantined)
+        self.assertFalse(parse_dlux_update_args([]).retry_quarantined)
+        self.assertFalse(parse_dlux_update_args([], action="rollback").retry_quarantined)
+        self.assertFalse(parse_dlux_update_args([], action="check").retry_quarantined)
+        with self.assertRaises(SystemExit), unittest.mock.patch("sys.stderr"):
+            parse_dlux_update_args(["--retry-quarantined"], action="rollback")
+
+    def _run(self, argv):
+        from composer import dlux_package_cli
+        from composer.dlux_package_cli import parse_dlux_update_args, run_dlux_update
+
+        with TemporaryDirectory() as tmp:
+            DluxRuntime(tmp).state_dir.mkdir(parents=True)
+            args = parse_dlux_update_args(["--runtime-root", tmp, "--backup", "skip", *argv])
+            done = unittest.mock.Mock(ok=True, critical=False, message="DjangoLux 1.8.0 is active.")
+            with (
+                unittest.mock.patch.object(dlux_package_cli, "_build_operations",
+                                           return_value=(lambda: (True, ""), lambda: (True, ""))),
+                unittest.mock.patch.object(dlux_package_cli, "apply_package_update",
+                                           return_value=done) as apply,
+                unittest.mock.patch.object(dlux_package_cli, "_publish"),
+                unittest.mock.patch("sys.stdout"), unittest.mock.patch("sys.stderr"),
+            ):
+                code = run_dlux_update(args, [])
+        return code, apply
+
+    def test_the_flag_reaches_the_update(self):
+        code, apply = self._run(["--version", "1.8.0", "--retry-quarantined"])
+        self.assertEqual(code, 0)
+        self.assertTrue(apply.call_args.kwargs["retry_quarantined"])
+
+        code, apply = self._run(["--version", "1.8.0"])
+        self.assertFalse(apply.call_args.kwargs["retry_quarantined"])
+
+    def test_a_retry_must_name_the_release(self):
+        code, apply = self._run(["--retry-quarantined"])
+        self.assertEqual(code, 2)
+        apply.assert_not_called()
+
+
+class AvailabilitySkipsQuarantineTests(unittest.TestCase):
+    """`dlux check` kept publishing a release that had already failed here, so
+    DjangoLux's Updates card kept offering it."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.runtime = DluxRuntime(Path(self._tmp.name) / "dlux-runtime")
+        self.runtime.state_dir.mkdir(parents=True)
+        record = self.runtime.failed / "1.9.0"
+        record.mkdir(parents=True)
+        (record / "quarantine-reason.txt").write_text("web unhealthy\n", encoding="utf-8")
+
+    def _describe(self, version):
+        described = {"version": version, "inline_safe": True, "reason": "", "manifest": {}}
+        return unittest.mock.patch("composer.dlux_release_source.describe", return_value=described)
+
+    def test_the_newest_release_choice_skips_it(self):
+        from composer.dlux_package_cli import build_availability_payload
+
+        with self._describe("1.8.1") as describe:
+            payload = build_availability_payload(runtime=self.runtime)
+
+        self.assertEqual(describe.call_args.kwargs["exclude"], ["1.9.0"])
+        self.assertEqual(payload["version"], "1.8.1")
+        self.assertTrue(payload["inline_safe"])
+        self.assertEqual(payload["quarantined"], ["1.9.0"])
+
+    def test_the_resident_check_skips_it_too(self):
+        from composer.dlux_package_cli import build_availability_payload
+
+        with self._describe("1.8.1") as describe:
+            build_availability_payload(state_dir=self.runtime.state_dir)
+
+        self.assertEqual(describe.call_args.kwargs["exclude"], ["1.9.0"])
+
+    def test_a_pinned_check_reports_it_as_not_installable(self):
+        from composer.dlux_package_cli import availability_summary, build_availability_payload
+
+        with self._describe("1.9.0") as describe:
+            payload = build_availability_payload("1.9.0", runtime=self.runtime)
+
+        self.assertEqual(describe.call_args.kwargs["exclude"], ())
+        self.assertFalse(payload["inline_safe"])
+        self.assertIn("1.9.0 is quarantined", payload["reason"])
+        self.assertIn("--retry-quarantined", payload["reason"])
+        self.assertIn("1.9.0 is quarantined", availability_summary(payload, "1.8.0"))
+
+    def test_nothing_left_is_reported_as_none_available(self):
+        from composer.dlux_package_cli import build_availability_payload
+        from composer.dlux_release_source import ReleaseCandidate
+
+        index = [ReleaseCandidate("1.9.0", "django_lux-1.9.0-py3-none-any.whl",
+                                  "https://files.pythonhosted.org/x.whl", "a" * 64)]
+        with unittest.mock.patch("composer.dlux_release_source.fetch_index", return_value=index):
+            payload = build_availability_payload(runtime=self.runtime)
+
+        self.assertFalse(payload["available"])
+        self.assertIn("No DjangoLux release is available", payload["error"])
+        self.assertIn("skipped quarantined 1.9.0", payload["error"])
+
+    def test_a_retried_release_is_offered_again(self):
+        from composer.dlux_package_cli import build_availability_payload
+
+        self.runtime.set_aside_quarantine("1.9.0")
+        with self._describe("1.9.0") as describe:
+            payload = build_availability_payload(runtime=self.runtime)
+
+        self.assertEqual(describe.call_args.kwargs["exclude"], [])
+        self.assertTrue(payload["inline_safe"])
+
+
 class DryRunTests(unittest.TestCase):
     """A dry run previews what `dlux update` would do, under the same lock."""
 
@@ -729,6 +942,7 @@ class DryRunTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.runtime = DluxRuntime(Path(self._tmp.name) / "dlux-runtime")
         self.runtime.state_dir.mkdir(parents=True)
+        (self.runtime.failed / "1.9.0").mkdir(parents=True)
         self.source = _FakeSource(Path(self._tmp.name))
 
     def _run(self, argv):
@@ -742,6 +956,15 @@ class DryRunTests(unittest.TestCase):
             unittest.mock.patch("sys.stdout"), unittest.mock.patch("sys.stderr"),
         ):
             return run_dlux_update(args, []), obtain
+
+    def test_a_quarantined_release_is_refused_unless_retried(self):
+        self.assertEqual(self._run(["--version", "1.9.0"])[0], 1)
+        self.assertEqual(self._run(["--version", "1.9.0", "--retry-quarantined"])[0], 0)
+
+    def test_an_unpinned_dry_run_skips_it(self):
+        code, obtain = self._run([])
+        self.assertEqual(code, 0)
+        self.assertEqual(obtain.call_args.kwargs["exclude"], ["1.9.0"])
 
     def test_it_is_refused_while_an_update_runs(self):
         with self.runtime.package_operation_lock():

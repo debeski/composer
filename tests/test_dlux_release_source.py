@@ -124,6 +124,23 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(ReleaseSourceError):
             source.select_candidate([])
 
+    def test_a_quarantined_release_gives_way_to_the_next_newest(self):
+        candidates = self._candidates("1.7.1", "1.8.0", "1.8.1b1")
+        self.assertEqual(source.select_candidate(candidates, exclude=["1.8.0"]).version, "1.7.1")
+        chosen = source.select_candidate(candidates, channel="beta", exclude=["1.8.1b1"])
+        self.assertEqual(chosen.version, "1.8.0")
+
+    def test_a_pin_ignores_the_quarantine(self):
+        chosen = source.select_candidate(self._candidates("1.8.0"), "1.8.0", exclude=["1.8.0"])
+        self.assertEqual(chosen.version, "1.8.0")
+
+    def test_nothing_left_after_the_quarantine_is_none_available(self):
+        with self.assertRaises(ReleaseSourceError) as raised:
+            source.select_candidate(self._candidates("1.8.0", "1.9.0b1"), exclude=["1.8.0"])
+        self.assertIn("No DjangoLux release is available to install on the stable channel",
+                      str(raised.exception))
+        self.assertIn("skipped quarantined 1.8.0", str(raised.exception))
+
 
 class DownloadTests(unittest.TestCase):
     def setUp(self):
@@ -402,6 +419,10 @@ class StaleIndexRetryTests(unittest.TestCase):
         chosen, sleeps = self._resolve([old] * 4, expected="1.11.0b2")
         self.assertEqual(chosen, "1.11.0b1")
         self.assertEqual(sleeps, list(source.INDEX_RETRY_DELAYS))
+
+    def test_an_unpinned_obtain_skips_a_quarantined_release(self):
+        index = SelectionTests._candidates("1.11.0b1", "1.11.0b2")
+        self.assertEqual(self._resolve([index], exclude=["1.11.0b2"]), ("1.11.0b1", []))
 
     def test_no_retry_when_current_or_pinned(self):
         new = SelectionTests._candidates("1.11.0b2")

@@ -178,7 +178,10 @@ So the halves each do what they can:
    It holds `state/package-operation.lock` (an `flock` on the runtime volume)
    throughout, the same lock an operator's `dlux update` or `dlux rollback`
    takes, so a second operation from either side is refused with nothing
-   changed instead of racing the first.
+   changed instead of racing the first. A release that was rolled back stays
+   quarantined in `failed/<version>/`: the agent never offers it as the newest
+   release, and the executor refuses it until an operator retries it with
+   `dlux update --version V --retry-quarantined`.
 
 The digest travels over the socket rather than in a file beside the wheel because
 `worker` and `celery` mount that volume read-write too: a record kept next to the

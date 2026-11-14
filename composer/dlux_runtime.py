@@ -26,6 +26,7 @@ import re
 import shutil
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +42,7 @@ VALID_SOURCES = frozenset({"image", "volume"})
 # deployer CLI (in its sibling container) and the resident executor mount the
 # same volume, so an in-process lock would not see the other one.
 PACKAGE_LOCK_FILENAME = "package-operation.lock"
+QUARANTINE_REASON_FILENAME = "quarantine-reason.txt"
 
 
 def version_sort_key(version) -> tuple:
@@ -274,18 +276,69 @@ class DluxRuntime:
         return normalized
 
     def quarantine(self, version, reason="") -> Optional[Path]:
-        """Move a release out of ``releases/`` so it cannot be activated again."""
+        """Move a release out of ``releases/`` so it cannot be activated again.
+
+        An earlier record of the same version (a retry that failed again) is set
+        aside for audit, never deleted.
+        """
         version = normalize_version(version)
         release = self.release_path(version)
         if not release.is_dir():
             return None
         self.failed.mkdir(parents=True, exist_ok=True)
         target = self.failed / version
-        if target.exists():
-            shutil.rmtree(target)
+        self.set_aside_quarantine(version)
         shutil.move(str(release), str(target))
         if reason:
-            _atomic_write(target / "quarantine-reason.txt", reason.strip() + "\n")
+            _atomic_write(target / QUARANTINE_REASON_FILENAME, reason.strip() + "\n")
+        return target
+
+    def quarantined_reason(self, version) -> Optional[str]:
+        """Why ``version`` sits quarantined under ``failed/``; None when it does not.
+
+        ``''`` is a quarantine without a recorded reason. DjangoLux archives its
+        own leftovers in ``failed/`` too, under names that are not versions.
+        """
+        try:
+            record = self.failed / normalize_version(version)
+        except DluxRuntimeError:
+            return None
+        if not record.is_dir():
+            return None
+        try:
+            return (record / QUARANTINE_REASON_FILENAME).read_text(
+                encoding="utf-8", errors="replace"
+            ).strip()
+        except OSError:
+            return ""
+
+    def quarantined_versions(self) -> list:
+        """Releases quarantined after a failed update, oldest first."""
+        if not self.failed.is_dir():
+            return []
+        found = [
+            entry.name for entry in self.failed.iterdir()
+            if entry.is_dir() and _VERSION_DIR_RE.fullmatch(entry.name)
+            and try_parse(entry.name) is not None
+        ]
+        return sorted(found, key=version_sort_key)
+
+    def set_aside_quarantine(self, version, label="retried") -> Optional[Path]:
+        """Move ``failed/<version>`` to ``failed/<version>.<label>-<UTC time>``.
+
+        That name is not a version, so the release stops counting as
+        quarantined while its record stays on the volume.
+        """
+        record = self.failed / normalize_version(version)
+        if not (record.exists() or record.is_symlink()):
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = self.failed / f"{record.name}.{label}-{stamp}"
+        suffix = 1
+        while target.exists() or target.is_symlink():
+            suffix += 1
+            target = self.failed / f"{record.name}.{label}-{stamp}-{suffix}"
+        record.rename(target)
         return target
 
     # -- exclusion ------------------------------------------------------

@@ -135,7 +135,8 @@ def fetch_index(*, opener=urllib.request.urlopen) -> list:
     return candidates
 
 
-def select_candidate(candidates, target_version="", *, channel=dlux_channel.STABLE) -> ReleaseCandidate:
+def select_candidate(candidates, target_version="", *, channel=dlux_channel.STABLE,
+                     exclude=()) -> ReleaseCandidate:
     """Pin to ``target_version`` when given, otherwise the newest eligible release.
 
     ``channel`` decides only whether prereleases are eligible. On stable there is
@@ -145,6 +146,10 @@ def select_candidate(candidates, target_version="", *, channel=dlux_channel.STAB
     An explicit ``target_version`` is honoured on either channel. That is not a
     hole — pinning is how a rollback and a `--version` install work, both of
     which are already deliberate operator acts naming an exact release.
+
+    ``exclude`` lists releases the newest-release choice skips: the ones this
+    deployment quarantined after a failed update. A pin ignores it; the update
+    decides whether a quarantined release may be retried.
     """
     if not candidates:
         raise ReleaseSourceError("No DjangoLux release is available to install.")
@@ -159,18 +164,24 @@ def select_candidate(candidates, target_version="", *, channel=dlux_channel.STAB
         raise ReleaseSourceError(f"DjangoLux {target_version} is not published.")
 
     allow_prereleases = dlux_channel.prereleases_allowed(channel)
+    excluded = {parsed for parsed in map(try_parse, exclude) if parsed is not None}
     pool = []
+    skipped = []
     for candidate in candidates:
         parsed = try_parse(candidate.version)
         if parsed is None or parsed.is_devrelease:
             continue
         if parsed.is_prerelease and not allow_prereleases:
             continue
+        if parsed in excluded:
+            skipped.append(candidate.version)
+            continue
         pool.append((parsed, candidate))
     if not pool:
+        note = f" (skipped quarantined {', '.join(skipped)})" if skipped else ""
         raise ReleaseSourceError(
             "No DjangoLux release is available to install on the "
-            f"{dlux_channel.normalize_channel(channel)} channel."
+            f"{dlux_channel.normalize_channel(channel)} channel{note}."
         )
     return max(pool, key=lambda item: item[0])[1]
 
@@ -372,7 +383,7 @@ def assess(candidate: ReleaseCandidate, wheel_path) -> dict:
 
 
 def describe(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
-             opener=urllib.request.urlopen, runner=subprocess.run) -> dict:
+             opener=urllib.request.urlopen, runner=subprocess.run, exclude=()) -> dict:
     """Resolve and inspect the newest (or pinned) release without installing it.
 
     Downloads and verifies the wheel — the manifest inside it is the only
@@ -380,7 +391,8 @@ def describe(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
     whether a release may be applied to the runtime volume. Nothing is unpacked
     and nothing is activated.
     """
-    candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel)
+    candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel,
+                                 exclude=exclude)
     workdir = Path(workdir or tempfile.mkdtemp(prefix="composer-dlux-check-"))
     workdir.mkdir(parents=True, exist_ok=True)
     verify_attestation(candidate, runner=runner)
@@ -424,7 +436,7 @@ INDEX_RETRY_DELAYS = (3, 6, 12)
 
 def obtain(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
            opener=urllib.request.urlopen, runner=subprocess.run,
-           expected="", sleep=time.sleep) -> tuple:
+           expected="", sleep=time.sleep, exclude=()) -> tuple:
     """Resolve, verify and unpack a release. Returns ``(candidate, unpacked_dir)``.
 
     Order matters: attestation and digest are checked before the archive is
@@ -434,15 +446,18 @@ def obtain(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
     publish PyPI's CDN can serve an index without it, so an unpinned resolve
     that lands below it re-reads the index a few times before settling for
     what it found. It never pins to ``expected``: the channel may have changed.
+    ``exclude`` is passed to `select_candidate`.
     """
-    candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel)
+    candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel,
+                                 exclude=exclude)
     wanted = try_parse(expected) if expected and not target_version else None
     for delay in INDEX_RETRY_DELAYS if wanted is not None else ():
         current = try_parse(candidate.version)
         if current is None or current >= wanted:
             break
         sleep(delay)
-        candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel)
+        candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel,
+                                     exclude=exclude)
     workdir = Path(workdir or tempfile.mkdtemp(prefix="composer-dlux-"))
     workdir.mkdir(parents=True, exist_ok=True)
     verify_attestation(candidate, runner=runner)
