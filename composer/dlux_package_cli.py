@@ -437,6 +437,25 @@ def _baked_version_probe(args):
     return probe
 
 
+def _dry_run(args, runtime, staged) -> int:
+    """Resolve and verify what `dlux update` would apply, activating nothing.
+
+    It holds the update lock too: a staged wheel unpacks into the volume's
+    ``staging/``, where a running update keeps the release it is about to stage.
+    """
+    from . import dlux_release_source
+
+    source = staged or dlux_release_source
+    try:
+        with runtime.package_operation_lock():
+            candidate, _unpacked = source.obtain(args.version, channel=_resolved_channel(runtime))
+    except Exception as exc:
+        print(f"✖ {exc}", file=sys.stderr)
+        return 1
+    print(f"✔ {candidate.version} resolved and verified (dry run; nothing activated).")
+    return 0
+
+
 def run_dlux_update(args, argv=None) -> int:
     runtime = DluxRuntime(args.runtime_root)
     if not runtime.exists():
@@ -454,16 +473,7 @@ def run_dlux_update(args, argv=None) -> int:
         return 2
 
     if args.dry_run:
-        from . import dlux_release_source
-
-        source = staged or dlux_release_source
-        try:
-            candidate, _unpacked = source.obtain(args.version, channel=_resolved_channel(runtime))
-        except Exception as exc:
-            print(f"✖ {exc}", file=sys.stderr)
-            return 1
-        print(f"✔ {candidate.version} resolved and verified (dry run; nothing activated).")
-        return 0
+        return _dry_run(args, runtime, staged)
 
     restart, health_check = _build_operations(args, services, only_defined=not explicit)
     progress = lambda message: print(f"⟳ {message}", flush=True)

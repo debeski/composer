@@ -616,3 +616,137 @@ class PublishedAvailabilityTests(unittest.TestCase):
         self.assertEqual(self._read({"available": True, "version": "1.11.0b2", "channel": "nightly"}), "")
         self.assertEqual(self._read("not json"), "")
         self.assertEqual(self._read(None), "")
+
+
+class OperationLockTests(_Base):
+    """Two updates started a second apart (stress run 2026-11-14): one ran, the
+    other found the unpacked release gone ("Staged directory does not contain a
+    'dlux' package"). The CLI and the executor share the volume, not a process."""
+
+    def setUp(self):
+        super().setUp()
+        self._stage("1.7.1")
+        self.runtime.activate("1.7.1")
+
+    def _apply(self, version="1.8.0", ops=None, **kwargs):
+        ops = ops or _Ops()
+        result = apply_package_update(
+            self.runtime, restart=ops.restart, health_check=ops.health,
+            target_version=version, source=self.source, workdir=self.root / f"w-{version}",
+            **kwargs,
+        )
+        return result, ops
+
+    def _volume(self):
+        return (
+            self.runtime.active_file.read_text(encoding="utf-8"),
+            self.runtime.read_generation(),
+            self.runtime.staged_versions(),
+            sorted(path.name for path in self.runtime.root.rglob("*")),
+        )
+
+    def assertLockFree(self):
+        try:
+            with self.runtime.package_operation_lock():
+                pass
+        except Exception as exc:  # pragma: no cover - the failure message is the point
+            self.fail(f"the operation lock was left held: {exc}")
+
+    def test_an_update_is_refused_while_another_operation_runs(self):
+        backup = unittest.mock.Mock(return_value=(True, "backup taken"))
+
+        with self.runtime.package_operation_lock():
+            before = self._volume()
+            result, ops = self._apply(before_swap=backup)
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.rolled_back)
+        self.assertEqual(
+            result.message,
+            "Another DjangoLux update or rollback is already running; nothing was changed.",
+        )
+        self.assertEqual(self.source.calls, ["1.7.1"], "nothing fetched or unpacked")
+        backup.assert_not_called()
+        self.assertEqual(ops.restart_calls, 0)
+        self.assertEqual(self._volume(), before)
+
+    def test_a_rollback_is_refused_while_another_operation_runs(self):
+        self._apply("1.8.0")
+        ops = _Ops()
+
+        with self.runtime.package_operation_lock():
+            before = self._volume()
+            result = rollback_package_update(self.runtime, restart=ops.restart,
+                                             health_check=ops.health)
+
+        self.assertFalse(result.ok)
+        self.assertIn("already running; nothing was changed", result.message)
+        self.assertEqual(ops.restart_calls, 0)
+        self.assertEqual(self._volume(), before)
+
+    def test_the_lock_is_released_after_a_successful_update(self):
+        result, _ops = self._apply()
+        self.assertTrue(result.ok, result.message)
+        self.assertLockFree()
+
+    def test_the_lock_is_released_after_a_failed_update(self):
+        result, _ops = self._apply(ops=_Ops(healths=[(False, "web unhealthy"), (True, "")]))
+        self.assertTrue(result.rolled_back)
+        self.assertLockFree()
+
+        self.source.error = RuntimeError("PyPI is down")
+        result, _ops = self._apply("1.9.0")
+        self.assertFalse(result.ok)
+        self.assertLockFree()
+
+    def test_the_lock_is_released_after_an_exception(self):
+        def explode():
+            raise RuntimeError("docker went away")
+
+        with self.assertRaises(RuntimeError):
+            apply_package_update(self.runtime, restart=explode, health_check=_Ops().health,
+                                 target_version="1.8.0", source=self.source,
+                                 workdir=self.root / "w")
+        self.assertLockFree()
+
+        with self.assertRaises(RuntimeError):
+            rollback_package_update(self.runtime, restart=explode, health_check=_Ops().health)
+        self.assertLockFree()
+
+    def test_the_lock_is_released_after_a_rollback(self):
+        self._apply("1.8.0")
+        ops = _Ops()
+        result = rollback_package_update(self.runtime, restart=ops.restart, health_check=ops.health)
+        self.assertTrue(result.ok, result.message)
+        self.assertLockFree()
+
+
+class DryRunTests(unittest.TestCase):
+    """A dry run previews what `dlux update` would do, under the same lock."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.runtime = DluxRuntime(Path(self._tmp.name) / "dlux-runtime")
+        self.runtime.state_dir.mkdir(parents=True)
+        self.source = _FakeSource(Path(self._tmp.name))
+
+    def _run(self, argv):
+        from composer import dlux_release_source
+        from composer.dlux_package_cli import parse_dlux_update_args, run_dlux_update
+
+        args = parse_dlux_update_args(["--runtime-root", str(self.runtime.root), "--dry-run", *argv])
+        with (
+            unittest.mock.patch.object(dlux_release_source, "obtain",
+                                       side_effect=self.source.obtain) as obtain,
+            unittest.mock.patch("sys.stdout"), unittest.mock.patch("sys.stderr"),
+        ):
+            return run_dlux_update(args, []), obtain
+
+    def test_it_is_refused_while_an_update_runs(self):
+        with self.runtime.package_operation_lock():
+            code, obtain = self._run(["--version", "1.8.0"])
+        self.assertEqual(code, 1)
+        obtain.assert_not_called()
+
+        self.assertEqual(self._run(["--version", "1.8.0"])[0], 0)

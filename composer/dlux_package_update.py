@@ -19,6 +19,8 @@ of Docker: the executor passes the real implementations
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -77,6 +79,25 @@ def _noop(_message: str) -> None:
     return None
 
 
+def _exclusive(operation):
+    """Run an update or rollback under the runtime volume's operation lock.
+
+    A second operation is refused at once with nothing changed, rather than
+    queued: the first one's outcome may make it pointless or wrong.
+    """
+
+    @functools.wraps(operation)
+    def run(runtime, *args, **kwargs):
+        with contextlib.ExitStack() as held:
+            try:
+                held.enter_context(runtime.package_operation_lock())
+            except DluxRuntimeError as exc:
+                return PackageUpdateResult(ok=False, message=str(exc))
+            return operation(runtime, *args, **kwargs)
+
+    return run
+
+
 def prune_releases(runtime: DluxRuntime, keep=DEFAULT_KEEP_RELEASES, protected=()) -> List[str]:
     """Drop the oldest staged releases, never touching a protected one."""
     keep = max(1, int(keep))
@@ -97,6 +118,7 @@ def prune_releases(runtime: DluxRuntime, keep=DEFAULT_KEEP_RELEASES, protected=(
     return removed
 
 
+@_exclusive
 def apply_package_update(
     runtime: DluxRuntime,
     *,
@@ -229,6 +251,7 @@ def apply_package_update(
     )
 
 
+@_exclusive
 def rollback_package_update(
     runtime: DluxRuntime,
     *,

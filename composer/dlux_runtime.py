@@ -19,11 +19,13 @@ generation semantics are mirrored from ``dlux/updater/runtime.py``. Do not
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +37,10 @@ CONTRACT_SCHEMA_VERSION = 1
 # directory name, so it is validated rather than trusted.
 _VERSION_DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 VALID_SOURCES = frozenset({"image", "volume"})
+# Under state/: held by `flock` for the whole of an update or rollback. The
+# deployer CLI (in its sibling container) and the resident executor mount the
+# same volume, so an in-process lock would not see the other one.
+PACKAGE_LOCK_FILENAME = "package-operation.lock"
 
 
 def version_sort_key(version) -> tuple:
@@ -57,6 +63,10 @@ def version_sort_key(version) -> tuple:
 
 class DluxRuntimeError(RuntimeError):
     """The runtime volume is not in a state Composer can safely act on."""
+
+
+class PackageOperationBusy(DluxRuntimeError):
+    """Another update or rollback holds the runtime volume's operation lock."""
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -277,6 +287,49 @@ class DluxRuntime:
         if reason:
             _atomic_write(target / "quarantine-reason.txt", reason.strip() + "\n")
         return target
+
+    # -- exclusion ------------------------------------------------------
+
+    @contextmanager
+    def package_operation_lock(self):
+        """Hold the update/rollback lock, or raise `PackageOperationBusy` at once.
+
+        Never waits: a second operation started while one runs is refused
+        before it touches anything. The lock goes with the file descriptor, so
+        it is released on every exit, including a crash.
+        """
+        import fcntl
+
+        path = self.state_dir / PACKAGE_LOCK_FILENAME
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            # flock needs no write access; O_NOFOLLOW refuses a symlink planted
+            # by another writer of this volume.
+            fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+        except OSError as exc:
+            raise DluxRuntimeError(
+                f"Could not open the DjangoLux update lock {path}: "
+                f"{exc.strerror or exc}; nothing was changed."
+            ) from exc
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                    raise PackageOperationBusy(
+                        "Another DjangoLux update or rollback is already running; "
+                        "nothing was changed."
+                    ) from exc
+                raise DluxRuntimeError(
+                    f"Could not take the DjangoLux update lock {path}: "
+                    f"{exc.strerror or exc}; nothing was changed."
+                ) from exc
+            try:
+                yield path
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     # -- the swap -------------------------------------------------------
 

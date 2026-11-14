@@ -6,14 +6,22 @@ pin the shape as much as the behaviour.
 
 import json
 import os
+import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 
-from composer.dlux_runtime import DluxRuntime, DluxRuntimeError, normalize_version
+from composer.dlux_runtime import (
+    DluxRuntime,
+    DluxRuntimeError,
+    PackageOperationBusy,
+    normalize_version,
+)
 
 
 def _stage_source(root: Path, version: str, *, manifest_version=None, inline_safe=True) -> Path:
@@ -121,6 +129,76 @@ class StagingTests(unittest.TestCase):
 
         self.assertEqual(self.runtime.staged_versions(), [])
         self.assertIn("health check failed", (moved / "quarantine-reason.txt").read_text())
+
+
+class PackageOperationLockTests(unittest.TestCase):
+    """The deployer CLI and the resident executor mount the same volume."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.runtime = DluxRuntime(self.root / "dlux-runtime")
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_a_second_holder_is_refused_without_waiting(self):
+        with self.runtime.package_operation_lock() as path:
+            self.assertEqual(path, self.runtime.state_dir / "package-operation.lock")
+            with self.assertRaises(PackageOperationBusy) as raised:
+                with self.runtime.package_operation_lock():
+                    self.fail("the lock was taken twice")
+        self.assertIn("already running; nothing was changed", str(raised.exception))
+        with self.runtime.package_operation_lock():
+            pass
+
+    def test_a_lock_held_by_another_process_is_seen(self):
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys\n"
+             "from composer.dlux_runtime import DluxRuntime\n"
+             "with DluxRuntime(sys.argv[1]).package_operation_lock():\n"
+             "    print('held', flush=True)\n"
+             "    sys.stdin.read()\n",
+             str(self.runtime.root)],
+            cwd=REPO_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        def reap():
+            holder.kill()
+            holder.wait(timeout=10)
+            holder.stdout.close()
+
+        self.addCleanup(reap)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+
+        started = time.monotonic()
+        with self.assertRaises(PackageOperationBusy):
+            with self.runtime.package_operation_lock():
+                pass
+        self.assertLess(time.monotonic() - started, 2, "a busy lock must refuse, not wait")
+
+        holder.stdin.close()
+        self.assertEqual(holder.wait(timeout=10), 0)
+        with self.runtime.package_operation_lock():
+            pass
+
+    def test_the_lock_is_released_when_the_body_raises(self):
+        with self.assertRaises(RuntimeError):
+            with self.runtime.package_operation_lock():
+                raise RuntimeError("boom")
+        with self.runtime.package_operation_lock():
+            pass
+
+    def test_a_planted_symlink_is_not_followed(self):
+        """worker and celery mount the volume read-write."""
+        self.runtime.state_dir.mkdir(parents=True)
+        elsewhere = self.root / "elsewhere"
+        (self.runtime.state_dir / "package-operation.lock").symlink_to(elsewhere)
+
+        with self.assertRaises(DluxRuntimeError) as raised:
+            with self.runtime.package_operation_lock():
+                self.fail("took a lock through a symlink")
+        self.assertNotIsInstance(raised.exception, PackageOperationBusy)
+        self.assertIn("nothing was changed", str(raised.exception))
+        self.assertFalse(elsewhere.exists())
 
 
 class ActivationTests(unittest.TestCase):
