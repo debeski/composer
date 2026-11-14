@@ -19,6 +19,8 @@ of Docker: the executor passes the real implementations
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -77,6 +79,49 @@ def _noop(_message: str) -> None:
     return None
 
 
+QUARANTINE_REASON_LIMIT = 300
+
+
+def quarantine_message(runtime: DluxRuntime, version, *, refused=False) -> str:
+    """Why ``version`` is neither offered nor applied here, or '' when it may be.
+
+    A release lands in ``failed/`` when an update to it was rolled back on this
+    deployment. Applying it again would cost another backup, restart and
+    rollback, so only an explicit retry does.
+    """
+    reason = runtime.quarantined_reason(version)
+    if reason is None:
+        return ""
+    reason = " ".join(reason.split()) or "no reason was recorded"
+    if len(reason) > QUARANTINE_REASON_LIMIT:
+        reason = reason[: QUARANTINE_REASON_LIMIT - 1].rstrip() + "…"
+    refusal = " Nothing was changed." if refused else ""
+    return (
+        f"DjangoLux {version} is quarantined: an update to it was rolled back on this "
+        f"deployment ({reason}).{refusal} To try it again, run "
+        f"'./start.sh dlux update --version {version} --retry-quarantined'."
+    )
+
+
+def _exclusive(operation):
+    """Run an update or rollback under the runtime volume's operation lock.
+
+    A second operation is refused at once with nothing changed, rather than
+    queued: the first one's outcome may make it pointless or wrong.
+    """
+
+    @functools.wraps(operation)
+    def run(runtime, *args, **kwargs):
+        with contextlib.ExitStack() as held:
+            try:
+                held.enter_context(runtime.package_operation_lock())
+            except DluxRuntimeError as exc:
+                return PackageUpdateResult(ok=False, message=str(exc))
+            return operation(runtime, *args, **kwargs)
+
+    return run
+
+
 def prune_releases(runtime: DluxRuntime, keep=DEFAULT_KEEP_RELEASES, protected=()) -> List[str]:
     """Drop the oldest staged releases, never touching a protected one."""
     keep = max(1, int(keep))
@@ -97,6 +142,7 @@ def prune_releases(runtime: DluxRuntime, keep=DEFAULT_KEEP_RELEASES, protected=(
     return removed
 
 
+@_exclusive
 def apply_package_update(
     runtime: DluxRuntime,
     *,
@@ -109,6 +155,7 @@ def apply_package_update(
     workdir=None,
     channel: Optional[str] = None,
     before_swap: Optional[Callable[[], tuple]] = None,
+    retry_quarantined: bool = False,
 ) -> PackageUpdateResult:
     """Fetch, stage, activate, restart, health-check — and undo if unhealthy.
 
@@ -120,6 +167,10 @@ def apply_package_update(
     explicit ``channel`` the deployment's published policy decides which
     releases an unpinned update may pick, exactly as `dlux check` does; an
     unreadable policy reads as stable.
+
+    A release quarantined by an earlier failed update is refused unless
+    ``retry_quarantined``; an unpinned update skips it. When a retry stays
+    healthy, its quarantine record is set aside (kept, renamed).
     """
     say = progress or _noop
     steps: List[str] = []
@@ -128,18 +179,39 @@ def apply_package_update(
         steps.append(name)
         say(message or name)
 
+    def refused_quarantine(version) -> Optional[PackageUpdateResult]:
+        if retry_quarantined:
+            return None
+        message = quarantine_message(runtime, version, refused=True)
+        if not message:
+            return None
+        steps.append("quarantined")
+        return PackageUpdateResult(ok=False, version=str(version), message=message, steps=steps)
+
+    if target_version:
+        refused = refused_quarantine(target_version)
+        if refused:
+            return refused
+
     try:
         step("resolving", "Resolving the DjangoLux release")
         if channel is None:
             channel, _policy_error = dlux_channel.read_policy(runtime.state_dir)
         extra = {}
         if source is release_source and not target_version:
+            quarantined = runtime.quarantined_versions()
+            if quarantined:
+                extra["exclude"] = quarantined
             expected = _published_availability(runtime, channel)
-            if expected:
+            if expected and expected not in quarantined:
                 extra["expected"] = expected
         candidate, unpacked = source.obtain(target_version, channel=channel, workdir=workdir, **extra)
     except Exception as exc:
         return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
+
+    refused = refused_quarantine(candidate.version)
+    if refused:
+        return refused
 
     try:
         current = runtime.read_active()
@@ -152,6 +224,9 @@ def apply_package_update(
             ok=True, version=candidate.version, previous_version=candidate.version,
             message=f"DjangoLux {candidate.version} is already the active release.", steps=steps,
         )
+
+    if runtime.quarantined_reason(candidate.version) is not None:
+        say(f"Retrying DjangoLux {candidate.version}, quarantined by an earlier failed update")
 
     if before_swap is not None:
         step("backing-up", "Taking a pre-update DjangoLux backup")
@@ -186,6 +261,15 @@ def apply_package_update(
     if healthy:
         step("pruning")
         prune_releases(runtime, keep_releases, protected=[previous_version])
+        try:
+            kept = runtime.set_aside_quarantine(candidate.version)
+        except OSError as exc:
+            say(f"Could not clear the quarantine record of DjangoLux {candidate.version}: {exc}")
+        else:
+            if kept is not None:
+                step("quarantine-cleared",
+                     f"Cleared the quarantine of DjangoLux {candidate.version} "
+                     f"(record kept as failed/{kept.name})")
         step("done")
         return PackageUpdateResult(
             ok=True, version=candidate.version, previous_version=previous_version,
@@ -229,6 +313,7 @@ def apply_package_update(
     )
 
 
+@_exclusive
 def rollback_package_update(
     runtime: DluxRuntime,
     *,
