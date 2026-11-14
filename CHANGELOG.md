@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.10.0b3
+
+- **Schema Migrations Restamp The Secrets File**: `composer check` reads the stack schema stamp of the plaintext secrets file (the first of `.env`, `secrets/.env`, `.secrets/.env`), but the 2 → 3, 3 → 4 and 4 → 5 migrations of `check --fix` (`maintenance_migration`, `media_migration`, `worker_migration`) restamped only the Compose sources and `stack_schema.STAMPED_FILES`. A `.secrets/.env` starting with `# dlux stack schema 4` therefore kept "Stack files declare different stack schemas (4: .secrets/.env; 5: …)" after `check --fix` (found on the sales CRM testbed with 1.10.0b2). New `stack_schema.restamp_secrets` adds the file to each migration's rewrites, and an unstamped secrets file is left untouched. Only the stamp changes:
+  - `stack_schema.write_updates` rewrites it in place, byte for byte, keeping its mode, owner, inode, line endings and any undecodable bytes;
+  - it is never copied to `.xclude/composer-check/` or staged as a proxy candidate;
+  - the repair preview (`preview_diff`, `secrets_note`) lists it without any of its lines.
+
+  `worker_migration` also catches up files still stamped 4 on a stack whose `compose.yml` is already stamped 5, so `check --fix` finishes a stack that 1.10.0b1 or b2 migrated.
+
 ## v1.10.0b2
 
 - **`dlux rollback` Skips Releases The Image Would Shadow**: DjangoLux's supervisor runs a staged release only when it is newer than the one baked into the project image, so `rollback_package_update(baked_version=)` drops staged releases at or below it and, with none left below the active release, returns to the image ("Returning to the DjangoLux release baked into the image (X)"). The CLI's `_baked_version_probe` reads the baked version in a fresh `web` container (`DLUX_BAKED_VERSION`, else `dlux.__version__`); if it cannot, rollback keeps the previous choice. Before, DjangoLux 1.16.0b2 over a 1.16.0b1 image rolled back to a staged 1.15.5b1 that never ran.

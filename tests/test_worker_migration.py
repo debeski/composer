@@ -299,6 +299,68 @@ class MigrateTests(unittest.TestCase):
                 wm.migrate(str(self.root), ["compose.yml"], command_runner=keeps_pre_start)
 
 
+SECRET = "test-secret-value-9f3c"
+PASSWORD = "test-password-7d1e"
+SECRETS_4 = f"# dlux stack schema 4\r\nDJANGO_SECRET_KEY={SECRET}\r\nPOSTGRES_PASSWORD={PASSWORD}\r\n".encode()
+
+
+class SecretsRestampTests(unittest.TestCase):
+    """`check` reads the secrets file's stamp, so the migration restamps it too."""
+
+    def setUp(self):
+        self.root = _copy(SCHEMA_4, self).resolve()
+        self.env = self.root / ".secrets" / ".env"
+        self.env.parent.mkdir()
+        self.env.write_bytes(SECRETS_4)
+        self.env.chmod(0o600)
+
+    def _migrate(self):
+        with patch("composer.worker_migration.shutil.which", return_value="/usr/bin/docker"):
+            return wm.migrate(str(self.root), ["compose.yml"], command_runner=_FakeCompose())
+
+    def _assert_no_secrets(self, value):
+        text = json.dumps(value, default=str)
+        self.assertNotIn(SECRET, text)
+        self.assertNotIn(PASSWORD, text)
+
+    def test_a_stamped_secrets_file_is_restamped_with_the_stack(self):
+        preview = wm.preview(str(self.root), ["compose.yml"])
+        self.assertIn(".secrets/.env", preview["files"])
+        self.assertIn(".secrets/.env is restamped 5", preview["note"])
+        self._assert_no_secrets(preview)
+
+        outcome = self._migrate()
+
+        self.assertIn(".secrets/.env", outcome["files"])
+        self.assertEqual(self.env.read_bytes(), SECRETS_4.replace(b"schema 4", b"schema 5", 1))
+        self.assertEqual(self.env.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((Path(outcome["backup_root"]) / "worker-migration" / ".secrets").exists())
+        self._assert_no_secrets(outcome)
+
+    def test_an_unstamped_secrets_file_is_not_touched(self):
+        unstamped = SECRETS_4.replace(b"# dlux stack schema 4\r\n", b"")
+        self.env.write_bytes(unstamped)
+        outcome = self._migrate()
+        self.assertNotIn(".secrets/.env", outcome["files"])
+        self.assertEqual(self.env.read_bytes(), unstamped)
+
+    def test_a_stack_already_on_5_has_its_secrets_file_caught_up(self):
+        """What an earlier `check --fix` left: compose.yml at 5, the secrets file at 4."""
+        self.env.write_bytes(SECRETS_4.replace(b"# dlux stack schema 4\r\n", b""))
+        self._migrate()
+        self.env.write_bytes(SECRETS_4)
+        self.assertEqual(read_stamp((self.root / "compose.yml").read_text(encoding="utf-8")), 5)
+
+        self.assertTrue(wm.pending(str(self.root), ["compose.yml"])["stamp"])
+        preview = wm.preview(str(self.root), ["compose.yml"])
+        self.assertEqual(preview["files"], [".secrets/.env"])
+        self.assertEqual(preview["diff"], "")
+        self._assert_no_secrets(preview)
+        self._migrate()
+        self.assertEqual(self.env.read_bytes(), SECRETS_4.replace(b"schema 4", b"schema 5", 1))
+        self.assertFalse(wm.pending(str(self.root), ["compose.yml"])["stamp"])
+
+
 class OldLayoutTests(unittest.TestCase):
     """dhub, dlux-panel and min-survey reach schema 5 in one `check --fix`.
 
@@ -491,6 +553,21 @@ class CheckFixTests(unittest.TestCase):
         self.assertIn("Added the worker service", added[0]["message"])
         self.assertIn("worker", self._services())
         self.assertEqual(read_stamp(Path("compose.yml").read_text(encoding="utf-8")), 5)
+
+    def test_a_stamped_secrets_file_agrees_with_the_stack_afterwards(self):
+        """No `stack-schema` warning left over for a stamped `.secrets/.env`."""
+        Path("compose.dev.yml").unlink()  # a deployment, which has no development override
+        Path(".secrets").mkdir()
+        Path(".secrets/.env").write_bytes(SECRETS_4)
+
+        fixes, launcher = self._fix((1, 16, 0))
+
+        added = [entry for entry in fixes if entry["name"] == "fix:task-worker"]
+        self.assertIn(".secrets/.env", added[0]["message"])
+        self.assertNotIn(SECRET, json.dumps(fixes))
+        schema = launcher._check_stack_schema()
+        self.assertEqual(schema["level"], OK, schema)
+        self.assertIn("stack schema 5", schema["message"])
 
     def test_a_stack_on_dlux_1_15_is_left_alone_quietly(self):
         """worker would crash-loop: 1.15 has no dlux_worker."""

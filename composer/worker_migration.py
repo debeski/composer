@@ -11,7 +11,8 @@ read-write runtime mount and a place in ``COMPOSER_AGENT_RESTART_SERVICES``.
 environment anchors, networks), gives it the worker command, healthcheck and stop
 grace period, and moves the init containers and the boot gate over. In
 development it mirrors the ``compose.dev.yml`` celery override for ``worker``.
-Files stamped 4 are restamped 5. An unstamped compose.yml is stamped 5 only when
+Files stamped 4 are restamped 5, the secrets file among them, also on a stack
+whose compose.yml is already 5. An unstamped compose.yml is stamped 5 only when
 nothing older is left in the stack (the packaged runtime, the maintenance page
 Composer publishes, private stored files); otherwise it stays unstamped and the
 result says why.
@@ -25,7 +26,6 @@ before writing anything and archives the originals under
 
 from __future__ import annotations
 
-import difflib
 import re
 import shutil
 import subprocess
@@ -33,7 +33,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import maintenance_migration, media_migration
-from .stack_schema import STAMPED_FILES, read_stamp, restamp
+from .stack_schema import (
+    STAMPED_FILES,
+    preview_diff,
+    read_stamp,
+    restamp,
+    restamp_secrets,
+    secrets_note,
+    write_updates,
+)
 from .stack_cleanup import (
     StackCleanupError,
     _archive_root,
@@ -400,9 +408,13 @@ def pending(project_dir: str, compose_files: Sequence[str]) -> Dict[str, bool]:
 
 
 def _stamps(project_root, compose_files, sources, base, updates, notes) -> None:
-    """Bring the stack's stamps to 5 once its compose file has worker."""
+    """Bring the stack's stamps to 5 once its compose file has worker.
+
+    Files still stamped 4 are caught up on a compose file already stamped 5,
+    such as a secrets file an earlier ``check --fix`` left behind.
+    """
     base_text = updates.get(base) or base.read_text(encoding="utf-8")
-    if not updates and read_stamp(base_text) not in (None, LEGACY_SCHEMA):
+    if not updates and read_stamp(base_text) not in (None, LEGACY_SCHEMA, TARGET_SCHEMA):
         return
     # compose.dev.yml keeps its stamp while it still lacks the worker override.
     dev_file = (project_root / DEV_OVERRIDE).resolve()
@@ -417,6 +429,7 @@ def _stamps(project_root, compose_files, sources, base, updates, notes) -> None:
         text = updates.get(path, path.read_text(encoding="utf-8"))
         if read_stamp(text) == LEGACY_SCHEMA:
             updates[path] = restamp(text, TARGET_SCHEMA)
+    restamp_secrets(project_root, updates, LEGACY_SCHEMA, TARGET_SCHEMA)
     if dev_waits:
         notes.append(
             f"{DEV_OVERRIDE} overrides celery but not worker yet; run './start.sh -d check --fix' "
@@ -481,19 +494,13 @@ def preview(project_dir: str, compose_files: Sequence[str]) -> Dict[str, Any]:
     _sources_, updates, notes = _plan(project_root, compose_files)
     if not updates:
         return {"files": [], "diff": "", "note": ""}
-    diff = "".join(
-        "".join(difflib.unified_diff(
-            path.read_text(encoding="utf-8").splitlines(keepends=True),
-            updates[path].splitlines(keepends=True),
-            fromfile=f"a/{name}", tofile=f"b/{name}",
-        ))
-        for name, path in sorted((str(path.relative_to(project_root)), path) for path in updates)
-    )
+    secrets = secrets_note(project_root, updates, TARGET_SCHEMA)
     return {
         "files": sorted(str(path.relative_to(project_root)) for path in updates),
-        "diff": diff,
+        "diff": preview_diff(project_root, updates),
         "note": " ".join(
-            ["The Compose configuration is validated first; the next deploy starts worker."] + notes
+            ["The Compose configuration is validated first; the next deploy starts worker."]
+            + notes + ([secrets] if secrets else [])
         ),
     }
 
@@ -553,12 +560,6 @@ def migrate(
 
     archive = _archive_root(project_root)
     result["backup_root"] = str(archive)
-    for path in updates:
-        destination = archive / "worker-migration" / path.relative_to(project_root)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
-    for path, text in updates.items():
-        with path.open("w", encoding="utf-8", newline="\n") as stream:
-            stream.write(text)
+    write_updates(project_root, updates, archive / "worker-migration")
     result["applied"] = True
     return result

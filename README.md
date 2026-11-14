@@ -137,7 +137,7 @@ When the command is DjangoLux's `migrator`, `-a APP`, `-mm`, and `-nm` are forwa
 **Stored files (security, DjangoLux stack schema 4).** Stacks generated before DjangoLux 1.15.3 have a proxy that serves every `/media/` file straight from disk, so anyone who can reach the site can download stored files by URL without signing in. `composer check` reports this as a `stored-files` **FAIL** (a hand-edited `/media/` section is a WARN instead). Once the running DjangoLux is 1.15.3 or later (the active inline release, or the image's), `composer check --fix` rewrites an unmodified generated `.proxy/Caddyfile` / `.proxy/default.conf.template`:
 - only `media/public/`, branding and managed images and fonts stay public;
 - every other `/media/` file is first checked by DjangoLux (`forward_auth` / `auth_request` to `/sys/files/media-access/`);
-- the new config is validated before anything is written, the files are restamped 3 → 4 and the originals archived under `.xclude/composer-check/`, and the proxy is recreated.
+- the new config is validated before anything is written, the files are restamped 3 → 4 (the secrets file in place, see [stack schema stamps](#stack-schema-stamps)) and the originals archived under `.xclude/composer-check/`, and the proxy is recreated.
 
 With an older DjangoLux the fix refuses, because the proxy would then refuse every private file. Before fixing, list folders your site shows to signed-out visitors (product photos, for example) in DjangoLux's `DLUX_PUBLIC_MEDIA`, or move them under `media/public/`.
 
@@ -146,7 +146,7 @@ With an older DjangoLux the fix refuses, because the proxy would then refuse eve
 - moves the init containers (`dlux_reconcile`, then `migrator`) and `DLUX_BOOT_GATE: "apply"` from `celery` to `worker`, which mounts `dlux_runtime` and `static` read-write;
 - keeps `celery` for the project's own tasks: no `pre_start`, so its boot gate waits like `web`; its command, healthcheck and read-write runtime mount stay (project tasks may write relay requests);
 - adds `worker` to `COMPOSER_AGENT_RESTART_SERVICES` right after `web`, and with `-d` mirrors the `compose.dev.yml` `celery` override for `worker`;
-- restamps files stamped 4 to 5. An unstamped `compose.yml` gets `DLUX_STACK_SCHEMA: "5"` only when nothing older is left: no `tools/` runtime modules, the maintenance page published by Composer, and stored files private. Otherwise it stays unstamped and the result says why; a later `check --fix` stamps it once the rest is done.
+- restamps files stamped 4 to 5, the secrets file among them, also on a stack whose `compose.yml` is already stamped 5. An unstamped `compose.yml` gets `DLUX_STACK_SCHEMA: "5"` only when nothing older is left: no `tools/` runtime modules, the maintenance page published by Composer, and stored files private. Otherwise it stays unstamped and the result says why; a later `check --fix` stamps it once the rest is done.
 
 The merged configuration is validated with `docker compose config` before anything is written, the originals are archived under `.xclude/composer-check/`, and nothing is recreated: the next deploy (`./start.sh`, or `./start.sh -d -b`) starts `worker`. The step runs after the others, so a stack still on the old layout (`dlux-updater`, `tools.dlux_runtime_supervisor`, the project's maintenance page) reaches schema 5 in one `check --fix`. DjangoLux 1.16 cannot be installed inline onto an older stack, and the step waits for a project image on 1.16, so the order is: put the image on DjangoLux 1.16 first (`./start.sh pull`, or bump the `django-lux` pin and rebuild), then run `./start.sh check --fix`, then deploy. A development stack runs `./start.sh -d check --fix` after bumping the pin, then `./start.sh -d -b`.
 
@@ -379,6 +379,14 @@ Composer compares the files with each other. Whether compose.yml's schema is the
 one the running DjangoLux expects is the app's `stack.schema` doctor check,
 which `check --deep` relays. `start.sh`/`start.ps1` are not stamped; they carry
 composer's own `composer-wrapper` marker.
+
+Each schema migration of `check --fix` (2 → 3 the maintenance page, 3 → 4 stored
+files, 4 → 5 `worker`) restamps every file stamped with the schema it leaves,
+including the secrets file `check` reads (the first of `.env`, `secrets/.env`,
+`.secrets/.env`). In the secrets file only the stamp changes: it is rewritten in
+place byte for byte, keeping its mode, owner and line endings; it is not copied
+to the `.xclude/composer-check/` backup; and the repair preview lists it without
+showing any of its lines. An unstamped secrets file is left as it is.
 
 ## maintenance page
 
