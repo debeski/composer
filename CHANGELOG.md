@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.10.0b4
 
 - **DjangoLux Updates And Rollbacks Take A Lock**: `apply_package_update`, `rollback_package_update` and `dlux update --dry-run` hold an exclusive, non-blocking `flock` on `state/package-operation.lock` (`DluxRuntime.package_operation_lock`), which the deployer CLI and the resident executor share. A second operation is refused at once with nothing changed. Concurrent updates had failed, or could delete a just-activated release.
 - **Quarantined DjangoLux Releases Are Not Retried Silently**: `dlux update` refuses a release in `failed/<version>/` with nothing changed, naming the recorded reason, until `--retry-quarantined`; a healthy retry renames the record to `failed/<version>.retried-<time>/`, kept for audit. `dlux check` and the resident availability report skip quarantined releases, so DjangoLux's Updates card stops offering them.
