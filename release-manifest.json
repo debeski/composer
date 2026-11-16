@@ -1,14 +1,12 @@
 {
   "schema_version": 1,
-  "version": "1.10.0",
-  "summary": "For DjangoLux 1.16: `check --fix` gives a stack DjangoLux's `worker` service (stack schema 5), inline updates honour a release's required stack schema, and DjangoLux updates are safer: one update or rollback runs at a time, and a release whose update failed here is not tried again unless you ask.",
+  "version": "1.10.1b1",
+  "summary": "For DjangoLux 1.16.1: `check` reports which front proxies Caddy trusts to forward client addresses, and `check --fix` lets the secrets file choose them with `DLUX_FRONT_PROXY`. Unset keeps today's trust of every private address and `check` warns; a list of addresses trusts only those, and an empty value trusts none.",
   "highlights": [
-    "`check --fix` adds the `worker` service for DjangoLux 1.16's tasks (stack schema 5) once the stack's DjangoLux has it, and keeps `celery` for project tasks.",
-    "A stack still on the old layout (`dlux-updater`, the `tools/` runtime) reaches stack schema 5 in one `check --fix`, which also restamps the secrets file.",
-    "Inline DjangoLux updates, restarts, backups and the Operations panel know `worker`; a release that needs a newer stack schema is not installed inline.",
-    "Two `dlux update` or `dlux rollback` runs no longer race: the second is refused at once with nothing changed.",
-    "A DjangoLux release that failed its health check here stays quarantined: `dlux check` does not offer it, and `dlux update --retry-quarantined` tries it again.",
-    "`dlux rollback` returns to the image's own DjangoLux release instead of a staged release at or below it, which would never run."
+    "`check` warns while Caddy trusts forwarded client addresses from every private network: a LAN client reaching Caddy directly can choose its address.",
+    "`check --fix` makes the Caddyfile and compose read DLUX_FRONT_PROXY from the secrets file, validates both, archives the originals and recreates caddy.",
+    "Set DLUX_FRONT_PROXY to the front proxy's addresses (space-separated), empty when users reach the server directly, or firewall Caddy's port instead.",
+    "`check` fails on a value Caddy cannot start with: commas, words such as `none`, or quotes, which `./start.sh` passes on to Caddy."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.0"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.1b1"
 }
