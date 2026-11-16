@@ -200,6 +200,7 @@ def _dry_run_repairs(launcher, args):
             "note": "; ".join(str(w) for w in outcome.get("warnings") or [])[:MAX_MESSAGE_CHARS],
         })
     repairs.extend(_maintenance_repair(launcher))
+    repairs.extend(_front_proxy_repair(launcher))
     repairs.extend(_worker_repair(launcher))
     return repairs, compose_digest(launcher)
 
@@ -217,6 +218,25 @@ def _maintenance_repair(launcher):
         return []
     return [{
         "name": "maintenance-page",
+        "files": outcome["files"],
+        "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
+        "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
+    }]
+
+
+def _front_proxy_repair(launcher):
+    """Caddy's trusted front proxies read from DLUX_FRONT_PROXY, which `check --fix` sets up."""
+    from . import front_proxy
+
+    try:
+        outcome = front_proxy.preview(".", launcher._maintenance_compose_files())
+    except Exception as exc:
+        return [{"name": "front-proxy", "files": [], "diff": "",
+                 "note": redact_text(str(exc))[:MAX_MESSAGE_CHARS]}]
+    if not outcome["files"] and not outcome["note"]:
+        return []
+    return [{
+        "name": "front-proxy",
         "files": outcome["files"],
         "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
         "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
