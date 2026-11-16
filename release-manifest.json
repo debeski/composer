@@ -1,12 +1,14 @@
 {
   "schema_version": 1,
-  "version": "1.10.0b4",
-  "summary": "DjangoLux package updates are safer: one update or rollback runs at a time, and a DjangoLux release whose update failed here is not tried again unless you ask.",
+  "version": "1.10.0",
+  "summary": "For DjangoLux 1.16: `check --fix` gives a stack DjangoLux's `worker` service (stack schema 5), inline updates honour a release's required stack schema, and DjangoLux updates are safer: one update or rollback runs at a time, and a release whose update failed here is not tried again unless you ask.",
   "highlights": [
+    "`check --fix` adds the `worker` service for DjangoLux 1.16's tasks (stack schema 5) once the stack's DjangoLux has it, and keeps `celery` for project tasks.",
+    "A stack still on the old layout (`dlux-updater`, the `tools/` runtime) reaches stack schema 5 in one `check --fix`, which also restamps the secrets file.",
+    "Inline DjangoLux updates, restarts, backups and the Operations panel know `worker`; a release that needs a newer stack schema is not installed inline.",
     "Two `dlux update` or `dlux rollback` runs no longer race: the second is refused at once with nothing changed.",
-    "A DjangoLux release that failed its health check here stays quarantined: `dlux update` refuses it, and `dlux check` does not offer it.",
-    "`dlux update --version V --retry-quarantined` tries a quarantined release again; the earlier failure record is kept.",
-    "Includes 1.10.0b3: `check --fix` gives the stack DjangoLux 1.16's `worker` service (stack schema 5) and restamps the secrets file."
+    "A DjangoLux release that failed its health check here stays quarantined: `dlux check` does not offer it, and `dlux update --retry-quarantined` tries it again.",
+    "`dlux rollback` returns to the image's own DjangoLux release instead of a staged release at or below it, which would never run."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.0b4"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.0"
 }
