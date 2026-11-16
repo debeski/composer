@@ -195,7 +195,8 @@ class ValueTests(unittest.TestCase):
         empty = fp.read_setting(self._root("DLUX_FRONT_PROXY=\n"), {})
         self.assertEqual((empty["set"], empty["value"], empty["source"]), (True, "", ".secrets/.env"))
         quoted = fp.read_setting(self._root('DLUX_FRONT_PROXY="10.0.0.5 192.168.10.0/24"\n'), {})
-        self.assertEqual(quoted["value"], "10.0.0.5 192.168.10.0/24")
+        self.assertEqual((quoted["value"], quoted["quoted"]), ("10.0.0.5 192.168.10.0/24", True))
+        self.assertFalse(fp.read_setting(self._root("DLUX_FRONT_PROXY=10.0.0.5 192.168.10.0/24\n"), {})["quoted"])
         inherited = fp.read_setting(self._root(), {"DLUX_FRONT_PROXY": "10.0.0.5"})
         self.assertEqual((inherited["value"], inherited["source"], inherited["secrets"]),
                          ("10.0.0.5", "the environment", ".secrets/.env"))
@@ -428,7 +429,7 @@ class CheckTests(unittest.TestCase):
         cases = {
             "DLUX_FRONT_PROXY=private_ranges\n": "a deliberate choice",
             "DLUX_FRONT_PROXY=\n": "Caddy trusts no proxy",
-            'DLUX_FRONT_PROXY="10.0.0.5 192.168.10.0/24"\n': "only from 10.0.0.5, 192.168.10.0/24",
+            "DLUX_FRONT_PROXY=10.0.0.5 192.168.10.0/24\n": "only from 10.0.0.5, 192.168.10.0/24",
             "DLUX_FRONT_PROXY=private_ranges 203.0.113.7\n": "only from every private network, 203.0.113.7",
         }
         for env, expected in cases.items():
@@ -452,6 +453,13 @@ class CheckTests(unittest.TestCase):
         legacy = _copy(SCHEMA_4, self)
         os.chdir(legacy)
         self.assertIn("once it reads the variable", self._check("DLUX_FRONT_PROXY=none\n")["message"])
+
+    def test_a_quoted_value_fails_because_the_quotes_reach_caddy(self):
+        self._managed()
+        result = self._check('DLUX_FRONT_PROXY="10.0.0.5 192.168.10.0/24"\n')
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("is in quotes", result["message"])
+        self.assertIn("Remove the quotes", result["fix"])
 
     def test_custom_none_missing_and_no_caddy_are_ok(self):
         caddyfile = Path(".proxy/Caddyfile")
@@ -536,6 +544,15 @@ class CheckFixTests(unittest.TestCase):
         blocked = [fix for fix in fixes if fix["name"] == "front-proxy"][0]
         self.assertEqual(blocked["level"], WARN)
         self.assertIn("none", blocked["message"])
+
+    def test_a_quoted_value_blocks_the_fix(self):
+        Path(".secrets").mkdir()
+        Path(".secrets/.env").write_text("DLUX_FRONT_PROXY='10.0.0.5'\n", encoding="utf-8")
+        fixes, migrate = self._fix()
+        migrate.assert_not_called()
+        blocked = [fix for fix in fixes if fix["name"] == "front-proxy"][0]
+        self.assertEqual(blocked["level"], WARN)
+        self.assertIn("is in quotes", blocked["message"])
 
     def test_declining_changes_nothing(self):
         _fixes, migrate = self._fix(confirmed=False)

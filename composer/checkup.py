@@ -705,6 +705,16 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             pending.append(f"{caddyfile} does not read " + ("it" if state["set"] else "DLUX_FRONT_PROXY"))
         if state["compose"] == front_proxy.ABSENT:
             pending.append(f"{compose} does not pass it to caddy")
+        if state["set"] and state["quoted"]:
+            return _result(
+                FAIL,
+                name,
+                f"DLUX_FRONT_PROXY in {where} is in quotes. './start.sh' passes the quotes to Caddy as part of "
+                "the value, and Caddy does not start with a quoted list"
+                + (" once it reads the variable." if pending else "."),
+                fix="Remove the quotes and separate the entries with spaces "
+                "(DLUX_FRONT_PROXY=10.0.0.5 192.168.10.0/24).",
+            )
         if state["invalid"]:
             commas = any("," in entry for entry in state["invalid"])
             return _result(

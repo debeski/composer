@@ -160,40 +160,47 @@ def add_compose_variable(contents: str) -> str:
     return contents[:start] + header + "".join(text for _key, text in entries) + trailer + contents[end:]
 
 
-def _env_values(path: Path) -> Dict[str, str]:
-    """A dotenv file as Composer's ``parse_env_file`` reads it."""
+def _env_values(path: Path, strip_quotes: bool = True) -> Dict[str, str]:
+    """A dotenv file as Composer's ``parse_env_file`` reads it (quotes kept when ``strip_quotes`` is False)."""
     values: Dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip("'\"")
+        value = value.strip()
+        values[key.strip()] = value.strip("'\"") if strip_quotes else value
     return values
 
 
-def _secrets(project_root: Path) -> Tuple[str, Optional[Dict[str, str]]]:
+def _secrets(project_root: Path, raw: bool = False) -> Tuple[str, Optional[Dict[str, str]]]:
     """``(relative path, values)`` of the secrets file; values None when it cannot be read."""
     path = secrets_file(project_root)
     if path is None:
         return DEFAULT_SECRETS, None
     try:
-        return str(path.relative_to(project_root)), _env_values(path)
+        return str(path.relative_to(project_root)), _env_values(path, strip_quotes=not raw)
     except (OSError, ValueError):
         return str(path.relative_to(project_root)), None
 
 
 def read_setting(project_root: Path, environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-    """``{"set", "value", "source", "secrets"}``: the secrets file's value, else the environment's."""
+    """``{"set", "value", "quoted", "source", "secrets"}``: the secrets file's value, else the environment's.
+
+    ``./start.sh`` hands the secrets file to Composer with ``docker run --env-file``, which keeps quotes, so
+    a quoted value reaches Caddy with its quotes; ``quoted`` reports it and ``value`` is the unquoted text.
+    """
     project_root = Path(project_root).resolve()
-    label, values = _secrets(project_root)
-    if values is not None and VARIABLE in values:
-        return {"set": True, "value": values[VARIABLE], "source": label, "secrets": label}
+    label, values = _secrets(project_root, raw=True)
     environ = os.environ if environ is None else environ
-    if VARIABLE in environ:
-        return {"set": True, "value": str(environ[VARIABLE]).strip().strip("'\""), "source": "the environment",
-                "secrets": label}
-    return {"set": False, "value": "", "source": label, "secrets": label}
+    if values is not None and VARIABLE in values:
+        raw, source = values[VARIABLE], label
+    elif VARIABLE in environ:
+        raw, source = str(environ[VARIABLE]).strip(), "the environment"
+    else:
+        return {"set": False, "value": "", "quoted": False, "source": label, "secrets": label}
+    value = raw.strip("'\"")
+    return {"set": True, "value": value, "quoted": value != raw, "source": source, "secrets": label}
 
 
 def _valid_range(token: str) -> bool:
@@ -309,6 +316,11 @@ def inspect(
 def blocked_reason(project_root: Path, environ: Optional[Mapping[str, str]] = None) -> str:
     """Why ``migrate`` must not hand Caddy the current value, or ``""``."""
     setting = read_setting(project_root, environ)
+    if setting["set"] and setting["quoted"]:
+        return (
+            f"DLUX_FRONT_PROXY in {setting['source']} is in quotes, which reach Caddy as part of the value, and "
+            "Caddy would not start with a quoted list. Remove the quotes, then run 'composer check --fix' again."
+        )
     _ranges, invalid = parse_ranges(setting["value"]) if setting["set"] else ([], [])
     if not invalid:
         return ""
