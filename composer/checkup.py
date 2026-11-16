@@ -8,7 +8,7 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from . import maintenance_migration, maintenance_page, media_migration, worker_migration
+from . import front_proxy, maintenance_migration, maintenance_page, media_migration, worker_migration
 from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -679,6 +679,124 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return _result(OK, "stored-files", "No /media/ route in the proxy config.")
         return _result(OK, "stored-files", "Stored files go through DjangoLux's access check (since stack schema 4).")
 
+    def _check_front_proxy(self) -> Dict[str, Any]:
+        """Which front proxies may Caddy take a client address from (``DLUX_FRONT_PROXY``)?"""
+        name = "front-proxy"
+        try:
+            state = front_proxy.inspect(Path("."), self._maintenance_compose_files(), self.build_compose_env())
+        except OSError as exc:
+            return _result(WARN, name, f"Could not read the proxy configuration: {exc}")
+        caddyfile = str(front_proxy.CADDYFILE)
+        compose = state["compose_file"] or "compose.yml"
+        where = state["source"]
+        secrets = state["secrets"]
+        if state["compose"] == front_proxy.NO_SERVICE:
+            return _result(OK, name, "No caddy service in this stack; Composer manages Caddy's trusted front proxies only.")
+        if state["caddyfile"] == front_proxy.MISSING:
+            return _result(OK, name, f"No {caddyfile}; Composer manages the generated Caddyfile's trusted front proxies only.")
+        if state["caddyfile"] == front_proxy.CUSTOM:
+            return _result(OK, name, f"Caddy's trusted_proxies in {caddyfile} is custom, not managed by Composer.")
+        if state["caddyfile"] == front_proxy.NONE:
+            return _result(
+                OK, name, f"{caddyfile} sets no trusted_proxies, so Caddy trusts no front proxy (custom, not managed by Composer)."
+            )
+        pending = []
+        if state["caddyfile"] == front_proxy.LEGACY:
+            pending.append(f"{caddyfile} does not read " + ("it" if state["set"] else "DLUX_FRONT_PROXY"))
+        if state["compose"] == front_proxy.ABSENT:
+            pending.append(f"{compose} does not pass it to caddy")
+        if state["set"] and state["quoted"]:
+            return _result(
+                FAIL,
+                name,
+                f"DLUX_FRONT_PROXY in {where} is in quotes. './start.sh' passes the quotes to Caddy as part of "
+                "the value, and Caddy does not start with a quoted list"
+                + (" once it reads the variable." if pending else "."),
+                fix="Remove the quotes and separate the entries with spaces "
+                "(DLUX_FRONT_PROXY=10.0.0.5 192.168.10.0/24).",
+            )
+        if state["invalid"]:
+            commas = any("," in entry for entry in state["invalid"])
+            return _result(
+                FAIL,
+                name,
+                f"DLUX_FRONT_PROXY in {where} has entries that are not an IP address, a CIDR range or "
+                f"private_ranges: {', '.join(state['invalid'])}. "
+                + ("Caddy would not start with them once it reads the variable." if pending
+                   else "Caddy does not start with them."),
+                fix="List the front proxy's addresses or ranges separated by spaces"
+                + (", not commas" if commas else "")
+                + " (DLUX_FRONT_PROXY=10.0.0.5 192.168.10.0/24), set it to private_ranges, or leave it empty "
+                "to trust no proxy.",
+            )
+        if pending:
+            if state["set"]:
+                message = (
+                    f"DLUX_FRONT_PROXY is set in {where}, but " + " and ".join(pending)
+                    + ", so Caddy still trusts forwarded client addresses from every private network."
+                )
+            else:
+                message = (
+                    "Caddy trusts forwarded client addresses (X-Forwarded-For) from every private network, and "
+                    "the trusted front proxies cannot be chosen yet: " + " and ".join(pending) + "."
+                )
+            steps = []
+            if state["files"]:
+                steps.append(
+                    f"Run 'composer check --fix' so Caddy reads DLUX_FRONT_PROXY from {secrets} "
+                    "(left unset, it keeps trusting every private network)."
+                )
+            if state["unsupported"]:
+                steps.append(
+                    f'Add DLUX_FRONT_PROXY: "{front_proxy.COMPOSE_VALUE}" to the caddy service\'s environment '
+                    f"in {compose} by hand: {state['unsupported']}"
+                )
+            return _result(WARN, name, message, fix=" ".join(steps))
+        if state["compose"] == front_proxy.CUSTOM:
+            return _result(
+                OK, name, f"{compose} gives caddy its own DLUX_FRONT_PROXY value (custom, not managed by Composer)."
+            )
+        if not state["set"]:
+            return _result(
+                WARN,
+                name,
+                "Caddy trusts forwarded client addresses (X-Forwarded-For) from every private network, so a "
+                "client on a private network that reaches Caddy directly can choose the address DjangoLux "
+                "records (login lockout, audit log).",
+                fix=f"Set DLUX_FRONT_PROXY in {secrets} to the front proxy's address(es), space-separated "
+                "(DLUX_FRONT_PROXY=10.0.0.5), set it empty (DLUX_FRONT_PROXY=) if users reach this server "
+                "directly, or set it to private_ranges to keep this on purpose. Without a setting, firewall "
+                f"the server so only the front proxy reaches Caddy's published port {state['port']}. Apply a "
+                f"changed {secrets} with './start.sh', which recreates caddy.",
+            )
+        ranges = list(dict.fromkeys(state["ranges"]))
+        if not ranges:
+            return _result(
+                OK, name, f"Caddy trusts no proxy (DLUX_FRONT_PROXY is empty in {where}): it records the address "
+                "that connects to it."
+            )
+        if ranges == [front_proxy.PRIVATE_RANGES]:
+            return _result(
+                OK, name, "Caddy trusts forwarded client addresses from every private network "
+                f"(DLUX_FRONT_PROXY=private_ranges in {where}), a deliberate choice."
+            )
+        named = ["every private network" if entry == front_proxy.PRIVATE_RANGES else entry for entry in ranges]
+        return _result(
+            OK, name, f"Caddy trusts forwarded client addresses only from {', '.join(named)} "
+            f"(DLUX_FRONT_PROXY in {where})."
+        )
+
+    def _compose_env_with_secrets(self) -> Dict[str, str]:
+        """The compose environment plus the secrets file's values, so a recreate never runs on defaults."""
+        environment = self.build_compose_env()
+        for candidate in self.plaintext_env_candidates():
+            try:
+                environment.update(self.parse_env_file(candidate))
+                break
+            except (OSError, ValueError):
+                continue
+        return environment
+
     def _check_maintenance_page(self) -> Dict[str, Any]:
         """Composer publishes the page (stack schema 3); a legacy stack still serves
         the project's ``.proxy/maintenance.html`` and is migrated by ``check --fix``."""
@@ -926,6 +1044,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             results.append(self._check_stack_schema())
             results.append(self._check_maintenance_page())
             results.append(self._check_media_privacy())
+            results.append(self._check_front_proxy())
             worker = self._check_task_worker()
             if worker is not None:
                 results.append(worker)
@@ -1158,12 +1277,22 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return fixes
         proxy_routes = proxy_inspection["recognized"]
         media_exposed = media_migration.inspect(Path("."))["exposed"]
+        try:
+            front_proxy_files = front_proxy.inspect(
+                Path("."), self._maintenance_compose_files(), self.build_compose_env()
+            )["files"]
+        except OSError:
+            front_proxy_files = []
+        front_proxy_blocked = front_proxy.blocked_reason(Path("."), self.build_compose_env()) if front_proxy_files else ""
+        if front_proxy_blocked:
+            fixes.append(_result(WARN, "front-proxy", front_proxy_blocked))
+            front_proxy_files = []
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
                 and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration and not media_exposed
-                and not needs_worker):
+                and not needs_worker and not front_proxy_files):
             return fixes
         consequences = []
         if maintenance_legacy:
@@ -1181,6 +1310,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "serving any other /media/ file. Uploads your site shows to signed-out visitors (product "
                 "photos, for example) must first be listed in DLUX_PUBLIC_MEDIA or moved under media/public/. "
                 "The proxy config is validated, archived under .xclude/composer-check/ and the proxy recreated."
+            )
+        if front_proxy_files:
+            consequences.append(
+                "Let DLUX_FRONT_PROXY in the secrets file choose the front proxies Caddy trusts ("
+                + ", ".join(front_proxy_files)
+                + "). Left unset, Caddy keeps trusting every private network. The Compose and Caddy "
+                "configuration is validated, the originals archived under .xclude/composer-check/ and a "
+                "running caddy recreated."
             )
         if stale_wrappers:
             consequences.append(
@@ -1402,6 +1539,22 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     fixes.append(_result(OK, "fix:stored-files", f"{detail}. Backup: {outcome['backup_root']}"))
                 except (OSError, StackCleanupError) as exc:
                     fixes.append(_result(FAIL, "fix:stored-files", str(exc)))
+
+        if front_proxy_files:
+            from .stack_cleanup import StackCleanupError
+
+            try:
+                outcome = front_proxy.migrate(
+                    ".", self._maintenance_compose_files(), environment=self._compose_env_with_secrets()
+                )
+                detail = f"Caddy reads its trusted front proxies from DLUX_FRONT_PROXY: {', '.join(outcome['files'])}"
+                if outcome["recreated"]:
+                    detail += f"; recreated {', '.join(outcome['recreated'])}"
+                if outcome["notes"]:
+                    detail += ". " + " ".join(outcome["notes"])
+                fixes.append(_result(OK, "fix:front-proxy", f"{detail}. Backup: {outcome['backup_root']}"))
+            except (OSError, StackCleanupError) as exc:
+                fixes.append(_result(FAIL, "fix:front-proxy", str(exc)))
 
         if obsolete or proxy_routes:
             from .stack_cleanup import StackCleanupError, remove_obsolete_services
