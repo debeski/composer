@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.0
+
+- **Stable 1.10.0 For DjangoLux 1.16**: Promote the published and accepted 1.10.0b4, which includes 1.10.0b1-b3. `check --fix` migrates a stack to schema 5 (DjangoLux's `worker` service, project `celery` kept, secrets file restamped); inline updates honour a release's stack schema; DjangoLux updates and rollbacks take a lock, and a release that failed here stays quarantined. Paired with DjangoLux 1.16.0. No runtime changes from the beta.
+
 ## v1.10.0b4
 
 - **DjangoLux Updates And Rollbacks Take A Lock**: `apply_package_update`, `rollback_package_update` and `dlux update --dry-run` hold an exclusive, non-blocking `flock` on `state/package-operation.lock` (`DluxRuntime.package_operation_lock`), which the deployer CLI and the resident executor share. A second operation is refused at once with nothing changed. Concurrent updates had failed, or could delete a just-activated release.
