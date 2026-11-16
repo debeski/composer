@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "1.10.1b1",
+  "version": "1.10.1",
   "summary": "For DjangoLux 1.16.1: `check` reports which front proxies Caddy trusts to forward client addresses, and `check --fix` lets the secrets file choose them with `DLUX_FRONT_PROXY`. Unset keeps today's trust of every private address and `check` warns; a list of addresses trusts only those, and an empty value trusts none.",
   "highlights": [
     "`check` warns while Caddy trusts forwarded client addresses from every private network: a LAN client reaching Caddy directly can choose its address.",
@@ -8,5 +8,5 @@
     "Set DLUX_FRONT_PROXY to the front proxy's addresses (space-separated), empty when users reach the server directly, or firewall Caddy's port instead.",
     "`check` fails on a value Caddy cannot start with: commas, words such as `none`, or quotes, which `./start.sh` passes on to Caddy."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.1b1"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.1"
 }
