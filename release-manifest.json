@@ -1,12 +1,13 @@
 {
   "schema_version": 1,
-  "version": "1.10.1",
-  "summary": "For DjangoLux 1.16.1: `check` reports which front proxies Caddy trusts to forward client addresses, and `check --fix` lets the secrets file choose them with `DLUX_FRONT_PROXY`. Unset keeps today's trust of every private address and `check` warns; a list of addresses trusts only those, and an empty value trusts none.",
+  "version": "1.10.2b1",
+  "summary": "For DjangoLux 1.16.2: `check` reports whether web and worker can see the SMTP relay's settings and whether the relay gets its certificate settings, and `check --fix` shares them through the compose file so the Email step can show them and SMTP_RELAY_TLS_VERIFY and SMTP_RELAY_CA_FILE reach the relay. The password stays with the relay; web only learns whether one is set.",
   "highlights": [
-    "`check` warns while Caddy trusts forwarded client addresses from every private network: a LAN client reaching Caddy directly can choose its address.",
-    "`check --fix` makes the Caddyfile and compose read DLUX_FRONT_PROXY from the secrets file, validates both, archives the originals and recreates caddy.",
-    "Set DLUX_FRONT_PROXY to the front proxy's addresses (space-separated), empty when users reach the server directly, or firewall Caddy's port instead.",
-    "`check` fails on a value Caddy cannot start with: commas, words such as `none`, or quotes, which `./start.sh` passes on to Caddy."
+    "`check` warns while only smtp-relay sees the relay's host, port, encryption and user, so DjangoLux's Email step cannot show them.",
+    "`check --fix` shares them with web and worker in compose.yml, keeps each default, validates it and recreates web, worker and smtp-relay.",
+    "It also passes SMTP_RELAY_TLS_VERIFY and SMTP_RELAY_CA_FILE, so the relay's certificate check can trust a private CA or be switched off.",
+    "The relay password stays on smtp-relay: web only learns whether one is set, and no preview, message or backup shows it.",
+    "The Composer image builds on Python 3.15."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.1"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.2b1"
 }
