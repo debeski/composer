@@ -8,13 +8,18 @@ generated compose passes them in the shared ``x-environment`` block, which
   SMTP_RELAY_HOST: "${SMTP_RELAY_HOST:-smtp.gmail.com}"
   ...
   SMTP_RELAY_PASSWORD_SET: "${SMTP_RELAY_PASSWORD:+yes}"
+  SMTP_RELAY_TLS_VERIFY: "${SMTP_RELAY_TLS_VERIFY:-True}"
+  SMTP_RELAY_CA_FILE: "${SMTP_RELAY_CA_FILE:-}"
 
 The password itself stays in ``smtp-relay``'s environment; web gets
-``SMTP_RELAY_PASSWORD_SET`` (``yes`` or empty) instead.
+``SMTP_RELAY_PASSWORD_SET`` (``yes`` or empty) instead. The relay reads its
+certificate check (``SMTP_RELAY_TLS_VERIFY``, ``SMTP_RELAY_CA_FILE``) from its own
+environment, so a compose that does not pass them leaves both out of reach.
 
-``inspect`` reports ``current``, ``legacy`` (``smtp-relay`` alone receives the
-settings, each in the generated ``"${SMTP_RELAY_<KEY>:-<default>}"`` form),
-``custom`` or ``no-service``. ``migrate`` moves a legacy stack's lines into the
+``inspect`` reports ``current``, ``legacy`` (``pending`` names what is missing:
+``mail`` when ``smtp-relay`` alone receives the settings in the generated
+``"${SMTP_RELAY_<KEY>:-<default>}"`` form, ``tls`` when the certificate settings
+are not passed), ``custom`` or ``no-service``. ``migrate`` moves a legacy stack's lines into the
 shared block with the defaults the stack already used, validates the result with
 ``docker compose config`` (web sees what the relay uses, and no service but
 ``smtp-relay`` receives the password), archives the original under
@@ -52,7 +57,10 @@ PASSWORD = "SMTP_RELAY_PASSWORD"
 PASSWORD_SET = "SMTP_RELAY_PASSWORD_SET"
 PASSWORD_SET_VALUE = "${SMTP_RELAY_PASSWORD:+yes}"
 LEGACY_KEYS = ("SMTP_RELAY_HOST", "SMTP_RELAY_PORT", "SMTP_RELAY_USE_TLS", "SMTP_RELAY_USER")
-SHARED_KEYS = ("SMTP_RELAY_HOST", "SMTP_RELAY_PORT", "SMTP_RELAY_USE_TLS", "SMTP_RELAY_USE_SSL", "SMTP_RELAY_USER")
+MAIL_KEYS = ("SMTP_RELAY_HOST", "SMTP_RELAY_PORT", "SMTP_RELAY_USE_TLS", "SMTP_RELAY_USE_SSL", "SMTP_RELAY_USER")
+TLS_KEYS = ("SMTP_RELAY_TLS_VERIFY", "SMTP_RELAY_CA_FILE")
+SHARED_KEYS = MAIL_KEYS + TLS_KEYS
+MAIL_MANAGED = MAIL_KEYS + (PASSWORD_SET,)
 MANAGED_KEYS = SHARED_KEYS + (PASSWORD_SET,)
 INSERT_AFTER = "DEFAULT_FROM_EMAIL"
 COMMENT = (
@@ -60,7 +68,17 @@ COMMENT = (
     "# relay uses; the password itself reaches smtp-relay only, web gets set/unset.",
     "# SMTP_RELAY_USE_SSL empty: SSL on port 465, STARTTLS (SMTP_RELAY_USE_TLS) otherwise.",
 )
-USE_SSL_VALUE = "${SMTP_RELAY_USE_SSL:-}"
+TLS_COMMENT = (
+    "# The relay signs in only to a provider whose certificate a trusted CA issued for",
+    "# its host. SMTP_RELAY_CA_FILE adds a private CA (a bundle mounted into smtp-relay);",
+    "# SMTP_RELAY_TLS_VERIFY=False switches the check off.",
+)
+DEFAULTS = {
+    "SMTP_RELAY_USE_SSL": "${SMTP_RELAY_USE_SSL:-}",
+    "SMTP_RELAY_TLS_VERIFY": "${SMTP_RELAY_TLS_VERIFY:-True}",
+    "SMTP_RELAY_CA_FILE": "${SMTP_RELAY_CA_FILE:-}",
+}
+MAIL, TLS = "mail", "tls"
 
 CURRENT, LEGACY, CUSTOM, NO_SERVICE = "current", "legacy", "custom", "no-service"
 
@@ -204,13 +222,37 @@ def _relay_block(lines: List[str], contents: str) -> Optional[Dict[str, Any]]:
     return relay
 
 
+def _part(keys, managed, shared, own, details) -> bool:
+    """Whether one group of shared lines is still to add; what stops it goes to ``details``."""
+    if any(key in shared for key in managed):
+        differ = [key for key in keys if key in shared and not _pass_through(key, shared[key][1])]
+        if PASSWORD_SET in managed and PASSWORD_SET in shared and shared[PASSWORD_SET][1] != PASSWORD_SET_VALUE:
+            differ.append(PASSWORD_SET)
+        lacking = [key for key in managed if key not in shared]
+        if differ:
+            details.append("x-environment sets " + ", ".join(differ) + " differently from the generated lines")
+        if lacking:
+            details.append("x-environment lacks " + ", ".join(lacking))
+        return False
+    literal = [key for key in keys if key in own and not _pass_through(key, own[key][1])]
+    if PASSWORD_SET in managed and PASSWORD_SET in own:
+        literal.append(PASSWORD_SET)
+    if literal:
+        details.append("smtp-relay sets " + ", ".join(literal) + " to its own value")
+    if keys == MAIL_KEYS:
+        missing = [key for key in LEGACY_KEYS if key not in own]
+        if missing:
+            details.append("smtp-relay is not passed " + ", ".join(missing))
+    return True
+
+
 def classify(contents: str) -> Dict[str, Any]:
-    """``{"state", "details", "shared_password"}`` for one compose file's text."""
+    """``{"state", "pending", "details", "shared_password"}`` for one compose file's text."""
     contents = contents.replace("\r\n", "\n")
     lines = contents.splitlines(keepends=True)
     relay = _relay_block(lines, contents)
     if relay is None:
-        return {"state": NO_SERVICE, "details": [], "shared_password": False}
+        return {"state": NO_SERVICE, "pending": [], "details": [], "shared_password": False}
     block = _anchor_block(lines)
     shared = block["entries"] if block else {}
     shared_password = PASSWORD in shared
@@ -224,7 +266,7 @@ def classify(contents: str) -> Dict[str, Any]:
     elif block["anchor"] not in relay["merges"]:
         details.append(f"smtp-relay's environment does not merge *{block['anchor']}")
     if details:
-        return {"state": CUSTOM, "details": details, "shared_password": shared_password}
+        return {"state": CUSTOM, "pending": [], "details": details, "shared_password": shared_password}
 
     own = relay["entries"]
     password = own.get(PASSWORD)
@@ -232,34 +274,16 @@ def classify(contents: str) -> Dict[str, Any]:
         details.append("smtp-relay is not passed SMTP_RELAY_PASSWORD")
     elif not _PASSWORD_REFERENCE.match(password[1] or ""):
         details.append('smtp-relay\'s SMTP_RELAY_PASSWORD is not "${SMTP_RELAY_PASSWORD:-}"')
-
-    present = [key for key in MANAGED_KEYS if key in shared]
-    if present:
-        differ = [key for key in SHARED_KEYS if key in shared and not _pass_through(key, shared[key][1])]
-        if PASSWORD_SET in shared and shared[PASSWORD_SET][1] != PASSWORD_SET_VALUE:
-            differ.append(PASSWORD_SET)
-        lacking = [key for key in MANAGED_KEYS if key not in shared]
-        if differ:
-            details.append("x-environment sets " + ", ".join(differ) + " differently from the generated lines")
-        if lacking:
-            details.append("x-environment lacks " + ", ".join(lacking))
-        overrides = [
-            key for key in MANAGED_KEYS
-            if key in own and (key not in shared or own[key][1] != shared[key][1])
-        ]
-        if overrides:
-            details.append("smtp-relay sets its own " + ", ".join(overrides))
-        return {"state": CUSTOM if details else CURRENT, "details": details, "shared_password": False}
-
-    literal = [key for key in SHARED_KEYS if key in own and not _pass_through(key, own[key][1])]
-    missing = [key for key in LEGACY_KEYS if key not in own]
-    if PASSWORD_SET in own:
-        literal.append(PASSWORD_SET)
-    if literal:
-        details.append("smtp-relay sets " + ", ".join(literal) + " to its own value")
-    if missing:
-        details.append("smtp-relay is not passed " + ", ".join(missing))
-    return {"state": CUSTOM if details else LEGACY, "details": details, "shared_password": False}
+    pending = [
+        name for name, keys, managed in ((MAIL, MAIL_KEYS, MAIL_MANAGED), (TLS, TLS_KEYS, TLS_KEYS))
+        if _part(keys, managed, shared, own, details)
+    ]
+    overrides = [key for key in MANAGED_KEYS if key in own and key in shared and own[key][1] != shared[key][1]]
+    if overrides:
+        details.append("smtp-relay sets its own " + ", ".join(overrides))
+    if details:
+        return {"state": CUSTOM, "pending": [], "details": details, "shared_password": False}
+    return {"state": LEGACY if pending else CURRENT, "pending": pending, "details": [], "shared_password": False}
 
 
 def migrate_compose(contents: str) -> str:
@@ -276,17 +300,25 @@ def migrate_compose(contents: str) -> str:
     contents = contents.replace("\r\n", "\n")
     lines = contents.splitlines(keepends=True)
     block = _anchor_block(lines)
-    relay = _relay_block(lines, contents)
-    own = relay["entries"]
-    values = {key: own[key][1] for key in SHARED_KEYS if key in own}
-    values.setdefault("SMTP_RELAY_USE_SSL", USE_SSL_VALUE)
-    added = [f"{block['indent']}{line}\n" for line in COMMENT]
-    added += [f'{block["indent"]}{key}: "{values[key]}"\n' for key in SHARED_KEYS]
-    added.append(f'{block["indent"]}{PASSWORD_SET}: "{PASSWORD_SET_VALUE}"\n')
-    removed = sorted((own[key][0] for key in SHARED_KEYS if key in own), reverse=True)
+    own = _relay_block(lines, contents)["entries"]
+    indent = block["indent"]
+    moved = (MAIL_KEYS if MAIL in state["pending"] else ()) + (TLS_KEYS if TLS in state["pending"] else ())
+    values = {key: (own[key][1] if key in own else DEFAULTS[key]) for key in moved}
+    added: List[str] = []
+    if MAIL in state["pending"]:
+        insert = block["insert"]
+        added += [f"{indent}{line}\n" for line in COMMENT]
+        added += [f'{indent}{key}: "{values[key]}"\n' for key in MAIL_KEYS]
+        added.append(f'{indent}{PASSWORD_SET}: "{PASSWORD_SET_VALUE}"\n')
+    else:
+        insert = block["entries"][PASSWORD_SET][0] + 1
+    if TLS in state["pending"]:
+        added += [f"{indent}{line}\n" for line in TLS_COMMENT]
+        added += [f'{indent}{key}: "{values[key]}"\n' for key in TLS_KEYS]
+    removed = sorted((own[key][0] for key in moved if key in own), reverse=True)
     for position in removed:
         del lines[position]
-    insert = block["insert"] - sum(1 for position in removed if position < block["insert"])
+    insert -= sum(1 for position in removed if position < insert)
     if insert > 0 and not lines[insert - 1].endswith("\n"):
         lines[insert - 1] += "\n"
     lines[insert:insert] = added
@@ -315,7 +347,7 @@ def _defining(sources: Sequence[Path]) -> Tuple[Optional[Path], Dict[str, Any]]:
         state = classify(text)
         if state["state"] != NO_SERVICE:
             return path, state
-    return None, {"state": NO_SERVICE, "details": [], "shared_password": False}
+    return None, {"state": NO_SERVICE, "pending": [], "details": [], "shared_password": False}
 
 
 def _plan(project_root: Path, compose_files: Sequence[str], strict: bool = True):
@@ -366,9 +398,9 @@ def preview(project_dir: str, compose_files: Sequence[str]) -> Dict[str, Any]:
         "diff": _mask_password(preview_diff(project_root, updates)),
         "note": (
             "web and worker receive the SMTP relay's host, port, encryption and user, so DjangoLux's Email step "
-            "can show them; the password stays on smtp-relay and web only learns whether one is set. The "
-            "Compose configuration is validated first; running web, worker and smtp-relay are then recreated "
-            "so they read it."
+            "can show them, and the relay its certificate settings (SMTP_RELAY_TLS_VERIFY, SMTP_RELAY_CA_FILE); "
+            "the password stays on smtp-relay and web only learns whether one is set. The Compose configuration "
+            "is validated first; running web, worker and smtp-relay are then recreated so they read it."
         ),
     }
 

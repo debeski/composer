@@ -798,17 +798,28 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return _result(OK, name, "No smtp-relay service running DjangoLux's relay; nothing to share.")
         if state["state"] == relay_env.CURRENT:
             return _result(
-                OK, name, "web and worker see the SMTP relay's host, port, encryption and user; the password "
-                "reaches smtp-relay only."
+                OK, name, "web and worker see the SMTP relay's host, port, encryption and user, and the relay gets "
+                "its certificate settings; the password reaches smtp-relay only."
             )
         if state["state"] == relay_env.LEGACY:
+            tls = (
+                "SMTP_RELAY_TLS_VERIFY and SMTP_RELAY_CA_FILE in the secrets file do not reach the relay, so it "
+                "always verifies the provider's certificate against the system CAs"
+            )
+            if relay_env.MAIL in state["pending"]:
+                message = (
+                    f"{compose} passes the SMTP relay's settings to smtp-relay only, so DjangoLux's Email step "
+                    "cannot show the host, port, encryption and user the relay uses"
+                    + (f", and {tls}." if relay_env.TLS in state["pending"] else ".")
+                )
+            else:
+                message = f"{compose} does not pass the relay's certificate settings: {tls}."
             return _result(
                 WARN,
                 name,
-                f"{compose} passes the SMTP relay's settings to smtp-relay only, so DjangoLux's Email step "
-                "cannot show the host, port, encryption and user the relay uses.",
-                fix="Run 'composer check --fix' to share them with web and worker through the x-environment "
-                "block. The password stays on smtp-relay; web only learns whether one is set.",
+                message,
+                fix="Run 'composer check --fix' to share the relay's mail and certificate settings through the "
+                "x-environment block. The password stays on smtp-relay; web only learns whether one is set.",
             )
         details = "; ".join(state["details"])
         if state["shared_password"]:
@@ -1371,7 +1382,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if relay_env_files:
             consequences.append(
                 "Share the SMTP relay's host, port, encryption and user with web and worker so DjangoLux's "
-                "Email step can show them (" + ", ".join(relay_env_files) + "). The password stays on "
+                "Email step can show them, and pass the relay its certificate settings (SMTP_RELAY_TLS_VERIFY, "
+                "SMTP_RELAY_CA_FILE) (" + ", ".join(relay_env_files) + "). The password stays on "
                 "smtp-relay; web only learns whether one is set. The Compose configuration is validated, the "
                 "original archived under .xclude/composer-check/ and running web, worker and smtp-relay "
                 "recreated."
@@ -1622,7 +1634,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 )
                 if outcome["applied"]:
                     detail = (
-                        "web and worker see the SMTP relay's settings (password excepted): "
+                        "web, worker and smtp-relay share the SMTP relay's settings (password excepted): "
                         + ", ".join(outcome["files"])
                     )
                     if outcome["recreated"]:
