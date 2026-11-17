@@ -41,7 +41,7 @@ RELAY_LINES = (
     '      SMTP_RELAY_USE_TLS: "${SMTP_RELAY_USE_TLS:-True}"\n'
     '      SMTP_RELAY_USER: "${SMTP_RELAY_USER:-}"\n'
 )
-SHARED_LINES = (
+MAIL_LINES = (
     "  # The relay's provider settings. Shared so the Email step can show what the\n"
     "  # relay uses; the password itself reaches smtp-relay only, web gets set/unset.\n"
     "  # SMTP_RELAY_USE_SSL empty: SSL on port 465, STARTTLS (SMTP_RELAY_USE_TLS) otherwise.\n"
@@ -52,8 +52,18 @@ SHARED_LINES = (
     '  SMTP_RELAY_USER: "${SMTP_RELAY_USER:-}"\n'
     '  SMTP_RELAY_PASSWORD_SET: "${SMTP_RELAY_PASSWORD:+yes}"\n'
 )
+TLS_LINES = (
+    "  # The relay signs in only to a provider whose certificate a trusted CA issued for\n"
+    "  # its host. SMTP_RELAY_CA_FILE adds a private CA (a bundle mounted into smtp-relay);\n"
+    "  # SMTP_RELAY_TLS_VERIFY=False switches the check off.\n"
+    '  SMTP_RELAY_TLS_VERIFY: "${SMTP_RELAY_TLS_VERIFY:-True}"\n'
+    '  SMTP_RELAY_CA_FILE: "${SMTP_RELAY_CA_FILE:-}"\n'
+)
+SHARED_LINES = MAIL_LINES + TLS_LINES
 FROM_LINE = '  DEFAULT_FROM_EMAIL: "${DEFAULT_FROM_EMAIL:-webmaster@localhost}"\n'
+PASSWORD_LINE = '      SMTP_RELAY_PASSWORD: "${SMTP_RELAY_PASSWORD:-}"\n'
 EXPECTED = COMPOSE.replace(RELAY_LINES, "").replace(FROM_LINE, FROM_LINE + SHARED_LINES)
+MAIL_ONLY = COMPOSE.replace(RELAY_LINES, "").replace(FROM_LINE, FROM_LINE + MAIL_LINES)
 
 
 def _services(text):
@@ -77,8 +87,25 @@ def _every_file_text(root: Path) -> str:
 
 class ClassifyTests(unittest.TestCase):
     def test_the_generated_stack_is_legacy_and_its_rewrite_current(self):
-        self.assertEqual(re_.classify(COMPOSE)["state"], re_.LEGACY)
+        state = re_.classify(COMPOSE)
+        self.assertEqual((state["state"], state["pending"]), (re_.LEGACY, [re_.MAIL, re_.TLS]))
         self.assertEqual(re_.classify(EXPECTED)["state"], re_.CURRENT)
+
+    def test_shared_mail_lines_without_the_certificate_lines_are_legacy(self):
+        state = re_.classify(MAIL_ONLY)
+        self.assertEqual((state["state"], state["pending"]), (re_.LEGACY, [re_.TLS]))
+
+    def test_certificate_settings_composer_cannot_share_are_custom(self):
+        literal = COMPOSE.replace(PASSWORD_LINE, PASSWORD_LINE + '      SMTP_RELAY_CA_FILE: "/etc/dlux/ca.pem"\n')
+        state = re_.classify(literal)
+        self.assertEqual(state["state"], re_.CUSTOM)
+        self.assertIn("smtp-relay sets SMTP_RELAY_CA_FILE to its own value", state["details"])
+        self.assertNotIn("/etc/dlux/ca.pem", json.dumps(state))
+        anchor = EXPECTED.replace('"${SMTP_RELAY_TLS_VERIFY:-True}"', '"False"')
+        self.assertIn("x-environment sets SMTP_RELAY_TLS_VERIFY differently from the generated lines",
+                      re_.classify(anchor)["details"])
+        half = MAIL_ONLY.replace(MAIL_LINES, MAIL_LINES + '  SMTP_RELAY_TLS_VERIFY: "${SMTP_RELAY_TLS_VERIFY:-True}"\n')
+        self.assertIn("x-environment lacks SMTP_RELAY_CA_FILE", re_.classify(half)["details"])
 
     def test_no_relay_service_is_no_service(self):
         self.assertEqual(re_.classify((OLD_LAYOUT / "compose.yml").read_text(encoding="utf-8"))["state"],
@@ -194,6 +221,25 @@ class MigrateComposeTests(unittest.TestCase):
         text = re_.migrate_compose(own)
         self.assertIn('  EMAIL_USE_SSL: "False"\n' + SHARED_LINES + "\n# Services\nservices:\n", text)
         self.assertEqual(re_.classify(text)["state"], re_.CURRENT)
+
+    def test_a_stack_with_the_mail_lines_gains_the_certificate_lines_after_them(self):
+        text = re_.migrate_compose(MAIL_ONLY)
+        self.assertEqual(text, EXPECTED)
+        self.assertEqual(re_.migrate_compose(text), text)
+
+    def test_certificate_lines_in_smtp_relay_move_with_their_defaults(self):
+        own = COMPOSE.replace(PASSWORD_LINE, PASSWORD_LINE + '      SMTP_RELAY_TLS_VERIFY: "${SMTP_RELAY_TLS_VERIFY:-False}"\n')
+        text = re_.migrate_compose(own)
+        self.assertIn('  SMTP_RELAY_TLS_VERIFY: "${SMTP_RELAY_TLS_VERIFY:-False}"\n', text)
+        self.assertNotIn("      SMTP_RELAY_TLS_VERIFY", text)
+        self.assertEqual(re_.classify(text)["state"], re_.CURRENT)
+
+    def test_an_operator_s_ca_mount_is_left_and_none_is_added(self):
+        mount = "    volumes:\n      - ./.secrets/smtp-relay-ca.pem:/etc/dlux/smtp-relay-ca.pem:ro\n"
+        own = COMPOSE.replace(PASSWORD_LINE, PASSWORD_LINE + mount)
+        text = re_.migrate_compose(own)
+        self.assertIn(PASSWORD_LINE + mount, text)
+        self.assertEqual(re_.migrate_compose(COMPOSE).count("smtp-relay-ca.pem"), 0)
 
     def test_windows_line_endings_are_kept(self):
         text = re_.migrate_compose(COMPOSE.replace("\n", "\r\n"))
@@ -436,7 +482,15 @@ class CheckTests(unittest.TestCase):
         result = self._check()
         self.assertEqual(result["level"], WARN)
         self.assertIn("passes the SMTP relay's settings to smtp-relay only", result["message"])
+        self.assertIn("SMTP_RELAY_TLS_VERIFY and SMTP_RELAY_CA_FILE in the secrets file do not reach the relay",
+                      result["message"])
         self.assertIn("composer check --fix", result["fix"])
+
+    def test_missing_certificate_lines_alone_are_a_fixable_warning(self):
+        result = self._check(MAIL_ONLY)
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("does not pass the relay's certificate settings", result["message"])
+        self.assertNotIn("Email step", result["message"])
 
     def test_a_current_stack_is_ok(self):
         result = self._check(EXPECTED)
@@ -540,7 +594,11 @@ class DjangoLuxScaffoldTests(unittest.TestCase):
             self.skipTest("No DjangoLux checkout alongside that shares the relay settings in its scaffold")
         text = template.read_text(encoding="utf-8")
         self.assertEqual(re_.classify(text)["state"], re_.CURRENT)
-        self.assertIn(FROM_LINE + SHARED_LINES, text)
+        self.assertIn(FROM_LINE + MAIL_LINES, text)
+        if re_.TLS_KEYS[0] in text:
+            for line in TLS_LINES.splitlines(keepends=True):
+                if not line.lstrip().startswith("#"):
+                    self.assertIn(line, text)
 
 
 if __name__ == "__main__":
