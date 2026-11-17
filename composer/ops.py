@@ -201,6 +201,7 @@ def _dry_run_repairs(launcher, args):
         })
     repairs.extend(_maintenance_repair(launcher))
     repairs.extend(_front_proxy_repair(launcher))
+    repairs.extend(_relay_env_repair(launcher))
     repairs.extend(_worker_repair(launcher))
     return repairs, compose_digest(launcher)
 
@@ -237,6 +238,25 @@ def _front_proxy_repair(launcher):
         return []
     return [{
         "name": "front-proxy",
+        "files": outcome["files"],
+        "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
+        "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
+    }]
+
+
+def _relay_env_repair(launcher):
+    """The relay's settings shared with web and worker, which `check --fix` sets up."""
+    from . import relay_env
+
+    try:
+        outcome = relay_env.preview(".", launcher._maintenance_compose_files())
+    except Exception as exc:
+        return [{"name": "relay-env", "files": [], "diff": "",
+                 "note": redact_text(str(exc))[:MAX_MESSAGE_CHARS]}]
+    if not outcome["files"]:
+        return []
+    return [{
+        "name": "relay-env",
         "files": outcome["files"],
         "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
         "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
