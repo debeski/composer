@@ -567,11 +567,15 @@ class MaintenanceRepairPreviewTests(unittest.TestCase):
                 patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": []}), \
                 patch("composer.agent_installer.normalize_restart_labels", return_value={"files": []}):
             repairs, digest = _dry_run_repairs(self.launcher, SimpleNamespace(file=None))
-        self.assertEqual([r["name"] for r in repairs], ["maintenance-page", "front-proxy"])
+        self.assertEqual([r["name"] for r in repairs], ["maintenance-page", "front-proxy", "relay-env"])
         self.assertEqual(repairs[0]["files"], [".proxy/Caddyfile", "compose.yml"])
         self.assertIn("/_dlux/maintenance/", repairs[0]["diff"])
         self.assertEqual(repairs[1]["files"], [".proxy/Caddyfile", "compose.yml"])
         self.assertIn("+\t\ttrusted_proxies static {$DLUX_FRONT_PROXY:private_ranges}", repairs[1]["diff"])
+        self.assertEqual(repairs[2]["files"], ["compose.yml"])
+        self.assertIn('+  SMTP_RELAY_HOST: "${SMTP_RELAY_HOST:-smtp.gmail.com}"', repairs[2]["diff"])
+        self.assertIn("+  SMTP_RELAY_PASSWORD_SET: ", repairs[2]["diff"])
+        self.assertIn('-      SMTP_RELAY_USER: "${SMTP_RELAY_USER:-}"', repairs[2]["diff"])
         self.assertEqual(digest, compose_digest(self.launcher))
 
     def test_editing_the_caddyfile_after_the_preview_changes_the_digest(self):

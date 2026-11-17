@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **SMTP Relay Settings Shared With Web**: New `composer/relay_env.py` and the `relay-env` finding of `composer check`: WARN while the compose file passes `SMTP_RELAY_HOST`, `SMTP_RELAY_PORT`, `SMTP_RELAY_USE_TLS` and `SMTP_RELAY_USER` to `smtp-relay` only, so DjangoLux 1.16.2's Email step cannot show the relay's settings; WARN when `x-environment` shares `SMTP_RELAY_PASSWORD`; OK for the shared form, a stack without the relay, or custom lines (named, left alone). `check --fix` moves the generated `"${SMTP_RELAY_<KEY>:-<default>}"` lines into the `x-environment` block after `DEFAULT_FROM_EMAIL` with each stack's own defaults, adds `SMTP_RELAY_USE_SSL: "${SMTP_RELAY_USE_SSL:-}"` and `SMTP_RELAY_PASSWORD_SET: "${SMTP_RELAY_PASSWORD:+yes}"`, keeps `SMTP_RELAY_PASSWORD` on `smtp-relay`, validates with `docker compose config` (`web` and `worker` must see the relay's values, and no other service may receive the password), archives the original under `.xclude/composer-check/relay-env/` and recreates running `web`, `worker` and `smtp-relay`. The password's value never appears in a preview (the Operations card's `ops._relay_env_repair` masks any literal one), a message or an archive. No stack schema change; the result matches DjangoLux 1.16.2's scaffold byte for byte.
+
 ## v1.10.1
 
 - **Stable 1.10.1 For DjangoLux 1.16.1**: Promote the published and accepted 1.10.1b1. `composer check` reports the `front-proxy` finding (WARN while Caddy trusts every private range, FAIL for a value Caddy cannot start with, quotes included), and `check --fix` makes the Caddyfile and the `caddy` service read `DLUX_FRONT_PROXY` from the secrets file. Unset keeps today's trust, so updating needs no action. Paired with DjangoLux 1.16.1. No runtime changes from the beta.

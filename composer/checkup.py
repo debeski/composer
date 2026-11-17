@@ -8,7 +8,7 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from . import front_proxy, maintenance_migration, maintenance_page, media_migration, worker_migration
+from . import front_proxy, maintenance_migration, maintenance_page, media_migration, relay_env, worker_migration
 from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -786,6 +786,50 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             f"(DLUX_FRONT_PROXY in {where})."
         )
 
+    def _check_relay_env(self) -> Dict[str, Any]:
+        """Can DjangoLux's Email step see the SMTP relay's settings (all but the password)?"""
+        name = "relay-env"
+        try:
+            state = relay_env.inspect(Path("."), self._maintenance_compose_files())
+        except (OSError, ValueError) as exc:
+            return _result(WARN, name, f"Could not read the Compose file: {exc}")
+        compose = state["compose_file"] or "compose.yml"
+        if state["state"] == relay_env.NO_SERVICE:
+            return _result(OK, name, "No smtp-relay service running DjangoLux's relay; nothing to share.")
+        if state["state"] == relay_env.CURRENT:
+            return _result(
+                OK, name, "web and worker see the SMTP relay's host, port, encryption and user; the password "
+                "reaches smtp-relay only."
+            )
+        if state["state"] == relay_env.LEGACY:
+            return _result(
+                WARN,
+                name,
+                f"{compose} passes the SMTP relay's settings to smtp-relay only, so DjangoLux's Email step "
+                "cannot show the host, port, encryption and user the relay uses.",
+                fix="Run 'composer check --fix' to share them with web and worker through the x-environment "
+                "block. The password stays on smtp-relay; web only learns whether one is set.",
+            )
+        details = "; ".join(state["details"])
+        if state["shared_password"]:
+            return _result(
+                WARN,
+                name,
+                f"{compose} shares the SMTP relay password with every service that merges x-environment, "
+                f"web and worker included ({details}).",
+                fix="Move SMTP_RELAY_PASSWORD from the x-environment block to smtp-relay's environment, then "
+                "run 'composer check' again.",
+            )
+        return _result(
+            OK,
+            name,
+            f"The SMTP relay's settings in {compose} are custom, not managed by Composer ({details}); the "
+            "Email step shows only what web receives.",
+            fix="To have Composer share them, keep the values in the secrets file (SMTP_RELAY_HOST=...) and "
+            "pass them to smtp-relay in the generated form (SMTP_RELAY_HOST: \"${SMTP_RELAY_HOST:-...}\"), "
+            "then run 'composer check --fix'.",
+        )
+
     def _compose_env_with_secrets(self) -> Dict[str, str]:
         """The compose environment plus the secrets file's values, so a recreate never runs on defaults."""
         environment = self.build_compose_env()
@@ -1045,6 +1089,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             results.append(self._check_maintenance_page())
             results.append(self._check_media_privacy())
             results.append(self._check_front_proxy())
+            results.append(self._check_relay_env())
             worker = self._check_task_worker()
             if worker is not None:
                 results.append(worker)
@@ -1287,12 +1332,16 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if front_proxy_blocked:
             fixes.append(_result(WARN, "front-proxy", front_proxy_blocked))
             front_proxy_files = []
+        try:
+            relay_env_files = relay_env.inspect(Path("."), self._maintenance_compose_files())["files"]
+        except (OSError, ValueError):
+            relay_env_files = []
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
                 and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration and not media_exposed
-                and not needs_worker and not front_proxy_files):
+                and not needs_worker and not front_proxy_files and not relay_env_files):
             return fixes
         consequences = []
         if maintenance_legacy:
@@ -1318,6 +1367,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 + "). Left unset, Caddy keeps trusting every private network. The Compose and Caddy "
                 "configuration is validated, the originals archived under .xclude/composer-check/ and a "
                 "running caddy recreated."
+            )
+        if relay_env_files:
+            consequences.append(
+                "Share the SMTP relay's host, port, encryption and user with web and worker so DjangoLux's "
+                "Email step can show them (" + ", ".join(relay_env_files) + "). The password stays on "
+                "smtp-relay; web only learns whether one is set. The Compose configuration is validated, the "
+                "original archived under .xclude/composer-check/ and running web, worker and smtp-relay "
+                "recreated."
             )
         if stale_wrappers:
             consequences.append(
@@ -1555,6 +1612,24 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 fixes.append(_result(OK, "fix:front-proxy", f"{detail}. Backup: {outcome['backup_root']}"))
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:front-proxy", str(exc)))
+
+        if relay_env_files:
+            from .stack_cleanup import StackCleanupError
+
+            try:
+                outcome = relay_env.migrate(
+                    ".", self._maintenance_compose_files(), environment=self._compose_env_with_secrets()
+                )
+                if outcome["applied"]:
+                    detail = (
+                        "web and worker see the SMTP relay's settings (password excepted): "
+                        + ", ".join(outcome["files"])
+                    )
+                    if outcome["recreated"]:
+                        detail += f"; recreated {', '.join(outcome['recreated'])}"
+                    fixes.append(_result(OK, "fix:relay-env", f"{detail}. Backup: {outcome['backup_root']}"))
+            except (OSError, ValueError, StackCleanupError) as exc:
+                fixes.append(_result(FAIL, "fix:relay-env", str(exc)))
 
         if obsolete or proxy_routes:
             from .stack_cleanup import StackCleanupError, remove_obsolete_services

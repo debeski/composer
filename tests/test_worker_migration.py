@@ -538,6 +538,7 @@ class CheckFixTests(unittest.TestCase):
             patch("composer.agent_installer.enable_executor", return_value={"files": []}),
             patch("composer.agent_installer.normalize_restart_labels", return_value={"files": []}),
             patch("composer.agent_installer.migrate_dlux_init_containers", return_value={"files": []}),
+            patch("composer.relay_env.inspect", return_value={"files": []}),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             fixes = launcher._maybe_fix(_fix_args(dev), [])
