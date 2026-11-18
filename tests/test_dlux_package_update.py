@@ -269,6 +269,28 @@ class RollbackTests(_Base):
         self.assertTrue(result.ok)
         self.assertEqual(self.runtime.read_active(), {})
 
+    def test_on_the_image_release_there_is_nothing_to_roll_back(self):
+        """No backup, no restart: the image's release is already the floor."""
+        self._stage("1.8.0")
+        for pointer in (None, "image"):
+            if pointer:
+                self.runtime.write_active("1.8.1", source="image")
+            ops = _Ops()
+            backups = []
+
+            result = rollback_package_update(
+                self.runtime, restart=ops.restart, health_check=ops.health,
+                before_swap=lambda: backups.append(1) or (True, "backed up"),
+                baked_version=lambda: self.fail("the baked version was read"),
+            )
+
+            self.assertTrue(result.ok, pointer)
+            self.assertFalse(result.rolled_back)
+            self.assertIn("Nothing to roll back", result.message)
+            self.assertEqual((ops.restart_calls, ops.health_calls, backups), (0, 0, []))
+            self.assertEqual(result.steps, ["nothing-to-roll-back"])
+        self.assertEqual(self.runtime.read_active()["source"], "image")
+
     def test_a_two_digit_patch_is_ordered_by_number_not_by_string(self):
         """"1.8.10" sorts below "1.8.9" as a string, and did here."""
         self._stage("1.8.9")
