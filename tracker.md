@@ -45,9 +45,8 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] `1.10/relay_image_check` (`relay-version` WARN): owner OK to push + PR, accept on testbed-dlux (inline 1.16.2b1 over a 1.16.0b1 image → WARN; image on 1.16.2b1 → OK), cut 1.10.2b2, then stables 1.10.2 + DjangoLux 1.16.2.
+  - [ ] Composer 1.10.2b2 = `1.10/relay_image_check` (`relay-version` WARN; carries this tracker, merge first) + `1.10/rollback_noop` (3d7cdc1: `dlux rollback` on the image release says nothing to roll back, no backup/restart), paired with DjangoLux 1.16.2b2. Owner OK to push + PR each; accept on testbed-dlux (inline 1.16.2b1 over a 1.16.0b1 image → WARN; image on 1.16.2b1 → OK; rollback on the image release); cut 1.10.2b2; then stables 1.10.2 + DjangoLux 1.16.2.
   - [ ] Accept `1.10/update_guards` on a testbed, then PR it: two `dlux update --version X --staged-wheel …` a second apart (one refused "already running; nothing was changed"), a rollback during an update, a release that fails its health check (refused next time with its reason; `--retry-quarantined` retries; a healthy retry leaves `failed/X.retried-<time>/`), and `dlux check` / the Updates card no longer offering it.
-  - [ ] `dlux rollback` while already on the image's release still restarts web/worker/celery and takes a backup; it should report there is nothing to roll back (1.16.0b2 stress run 2026-11-11, finding 1).
   - [ ] A pinned `dlux update --version X` right after X is published fails "not published" while PyPI's CDN serves a stale simple index (seen 2026-10-09 with 1.11.0b6); the stale-index re-read only covers unpinned updates. Retry pinned resolution the same way.
   - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
   - [ ] Live verify the hardened inline update on a real stack: panel-triggered apply, agent stages, executor swaps, and DjangoLux reports the new version.
