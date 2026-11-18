@@ -1,13 +1,15 @@
 {
   "schema_version": 1,
-  "version": "1.10.2b1",
-  "summary": "For DjangoLux 1.16.2: `check` reports whether web and worker can see the SMTP relay's settings and whether the relay gets its certificate settings, and `check --fix` shares them through the compose file so the Email step can show them and SMTP_RELAY_TLS_VERIFY and SMTP_RELAY_CA_FILE reach the relay. The password stays with the relay; web only learns whether one is set.",
+  "version": "1.10.2b2",
+  "summary": "For DjangoLux 1.16.2: `check` reports whether web and worker can see the SMTP relay's settings and whether the relay gets its certificate settings, and `check --fix` shares them through the compose file so the Email step can show them and SMTP_RELAY_TLS_VERIFY and SMTP_RELAY_CA_FILE reach the relay. The password stays with the relay; web only learns whether one is set. `check` also warns while smtp-relay's image carries a DjangoLux older than 1.16.2, which signs in to the provider without checking its certificate, and `dlux rollback` on the image's own release says there is nothing to roll back.",
   "highlights": [
     "`check` warns while only smtp-relay sees the relay's host, port, encryption and user, so DjangoLux's Email step cannot show them.",
     "`check --fix` shares them with web and worker in compose.yml, keeps each default, validates it and recreates web, worker and smtp-relay.",
     "It also passes SMTP_RELAY_TLS_VERIFY and SMTP_RELAY_CA_FILE, so the relay's certificate check can trust a private CA or be switched off.",
     "The relay password stays on smtp-relay: web only learns whether one is set, and no preview, message or backup shows it.",
+    "`check` warns while smtp-relay's image runs DjangoLux older than 1.16.2: that relay skips the certificate check until the image is rebuilt.",
+    "`dlux rollback` on the image's own release says there is nothing to roll back, with no backup or restart.",
     "The Composer image builds on Python 3.15."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.2b1"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.2b2"
 }
