@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -512,6 +513,77 @@ class CheckTests(unittest.TestCase):
         result = self._check((OLD_LAYOUT / "compose.yml").read_text(encoding="utf-8"))
         self.assertEqual(result["level"], OK)
         self.assertIn("No smtp-relay", result["message"])
+
+
+class RelayVersionTests(unittest.TestCase):
+    def setUp(self):
+        self.cwd = os.getcwd()
+        self.root = _copy(SCHEMA_4, self)
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, self.cwd)
+
+    def _check(self, web, relay, text=None):
+        if text is not None:
+            Path("compose.yml").write_text(text, encoding="utf-8")
+        launcher = DockerComposeLauncher()
+        launcher.active_compose_files = ["compose.yml"]
+        with patch.object(launcher, "_running_dlux_version", return_value=web) as running, \
+                patch.object(launcher, "_dlux_runtime_version", return_value=relay) as probe:
+            result = launcher._check_relay_version()
+        return result, running, probe
+
+    def test_an_image_relay_older_than_web_warns(self):
+        result, _running, probe = self._check((1, 16, 2), (1, 16, 0))
+        probe.assert_called_once_with("smtp-relay")
+        self.assertEqual(result["name"], "relay-version")
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("smtp-relay runs DjangoLux 1.16.0 from the project image while web runs 1.16.2", result["message"])
+        self.assertIn("without checking its certificate", result["message"])
+        self.assertIn("DjangoLux 1.16.2 or later", result["fix"])
+        self.assertIn("'./start.sh'", result["fix"])
+
+    def test_a_relay_with_the_certificate_check_is_ok(self):
+        result, _running, _probe = self._check((1, 16, 3), (1, 16, 2), EXPECTED)
+        self.assertEqual(result["level"], OK)
+        self.assertIn("smtp-relay runs DjangoLux 1.16.2", result["message"])
+
+    def test_a_web_without_the_certificate_check_is_not_asked(self):
+        for web in ((1, 16, 1), None):
+            result, _running, probe = self._check(web, (1, 15, 0))
+            self.assertIsNone(result)
+            probe.assert_not_called()
+
+    def test_an_unreadable_relay_version_says_nothing(self):
+        result, _running, _probe = self._check((1, 16, 2), None)
+        self.assertIsNone(result)
+
+    def test_check_reports_it_after_relay_env(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "worker", "smtp-relay"]
+        ok = {"level": OK, "name": "other", "message": ""}
+        with ExitStack() as stack:
+            for name in ("_check_compose_files", "_check_compose_parses", "_check_secrets", "_check_composer_channel",
+                         "_check_required_vars", "_check_topology", "_check_removed_services",
+                         "_check_dlux_updater_executor", "_check_proxy_routes", "_check_stack_schema",
+                         "_check_maintenance_page", "_check_media_privacy", "_check_front_proxy", "_check_versions"):
+                stack.enter_context(patch.object(launcher, name, return_value=ok))
+            for name in ("_check_docker", "_check_wrappers"):
+                stack.enter_context(patch.object(launcher, name, return_value=[]))
+            for name in ("_check_resident_commands", "_check_docker_proxy", "resolve_active_compose_files",
+                         "_requested_channel", "_check_task_worker"):
+                stack.enter_context(patch.object(launcher, name, return_value=None))
+            stack.enter_context(patch.object(launcher, "_check_relay_env", return_value={"name": "relay-env"}))
+            stack.enter_context(patch.object(launcher, "_check_relay_version", return_value={"name": "relay-version"}))
+            results, _fixed = launcher.collect_checkup(SimpleNamespace(file="", dev=False, fix=False, deep=False))
+        names = [entry["name"] for entry in results]
+        self.assertEqual(names[names.index("relay-env") + 1], "relay-version")
+
+    def test_no_relay_reads_no_version(self):
+        result, running, probe = self._check((1, 16, 2), (1, 16, 0),
+                                             (OLD_LAYOUT / "compose.yml").read_text(encoding="utf-8"))
+        self.assertIsNone(result)
+        running.assert_not_called()
+        probe.assert_not_called()
 
 
 class CheckFixTests(unittest.TestCase):

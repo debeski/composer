@@ -81,6 +81,8 @@ DEFAULTS = {
 MAIL, TLS = "mail", "tls"
 
 CURRENT, LEGACY, CUSTOM, NO_SERVICE = "current", "legacy", "custom", "no-service"
+# The first DjangoLux whose relay checks the provider's certificate, and whose Email step says so.
+CERTIFICATE_CHECK = (1, 16, 2)
 
 _X_ENVIRONMENT = re.compile(r"^x-environment:[ \t]*(?:&([\w-]+))?[ \t]*(?:#.*)?$")
 _ANCHOR_LINE = re.compile(r"^[ \t]+&([\w-]+)[ \t]*(?:#.*)?$")

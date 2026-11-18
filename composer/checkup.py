@@ -841,6 +841,46 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "then run 'composer check --fix'.",
         )
 
+    def _check_relay_version(self) -> Optional[Dict[str, Any]]:
+        """Does smtp-relay check the provider's certificate, as DjangoLux's Email step says it does?
+
+        The relay runs the DjangoLux baked into its image: it mounts no runtime volume, so an inline update
+        reaches web and worker but not the relay. Only a web on DjangoLux 1.16.2 or later shows the
+        certificate check, so only then is the relay's own version read.
+        """
+        try:
+            state = relay_env.inspect(Path("."), self._maintenance_compose_files())
+        except (OSError, ValueError):
+            return None
+        if state.get("state") not in (relay_env.CURRENT, relay_env.LEGACY, relay_env.CUSTOM):
+            return None
+        floor = relay_env.CERTIFICATE_CHECK
+        web = self._running_dlux_version()
+        if web is None or tuple(web) < floor:
+            return None
+        relay = self._dlux_runtime_version(relay_env.SERVICE)
+        if relay is None:
+            return None
+        relay_version = ".".join(map(str, relay))
+        if tuple(relay) >= floor:
+            return _result(
+                OK, "relay-version",
+                f"smtp-relay runs DjangoLux {relay_version}, which checks the mail provider's certificate before "
+                "signing in.",
+            )
+        return _result(
+            WARN,
+            "relay-version",
+            f"smtp-relay runs DjangoLux {relay_version} from the project image while web runs "
+            f"{'.'.join(map(str, web))}, so the relay signs in to the mail provider without checking its "
+            "certificate, although DjangoLux's Email step shows the check as on. The relay takes DjangoLux from "
+            "its image; inline updates do not reach it.",
+            fix=f"Move the stack to a project image built on DjangoLux {'.'.join(map(str, floor))} or later (a "
+            "project release, or a rebuild from source), then run './start.sh'. The relay then refuses a "
+            "provider whose certificate it cannot verify; for a private CA, set SMTP_RELAY_CA_FILE (or "
+            "SMTP_RELAY_TLS_VERIFY=False) in the secrets file.",
+        )
+
     def _compose_env_with_secrets(self) -> Dict[str, str]:
         """The compose environment plus the secrets file's values, so a recreate never runs on defaults."""
         environment = self.build_compose_env()
@@ -1101,6 +1141,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             results.append(self._check_media_privacy())
             results.append(self._check_front_proxy())
             results.append(self._check_relay_env())
+            relay_version = self._check_relay_version()
+            if relay_version is not None:
+                results.append(relay_version)
             worker = self._check_task_worker()
             if worker is not None:
                 results.append(worker)
