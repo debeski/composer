@@ -338,6 +338,18 @@ def rollback_package_update(
         return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
 
     current = active.get("version", "")
+    if active.get("source") != "volume":
+        # The image's own release is in force, and DjangoLux's supervisor runs a
+        # volume release only when it is newer than the image's: there is nothing
+        # older to go back to, so take no backup and restart nothing.
+        steps.append("nothing-to-roll-back")
+        return PackageUpdateResult(
+            ok=True, version=current, previous_version=current,
+            message="Nothing to roll back: the DjangoLux release baked into the project image"
+            + (f" ({current})" if current else "") + " is already running. No backup was taken and "
+            "nothing was restarted.",
+            steps=steps,
+        )
     # Strictly below the active release, which is what a rollback means. Taking
     # the newest staged release that merely differs would roll *forward* onto a
     # release the deployment had already stepped back from — the exact shape of

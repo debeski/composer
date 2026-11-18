@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Relay Version Check**: New `relay-version` finding of `composer check` (`DockerComposeLauncher._check_relay_version`, floor `relay_env.CERTIFICATE_CHECK = (1, 16, 2)`). When web runs DjangoLux 1.16.2 or later, Composer reads the DjangoLux in `smtp-relay`'s image (`docker compose run --rm --no-deps smtp-relay python -m dlux --version`) and WARNs when it is older: that relay signs in to the provider without checking its certificate while the Email step shows the check as on, and inline updates never reach it because it mounts no runtime volume. The fix text asks for a project image built on 1.16.2 or later. OK at 1.16.2 or later; no finding on an older web, without `smtp-relay`, or when the version cannot be read. Found by the 1.16.2b1 beta-channel acceptance on testbed-dlux.
+- **Rollback On The Image Release Is A No-Op**: `composer dlux rollback` (`dlux_package_update.rollback_package_update`) returns "Nothing to roll back" (exit `0`, step `nothing-to-roll-back`) when `state/active.json` is missing or names the image's release (`source` not `volume`), before the pre-rollback backup, the baked-version probe or any restart. It used to take a DjangoLux backup and restart `web`, `worker` and `celery` only to land on the release already running. Found in the 1.16.0b2 stress run.
 
 ## v1.10.2b1
 
