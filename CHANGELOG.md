@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.2
+
+- **Stable 1.10.2 For DjangoLux 1.16.2**: Promote the published and accepted 1.10.2b2, which includes 1.10.2b1. `composer check` reports `relay-env` (WARN while web and worker cannot see the SMTP relay's host, port, encryption and user, or the relay does not get `SMTP_RELAY_TLS_VERIFY` and `SMTP_RELAY_CA_FILE`) and `relay-version` (WARN while smtp-relay's image carries a DjangoLux older than 1.16.2, which signs in without checking the provider's certificate). `check --fix` shares the relay's settings through `x-environment` and keeps the password on `smtp-relay`. `dlux rollback` on the image's own release says there is nothing to roll back. The image builds on Python 3.15. Paired with DjangoLux 1.16.2. No runtime changes from the beta.
+
 ## v1.10.2b2
 
 - **Relay Version Check**: New `relay-version` finding of `composer check` (`DockerComposeLauncher._check_relay_version`, floor `relay_env.CERTIFICATE_CHECK = (1, 16, 2)`). When web runs DjangoLux 1.16.2 or later, Composer reads the DjangoLux in `smtp-relay`'s image (`docker compose run --rm --no-deps smtp-relay python -m dlux --version`) and WARNs when it is older: that relay signs in to the provider without checking its certificate while the Email step shows the check as on, and inline updates never reach it because it mounts no runtime volume. The fix text asks for a project image built on 1.16.2 or later. OK at 1.16.2 or later; no finding on an older web, without `smtp-relay`, or when the version cannot be read. Found by the 1.16.2b1 beta-channel acceptance on testbed-dlux.
