@@ -881,6 +881,96 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "SMTP_RELAY_TLS_VERIFY=False) in the secrets file.",
         )
 
+    def _check_registry_login(self) -> Optional[Dict[str, Any]]:
+        """Can the resident pair read WEB_IMAGE's registry, with the login when it needs one?
+
+        composer-agent's update check and composer-executor's pulls read the login
+        (``registry_login``) from their own environment, so it counts only once the
+        stack passes it to both. The registry is then asked for the watched tag the
+        way the agent asks. The resident check skips that request: composer-executor
+        answers it and has no route to a registry.
+        """
+        from . import registry, registry_login
+        from .agent_check_publication import _option_values
+
+        name = "registry-login"
+        config = self.compose_config_json() or {}
+        services = config.get("services") if isinstance(config.get("services"), dict) else {}
+        agent = services.get("composer-agent")
+        if not isinstance(agent, dict):
+            return None
+        command = agent.get("command") or []
+        command = command.split() if isinstance(command, str) else [str(word) for word in command]
+        environments = {
+            role: (services.get(role) or {}).get("environment") or {}
+            for role in registry_login.REGISTRY_ROLES if isinstance(services.get(role), dict)
+        }
+        agent_env = {key: str(value or "") for key, value in environments.get("composer-agent", {}).items()}
+        images = list(dict.fromkeys(_option_values(command, "--check-image"))) or (
+            [agent_env["WEB_IMAGE"]] if agent_env.get("WEB_IMAGE") else []
+        )
+        if not images:
+            return None
+        image = images[0]
+        host = registry_login.image_host(image)
+        lacking = sorted(
+            role for role, environment in environments.items()
+            if not all(key in environment for key in registry_login.KEYS)
+        )
+        if registry_login.credentials(self._compose_env_with_secrets()) and lacking:
+            return _result(
+                WARN, name,
+                f"The secrets file holds a registry login, but the stack does not pass it to {', '.join(lacking)}, "
+                f"so updates of {image} are neither noticed nor pulled.",
+                fix="Run 'composer check --fix': it passes COMPOSER_REGISTRY_USERNAME, COMPOSER_REGISTRY_PASSWORD and "
+                "COMPOSER_REGISTRY_HOST to composer-agent and composer-executor. Then run './start.sh' to recreate them.",
+            )
+        login = registry_login.credentials_for(image, agent_env)
+        if getattr(self, "resident_check", False):
+            with_login = "with the registry login" if login else "without a login"
+            return _result(OK, name, f"The resident pair reads {image} {with_login}.")
+        token = agent_env.get("COMPOSER_REGISTRY_TOKEN") or None
+        digest, reason = registry.tag_digest(image, token=token, credentials=login, timeout=10)
+        if digest:
+            how = "with the registry login" if login else ("with COMPOSER_REGISTRY_TOKEN" if token else "without a login")
+            return _result(OK, name, f"{host} answers for {image} {how}.")
+        setting = (
+            "Put a read-only login in the secrets file: COMPOSER_REGISTRY_USERNAME and COMPOSER_REGISTRY_PASSWORD "
+            "(for GitLab, a deploy token with read_registry only), then run './start.sh' so composer-agent and "
+            "composer-executor read it."
+        )
+        if reason == registry.LOGIN_REQUIRED:
+            return _result(
+                WARN, name,
+                f"{host} needs a login to read {image}, and the stack passes none, so updates are neither noticed "
+                "nor pulled.",
+                fix=setting,
+            )
+        if reason == registry.LOGIN_REFUSED:
+            return _result(
+                FAIL, name,
+                f"{host} refused the registry login for {image}, so updates are neither noticed nor pulled.",
+                fix="Check COMPOSER_REGISTRY_USERNAME and COMPOSER_REGISTRY_PASSWORD in the secrets file (a deploy "
+                "token must be active and allowed to read this repository), then run './start.sh'.",
+            )
+        if reason == registry.NOT_FOUND:
+            return _result(
+                WARN, name,
+                f"{host} has no {image}" + ("." if login else ", or hides it until a login is given."),
+                fix="Check WEB_IMAGE. " + ("" if login else setting),
+            )
+        if reason == registry.UNREACHABLE:
+            return _result(OK, name, f"{host} is not reachable from here; {image} was not checked.")
+        if reason == registry.CERTIFICATE:
+            return _result(
+                WARN, name,
+                f"Composer does not trust {host}'s certificate, so updates of {image} are not noticed. Composer's "
+                "update check trusts the public certificate authorities only.",
+                fix="Use a registry certificate from a public authority. For pulls, the Docker daemon also needs a "
+                "private CA at /etc/docker/certs.d/<registry host>/ca.crt on the host.",
+            )
+        return _result(WARN, name, f"Composer could not read {image} from {host}.")
+
     def _compose_env_with_secrets(self) -> Dict[str, str]:
         """The compose environment plus the secrets file's values, so a recreate never runs on defaults."""
         environment = self.build_compose_env()
@@ -1144,6 +1234,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             relay_version = self._check_relay_version()
             if relay_version is not None:
                 results.append(relay_version)
+            registry_check = self._check_registry_login()
+            if registry_check is not None:
+                results.append(registry_check)
             worker = self._check_task_worker()
             if worker is not None:
                 results.append(worker)
@@ -1520,7 +1613,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "agent/executor run commands; give composer-executor cap_add: "
                 "DAC_OVERRIDE (replacing DAC_READ_SEARCH) so it can read the project's "
                 "0600 .secrets/.env to deploy; pin docker-socket-proxy by digest and "
-                "switch off its write endpoints."
+                "switch off its write endpoints; pass the private-registry login "
+                "(COMPOSER_REGISTRY_USERNAME, COMPOSER_REGISTRY_PASSWORD, COMPOSER_REGISTRY_HOST) "
+                "to composer-agent and composer-executor."
             )
         if needs_updater_migration:
             consequences.append(
@@ -1835,8 +1930,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         OK,
                         "fix:resident-block",
                         "Normalized the Composer resident block: nested 'agent run'/'executor run' "
-                        "commands, DAC_OVERRIDE as composer-executor's only added capability, and a "
-                        "digest-pinned read-only docker-socket-proxy. Recreate docker-socket-proxy, "
+                        "commands, DAC_OVERRIDE as composer-executor's only added capability, a "
+                        "digest-pinned read-only docker-socket-proxy, and the registry login passed to "
+                        "composer-agent and composer-executor. Recreate docker-socket-proxy, "
                         "composer-executor and composer-agent to apply. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )

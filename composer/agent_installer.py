@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from .constants import DEFAULT_MIGRATOR_COMMAND, POST_START_LABEL
+from .registry_login import KEYS as REGISTRY_LOGIN_KEYS, REGISTRY_ROLES as REGISTRY_LOGIN_ROLES
 
 
 COMPOSER_UPDATER_START = "  # Composer-as-updater start"
@@ -219,6 +220,9 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
       - "2"
     environment:
       WEB_IMAGE: "{image}"
+      COMPOSER_REGISTRY_USERNAME: "${{COMPOSER_REGISTRY_USERNAME:-}}"
+      COMPOSER_REGISTRY_PASSWORD: "${{COMPOSER_REGISTRY_PASSWORD:-}}"
+      COMPOSER_REGISTRY_HOST: "${{COMPOSER_REGISTRY_HOST:-}}"
       COMPOSER_EXECUTOR_SOCKET: "{COMPOSER_EXEC_SOCKET_PATH}"
       COMPOSER_VERSION_LABEL: "{version_label}"
       COMPOSER_RELEASE_MANIFEST_LABEL: "org.dlux.project.release-manifest"
@@ -264,6 +268,9 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
     environment:
       DOCKER_HOST: "tcp://docker-socket-proxy:2375"
       WEB_IMAGE: "{image}"
+      COMPOSER_REGISTRY_USERNAME: "${{COMPOSER_REGISTRY_USERNAME:-}}"
+      COMPOSER_REGISTRY_PASSWORD: "${{COMPOSER_REGISTRY_PASSWORD:-}}"
+      COMPOSER_REGISTRY_HOST: "${{COMPOSER_REGISTRY_HOST:-}}"
       COMPOSER_CONTROL_URL: "${{COMPOSER_CONTROL_URL:-}}"
       COMPOSER_ENROLLMENT_TOKEN: "${{COMPOSER_ENROLLMENT_TOKEN:-}}"
       COMPOSER_AGENT_STATE_DIR: "/var/lib/composer-agent"
@@ -394,6 +401,35 @@ def _ensure_nested_role_commands(contents: str) -> str:
             block = block.replace(old, new, 1)
             updated = updated[:span[0]] + block + updated[span[1]:]
     return updated
+
+
+def _ensure_registry_login(contents: str) -> str:
+    """Pass the private-registry login to composer-agent and composer-executor.
+
+    Each key is added after the role's ``WEB_IMAGE`` as ``"${KEY:-}"``, empty
+    unless ``.secrets/.env`` sets it, and only where the role does not set the
+    key already: a value the operator wrote stays.
+    """
+    span = _generated_block_span(contents)
+    if span is None:
+        return contents
+    start, end = span
+    block = contents[start:end]
+    for service, body in _block_bodies(block).items():
+        if service not in REGISTRY_LOGIN_ROLES:
+            continue
+        missing = [
+            f'      {key}: "${{{key}:-}}"\n'
+            for key in REGISTRY_LOGIN_KEYS
+            if not re.search(rf"(?m)^      {key}:", body)
+        ]
+        if not missing:
+            continue
+        anchor = re.search(r"(?m)^      WEB_IMAGE:.*\n", body) or re.search(r"(?m)^    environment:[ \t]*\n", body)
+        if not anchor:
+            raise AgentInstallError(f"Cannot pass the registry login: {service} has no environment block.")
+        block = block.replace(body, body[:anchor.end()] + "".join(missing) + body[anchor.end():], 1)
+    return contents[:start] + block + contents[end:]
 
 
 def _transform_compose(contents: str, project_slug: str) -> str:
@@ -725,7 +761,7 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
         if "  composer-executor:\n" not in contents:
             raise AgentInstallError("An unmarked composer-executor service already exists.")
         normalized = _ensure_proxy_read_only(_ensure_deployer_read_cap(contents, project_slug), project_slug)
-        return _ensure_nested_role_commands(normalized)
+        return _ensure_registry_login(_ensure_nested_role_commands(normalized))
     if "composer-agent" not in services or "docker-socket-proxy" not in services:
         raise AgentInstallError("The marked agent block is not a recognized topology.")
     if COMPOSER_UPDATER_START in contents or "  composer-updater:\n" in contents:
