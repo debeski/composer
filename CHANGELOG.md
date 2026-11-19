@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **Private Registry Login**:
+  - New `composer/registry_login.py`. `COMPOSER_REGISTRY_USERNAME` and `COMPOSER_REGISTRY_PASSWORD` (a read-only deploy token) belong to the registry `WEB_IMAGE` names, or to `COMPOSER_REGISTRY_HOST`, and are never sent to another registry.
+  - The update check (`registry.tag_digest`, `remote_image_labels`) sends the login as Basic auth to the token realm the registry's Bearer challenge names (GitLab `/jwt/auth`, Docker Hub, GHCR), or to a registry that asks for Basic auth itself. It goes over https only, never across a redirect, and never to the storage hop.
+  - `DockerComposeMixin.build_compose_env` gives every `docker compose` run a private `DOCKER_CONFIG` holding only that login (0700 directory, 0600 file, removed at process exit). `composer-executor`'s image update and `./start.sh update` can therefore pull a private image; before, the Composer containers had no Docker login and a host `docker login` never reached them.
+  - The availability document marks an unreadable tag with `reason`: `login-required`, `login-refused`, `not-found`, `unreachable`, `certificate` (an untrusted, e.g. private-CA, certificate) or `failed`. `composer agent check` prints it.
+  - New `registry-login` finding of `composer check`:
+    - OK when the registry answers;
+    - WARN when it needs a login and none is passed;
+    - FAIL when it refuses the login;
+    - WARN when the secrets file holds a login the stack does not pass;
+    - OK and unchecked when the registry is unreachable.
+    - WARN when Composer does not trust the registry's certificate.
+    The resident check (Operations card, no registry route) skips the request.
+  - The generated resident block, and `check --fix` on an older stack's block, pass the three keys to `composer-agent` and `composer-executor` as `"${KEY:-}"` after `WEB_IMAGE`, leaving a value the stack sets itself.
+  - `COMPOSER_REGISTRY_TOKEN` is unchanged.
+  - Found by the eservices move to the office GitLab registry.
+
 ## v1.10.2
 
 - **Stable 1.10.2 For DjangoLux 1.16.2**: Promote the published and accepted 1.10.2b2, which includes 1.10.2b1. `composer check` reports `relay-env` (WARN while web and worker cannot see the SMTP relay's host, port, encryption and user, or the relay does not get `SMTP_RELAY_TLS_VERIFY` and `SMTP_RELAY_CA_FILE`) and `relay-version` (WARN while smtp-relay's image carries a DjangoLux older than 1.16.2, which signs in without checking the provider's certificate). `check --fix` shares the relay's settings through `x-environment` and keeps the password on `smtp-relay`. `dlux rollback` on the image's own release says there is nothing to roll back. The image builds on Python 3.15. Paired with DjangoLux 1.16.2. No runtime changes from the beta.
