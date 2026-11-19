@@ -8,7 +8,7 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from . import front_proxy, maintenance_migration, maintenance_page, media_migration, relay_env, worker_migration
+from . import app_permissions, front_proxy, maintenance_migration, maintenance_page, media_migration, relay_env, worker_migration
 from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -786,6 +786,88 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             f"(DLUX_FRONT_PROXY in {where})."
         )
 
+    def _check_app_permissions(self, deep: bool = False) -> Optional[Dict[str, Any]]:
+        """Can the uid the app image runs as use the data its services mount?
+
+        DjangoLux images run as uid 10001 with group 0 and reach data a root
+        image wrote through group bits. While the image still runs as root this
+        reports whether the data is ready for that move (WARN, fixable at any
+        time: root ignores the bits); once it runs as a non-root uid, data it
+        cannot use is a FAIL, because DjangoLux refuses to start on it.
+        """
+        name = "app-permissions"
+        self._app_permissions_state = None
+        config = self.compose_config_json()
+        image = app_permissions.app_image(config or {})
+        if not config or not image:
+            return None
+        kind, uid, gid = app_permissions.image_identity(self.run_command, image)
+        if kind == "named":
+            return _result(
+                WARN, name,
+                f"{image} runs as a named user, so Composer cannot tell which uid needs access to its data.",
+                fix="Use a numeric USER uid:gid in the Dockerfile (DjangoLux images use 10001:0).",
+            )
+        as_root = kind in {"root", "unknown"}
+        if as_root:
+            uid, gid = app_permissions.APP_UID, app_permissions.APP_GID
+        try:
+            summary = app_permissions.run(
+                self, "scan", uid=uid, gid=gid, depth=None if deep else app_permissions.QUICK_DEPTH
+            )
+        except app_permissions.PermissionsError as exc:
+            return _result(WARN, name, f"Could not check the app's data: {exc}")
+        wrong = app_permissions.totals(summary)["wrong"]
+        missing = [] if as_root else summary["missing"]
+        self._app_permissions_state = {"uid": uid, "gid": gid, "wrong": wrong, "missing": missing}
+        scope = "" if deep else " (top two levels; --deep checks every entry)"
+        who = f"uid {uid} (gid {gid})"
+        example = app_permissions.examples(summary)
+        detail = f", e.g. {example}" if example else ""
+        if missing:
+            detail += f"; missing: {', '.join(missing)}"
+        count = wrong + len(missing)
+        entries = f"{count} entr{'y' if count == 1 else 'ies'}"
+        fix = (
+            "./start.sh check --fix adds the group bits the app needs (only modes change; nothing is moved "
+            "or rewritten; the previous root image keeps working)."
+        )
+        if as_root:
+            if not count:
+                return _result(OK, name, f"The app image runs as root; its data is also ready for {who}{scope}.")
+            return _result(
+                WARN, name,
+                f"The app image runs as root. Before an image running as {who} can use its data, {entries} "
+                f"need group access{scope}{detail}.",
+                fix=fix,
+            )
+        if not count:
+            return _result(OK, name, f"The app runs as {who} and can use its data{scope}.")
+        return _result(
+            FAIL, name,
+            f"The app runs as {who} but cannot use {entries} of its data{scope}{detail}. "
+            "DjangoLux refuses to start until it can.",
+            fix=fix,
+        )
+
+    def _fix_app_permissions(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            summary = app_permissions.run(self, "apply", uid=state["uid"], gid=state["gid"])
+        except app_permissions.PermissionsError as exc:
+            return _result(FAIL, "fix:app-permissions", str(exc))
+        counts = app_permissions.totals(summary)
+        detail = (
+            f"Granted uid {state['uid']} (gid {state['gid']}) group access to {counts['changed']} "
+            f"entr{'y' if counts['changed'] == 1 else 'ies'}"
+        )
+        if summary.get("manifest"):
+            detail += f". Manifest (for 'composer app-permissions revert'): {summary['manifest']}"
+        if counts["hardlinks"]:
+            detail += f". {counts['hardlinks']} multiply-linked file(s) were left unchanged"
+        if counts["errors"]:
+            return _result(FAIL, "fix:app-permissions", f"{detail}. {counts['errors']} entries could not be changed.")
+        return _result(OK, "fix:app-permissions", detail + ".")
+
     def _check_relay_env(self) -> Dict[str, Any]:
         """Can DjangoLux's Email step see the SMTP relay's settings (all but the password)?"""
         name = "relay-env"
@@ -1144,6 +1226,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             relay_version = self._check_relay_version()
             if relay_version is not None:
                 results.append(relay_version)
+            permissions = self._check_app_permissions(deep=bool(args.deep or args.fix))
+            if permissions is not None:
+                results.append(permissions)
             worker = self._check_task_worker()
             if worker is not None:
                 results.append(worker)
@@ -1160,9 +1245,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 # A successful fix:stored-files must not leave the stale SECURITY
                 # FAIL behind, or `check --fix` exits 1 after fixing it.
                 "stored-files": self._check_media_privacy,
+                "app-permissions": lambda: self._check_app_permissions(deep=True),
             }
             for index, result in enumerate(results):
-                if result["name"] in rechecks and result["level"] == FAIL:
+                if result["name"] in rechecks and (result["level"] == FAIL or result["name"] == "app-permissions"):
                     rechecked = rechecks[result["name"]]()
                     if rechecked is not None:
                         results[index] = rechecked
@@ -1390,12 +1476,15 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             relay_env_files = relay_env.inspect(Path("."), self._maintenance_compose_files())["files"]
         except (OSError, ValueError):
             relay_env_files = []
+        grant_access = getattr(self, "_app_permissions_state", None) or {}
+        if not (grant_access.get("wrong") or grant_access.get("missing")):
+            grant_access = {}
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
                 and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration and not media_exposed
-                and not needs_worker and not front_proxy_files and not relay_env_files):
+                and not needs_worker and not front_proxy_files and not relay_env_files and not grant_access):
             return fixes
         consequences = []
         if maintenance_legacy:
@@ -1430,6 +1519,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "smtp-relay; web only learns whether one is set. The Compose configuration is validated, the "
                 "original archived under .xclude/composer-check/ and running web, worker and smtp-relay "
                 "recreated."
+            )
+        if grant_access:
+            consequences.append(
+                f"Give the app (uid {grant_access['uid']}, gid {grant_access['gid']}) group access to the data "
+                "its services mount: add the group read, write and search bits it needs to directories and files "
+                "(the group itself changes only on entries owned by neither group 0 nor the app). Nothing is "
+                "moved, renamed or rewritten, and the previous root image keeps working. Every change is listed "
+                "in .xclude/composer-check/<UTC>/app-permissions/ for 'composer app-permissions revert'."
             )
         if stale_wrappers:
             consequences.append(
@@ -1892,6 +1989,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:restart-labels", f"Restart-label repair failed: {exc}"))
+        if grant_access:
+            fixes.append(self._fix_app_permissions(grant_access))
         # Last: it builds on what the steps above made of an older layout.
         if needs_worker:
             from .stack_cleanup import StackCleanupError
