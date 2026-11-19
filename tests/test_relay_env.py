@@ -570,7 +570,7 @@ class RelayVersionTests(unittest.TestCase):
             for name in ("_check_docker", "_check_wrappers"):
                 stack.enter_context(patch.object(launcher, name, return_value=[]))
             for name in ("_check_resident_commands", "_check_docker_proxy", "resolve_active_compose_files",
-                         "_requested_channel", "_check_task_worker"):
+                         "_requested_channel", "_check_task_worker", "_check_app_permissions"):
                 stack.enter_context(patch.object(launcher, name, return_value=None))
             stack.enter_context(patch.object(launcher, "_check_relay_env", return_value={"name": "relay-env"}))
             stack.enter_context(patch.object(launcher, "_check_relay_version", return_value={"name": "relay-version"}))

@@ -229,7 +229,7 @@ class CheckTests(unittest.TestCase):
             for name in ("_check_docker", "_check_wrappers"):
                 stack.enter_context(patch.object(launcher, name, return_value=[]))
             for name in ("_check_resident_commands", "_check_docker_proxy", "resolve_active_compose_files",
-                         "_requested_channel"):
+                         "_requested_channel", "_check_app_permissions"):
                 stack.enter_context(patch.object(launcher, name, return_value=None))
             stack.enter_context(patch.object(launcher, "_maybe_fix", side_effect=fix))
             results, fixed = launcher.collect_checkup(SimpleNamespace(file="", dev=False, fix=True, deep=False))

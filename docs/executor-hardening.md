@@ -242,8 +242,12 @@ Applies to the shared runtime bridge the agent and executor use, and is part of
 this release even where it's not executor-specific:
 
 - Symlink-safe writes: private unique temp file in the same dir, `O_NOFOLLOW`
-  reads, restrictive perms, atomic `rename` replacement.
-- Reject following symlinks on read; reject world/group-writable inputs.
+  reads, atomic `rename` replacement.
+- Group write on runtime files is the contract, not a defect: files are 0664 in
+  0775 directories, because a non-root app (uid 10001, group 0) and the agent
+  (uid 0 without capabilities) reach each other's entries only through group 0.
+  World-writable inputs are rejected; group-writable ones are not.
+- Reject following symlinks on read.
 - Size and count caps on every file consumed.
 - Bounded command, event, result, snapshot, and artifact queues (drop-oldest or
   reject-new with a typed error; never unbounded growth).

@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .app_permissions import SHARED_FILE_MODE
 from .versions import try_parse
 
 CONTRACT_SCHEMA_VERSION = 1
@@ -82,6 +83,7 @@ def _atomic_write(path: Path, text: str) -> None:
     handle, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
+        os.fchmod(handle, SHARED_FILE_MODE)
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(text)
             stream.flush()

@@ -786,6 +786,9 @@ class WatchRuntime:
 
 
 def run_watch(args) -> int:
+    from .app_permissions import SHARED_UMASK
+
+    os.umask(SHARED_UMASK)
     runtime = WatchRuntime(args)
     print(
         f"👀 composer agent watch — trigger={runtime.trigger} interval={runtime.interval:g}s"
