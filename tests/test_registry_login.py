@@ -48,8 +48,9 @@ class _Response:
 class FakeGitLab:
     """A registry behind a GitLab-style token realm that grants pull only to the login."""
 
-    def __init__(self, challenge="bearer"):
+    def __init__(self, challenge="bearer", anonymous=200):
         self.challenge = challenge
+        self.anonymous = anonymous
         self.calls = []
 
     def __call__(self, url, headers, *, method="GET", timeout=15):
@@ -58,6 +59,8 @@ class FakeGitLab:
         if url.startswith(REALM):
             if auth and auth != BASIC:
                 raise _error(url, 401)
+            if not auth and self.anonymous != 200:
+                raise _error(url, self.anonymous)
             token = "pull-token" if auth == BASIC else "anonymous-token"
             return _Response(json.dumps({"token": token}).encode("utf-8"))
         if url == MANIFEST:
@@ -92,6 +95,11 @@ class RegistryLoginTransportTests(unittest.TestCase):
 
     def test_without_a_login_a_private_repository_needs_one(self):
         self.assertEqual(self._digest(FakeGitLab(), None), (None, registry.LOGIN_REQUIRED))
+
+    def test_gitlab_refuses_an_anonymous_token_with_403(self):
+        # GitLab's realm answers an anonymous request for a private project with 403.
+        self.assertEqual(self._digest(FakeGitLab(anonymous=403), None), (None, registry.LOGIN_REQUIRED))
+        self.assertEqual(self._digest(FakeGitLab(anonymous=403), LOGIN), ("sha256:new", ""))
 
     def test_a_wrong_login_is_refused(self):
         server = FakeGitLab()
