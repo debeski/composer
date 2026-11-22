@@ -46,8 +46,8 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Composer 1.10.2 stable (`1.10/release_1_10_2`): after green CI and the owner's OK, merge and tag `v1.10.2` (stable, latest) before DjangoLux tags `v1.16.2`; then consumers move to the stables. Later: `relay-version` prints versions without the beta suffix, and reads a 1.16.2b1 relay as 1.16.2 (OK) while DjangoLux's Email step warns on it. The Fetch Metadata check (`1.10/fetch_metadata`) ships beside DjangoLux 1.16.3.
   - [ ] **`1.10/fetch_metadata` (2026-11-18, local commit, not pushed)**: `fetch-metadata` WARN when `.proxy/Caddyfile` / `.proxy/default.conf.template` lacks DjangoLux's `cross_site_request` policy (paired DjangoLux `1.16/fetch_metadata`). **Owner 2026-11-18: ships with DjangoLux 1.16.3** (beside #92), not in 1.10.2b2; rebase onto main after the 1.10.2b2 release PR, then push/PR on the owner's word.
+  - [ ] **Private registry login (`1.10/private_registry`, for DjangoLux 1.16.3; owner 2026-11-19)**: `registry_login` (`COMPOSER_REGISTRY_USERNAME`/`PASSWORD`, scoped to WEB_IMAGE's registry or `COMPOSER_REGISTRY_HOST`), Basic auth on the token realm, private `DOCKER_CONFIG` for every compose run, `registry-login` finding, resident-block lines; pairs with DjangoLux `1.16/private_registry`. Open: office CA question (eservices). 1.10.2 stable published 2026-11-19. Later: `relay-version` prints versions without the beta suffix. The Fetch Metadata check (`1.10/fetch_metadata`) ships beside DjangoLux 1.16.3.
   - [ ] Accept `1.10/update_guards` on a testbed, then PR it: two `dlux update --version X --staged-wheel …` a second apart (one refused "already running; nothing was changed"), a rollback during an update, a release that fails its health check (refused next time with its reason; `--retry-quarantined` retries; a healthy retry leaves `failed/X.retried-<time>/`), and `dlux check` / the Updates card no longer offering it.
   - [ ] A pinned `dlux update --version X` right after X is published fails "not published" while PyPI's CDN serves a stale simple index (seen 2026-10-09 with 1.11.0b6); the stale-index re-read only covers unpinned updates. Retry pinned resolution the same way.
   - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
@@ -77,11 +77,13 @@
 - 2026-11-18: `1.10/fetch_metadata` with `pkg-django-lux/main/.venv` (Python 3.13, PyYAML 6.0.3, CI's set) and `DLUX_CHECKOUT=../pkg-django-lux/fetch_metadata`: suite 1143 OK (14 skips); `test_fetch_metadata` 15 OK incl. the scaffold passing and failing without its block.
 - 2026-11-18: `1.10/relay_image_check` in the scratch venv (Python 3.14, CI's set): suite 1127 OK (16 skips), compileall OK; the `python -m dlux --version` probe read 1.16.0b1 / 1.16.2b1 from the testbed-dlux images (no stack started).
 - 2026-11-17: `1.10/relay_env` in a scratch venv (Python 3.14, CI's set): suite 1115 OK (16 skips; main 6b5e071: 1073 OK, 15 skips); real `docker compose config` rewrite of schema-4 + testbed-dlux copies (nothing started); `composer:test-relay-env` (c6b297bf857b) `scripts/smoke-test.sh` passed. Host-suite caveat: `test_agent.AgentOnlyPackageUpdateTests` opens a live PyPI HTTPS connection and can stall the run for minutes.
+- 2026-11-19: `1.10/private_registry`: suite 1156 OK (14 skips) with the sibling `pkg-django-lux/main/.venv`; `tests/test_registry_login.py` (28).
 - Host Python cannot run the suite (no cryptography/packaging/yaml): use a venv with CI's set (`PyYAML==6.0.3 "packaging>=23.2" "cryptography>=42"`), or run it in the built image with `pip install PyYAML==6.0.3` and `~/Desktop/depy` mounted at `/depy`, so the sibling `pkg-django-lux` comparisons run.
 ### One-line info about last time edited Docs:
 - 2026-11-18: `1.10/fetch_metadata`: README check sentence + "Cross-site requests (Fetch Metadata)" section (markers table, fix); CHANGELOG `## Unreleased` (1 entry).
 - 2026-11-18: `1.10/relay_image_check`: README "SMTP relay settings for the Email step" (relay runs the image's DjangoLux, `relay-version` finding); CHANGELOG `## Unreleased` (1 entry).
 - 2026-11-17: `1.10/relay_env`: README check sentence + "SMTP relay settings for the Email step" section (states table, fix rules); CHANGELOG `## Unreleased` (1 entry).
+- 2026-11-19: `1.10/private_registry`: README **Private registry login** (findings table), `agent check` and `watch` paragraphs; CHANGELOG `## Unreleased` (1 entry).
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

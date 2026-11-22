@@ -3,6 +3,22 @@
 ## Unreleased
 
 - **Fetch Metadata Check**: New `fetch-metadata` finding of `composer check` (`composer/fetch_metadata.py`, `DockerComposeLauncher._check_fetch_metadata`). It WARNs for each of `.proxy/Caddyfile` and `.proxy/default.conf.template` that lacks DjangoLux's Fetch Metadata resource isolation policy, which refuses with 403 the requests another site's page makes a browser send in the background. It matches on the name `cross_site_request`: a `@cross_site_request` matcher plus `respond` (or `error`) `@cross_site_request 403` in the Caddyfile, and a `map … $cross_site_request` plus `if ($cross_site_request) { return 403; }` in the nginx template, ignoring comments. The fix text names what to add and where, points to DjangoLux's *Cross-site requests (Fetch Metadata)* docs, and ends with `./start.sh restart caddy` (or `nginx`). OK when every proxy file present has it, or when there is none. Report only, no `--fix`. Tests: `tests/test_fetch_metadata.py`, including the DjangoLux scaffold alongside (`DLUX_CHECKOUT` overrides `../pkg-django-lux/main`), which passes and fails once its block is removed.
+- **Private Registry Login**:
+  - New `composer/registry_login.py`. `COMPOSER_REGISTRY_USERNAME` and `COMPOSER_REGISTRY_PASSWORD` (a read-only deploy token) belong to the registry `WEB_IMAGE` names, or to `COMPOSER_REGISTRY_HOST`, and are never sent to another registry.
+  - The update check (`registry.tag_digest`, `remote_image_labels`) sends the login as Basic auth to the token realm the registry's Bearer challenge names (GitLab `/jwt/auth`, Docker Hub, GHCR), or to a registry that asks for Basic auth itself. It goes over https only, never across a redirect, and never to the storage hop.
+  - `DockerComposeMixin.build_compose_env` gives every `docker compose` run a private `DOCKER_CONFIG` holding only that login (0700 directory, 0600 file, removed at process exit). `composer-executor`'s image update and `./start.sh update` can therefore pull a private image; before, the Composer containers had no Docker login and a host `docker login` never reached them.
+  - The availability document marks an unreadable tag with `reason`: `login-required`, `login-refused`, `not-found`, `unreachable`, `certificate` (an untrusted, e.g. private-CA, certificate) or `failed`. `composer agent check` prints it.
+  - New `registry-login` finding of `composer check`:
+    - OK when the registry answers;
+    - WARN when it needs a login and none is passed;
+    - FAIL when it refuses the login;
+    - WARN when the secrets file holds a login the stack does not pass;
+    - OK and unchecked when the registry is unreachable.
+    - WARN when Composer does not trust the registry's certificate.
+    The resident check (Operations card, no registry route) skips the request.
+  - The generated resident block, and `check --fix` on an older stack's block, pass the three keys to `composer-agent` and `composer-executor` as `"${KEY:-}"` after `WEB_IMAGE`, leaving a value the stack sets itself.
+  - `COMPOSER_REGISTRY_TOKEN` is unchanged.
+  - Found by the eservices move to the office GitLab registry.
 
 ## v1.10.2
 

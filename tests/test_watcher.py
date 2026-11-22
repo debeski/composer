@@ -135,7 +135,7 @@ class WatcherAvailabilityTests(unittest.TestCase):
         )
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
-    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.tag_digest", return_value=("sha256:new", ""))
     @patch("composer.watcher.remote_image_labels")
     def test_project_manifest_and_version_are_published_independently(
         self, labels, _remote, _local
@@ -169,7 +169,7 @@ class WatcherAvailabilityTests(unittest.TestCase):
         self.assertEqual(images[0]["manifest"]["highlights"], ["New report", "Faster imports"])
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
-    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.tag_digest", return_value=("sha256:new", ""))
     @patch("composer.watcher.remote_image_labels")
     def test_manifest_publishes_baked_dlux_version(self, labels, _remote, _local):
         labels.return_value = {
@@ -185,7 +185,7 @@ class WatcherAvailabilityTests(unittest.TestCase):
         self.assertEqual(images[0]["manifest"]["baked_dlux_version"], "1.5.3")
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
-    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.tag_digest", return_value=("sha256:new", ""))
     @patch("composer.watcher.remote_image_labels")
     def test_manifest_without_baked_dlux_version_omits_it(self, labels, _remote, _local):
         labels.return_value = {
@@ -200,7 +200,7 @@ class WatcherAvailabilityTests(unittest.TestCase):
         self.assertNotIn("baked_dlux_version", images[0]["manifest"])
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
-    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.tag_digest", return_value=("sha256:new", ""))
     @patch("composer.watcher.remote_image_labels")
     def test_raw_json_manifest_remains_supported(self, labels, _remote, _local):
         labels.return_value = {
@@ -217,7 +217,7 @@ class WatcherAvailabilityTests(unittest.TestCase):
         self.assertEqual(images[0]["manifest"]["version"], "2.4.0")
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
-    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.tag_digest", return_value=("sha256:new", ""))
     @patch("composer.watcher.remote_image_labels")
     def test_invalid_manifest_does_not_hide_version_or_digest_update(
         self, labels, _remote, _local
@@ -237,7 +237,7 @@ class WatcherAvailabilityTests(unittest.TestCase):
         self.assertNotIn("manifest", images[0])
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
-    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.tag_digest", return_value=("sha256:new", ""))
     @patch("composer.watcher.remote_image_labels")
     def test_invalid_base64_manifest_does_not_hide_digest_update(
         self, labels, _remote, _local
@@ -252,7 +252,7 @@ class WatcherAvailabilityTests(unittest.TestCase):
         self.assertNotIn("manifest", images[0])
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
-    @patch("composer.watcher.remote_tag_digest", return_value="sha256:new")
+    @patch("composer.watcher.tag_digest", return_value=("sha256:new", ""))
     @patch("composer.watcher.remote_image_labels", return_value=None)
     def test_missing_all_metadata_still_publishes_digest_update(
         self, _labels, _remote, _local
@@ -265,7 +265,7 @@ class WatcherAvailabilityTests(unittest.TestCase):
         self.assertNotIn("manifest", images[0])
 
     @patch("composer.watcher._local_repo_digest", return_value="sha256:same")
-    @patch("composer.watcher.remote_tag_digest", return_value="sha256:same")
+    @patch("composer.watcher.tag_digest", return_value=("sha256:same", ""))
     @patch("composer.watcher.remote_image_labels")
     def test_unchanged_digest_does_not_fetch_optional_metadata(
         self, labels, _remote, _local

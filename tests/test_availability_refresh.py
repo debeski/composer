@@ -48,7 +48,7 @@ class StaleAvailabilityTests(unittest.TestCase):
 
             # Scheduled check: an update is genuinely available.
             with (
-                patch("composer.watcher.remote_tag_digest", return_value="sha256:new"),
+                patch("composer.watcher.tag_digest", return_value=("sha256:new", "")),
                 patch("composer.watcher._local_repo_digest", return_value="sha256:old"),
                 patch("composer.watcher.remote_image_labels", return_value={}),
             ):
@@ -60,7 +60,7 @@ class StaleAvailabilityTests(unittest.TestCase):
             # next scheduled check is still an hour out.
             watch.next_local_probe = 0.0
             with (
-                patch("composer.watcher.remote_tag_digest", return_value="sha256:new"),
+                patch("composer.watcher.tag_digest", return_value=("sha256:new", "")),
                 patch("composer.watcher._local_repo_digest", return_value="sha256:new"),
             ):
                 watch.maybe_check_availability()
@@ -76,7 +76,7 @@ class StaleAvailabilityTests(unittest.TestCase):
             root = Path(tmp)
             watch = WatchRuntime(_watch_args(root))
             with (
-                patch("composer.watcher.remote_tag_digest", return_value="sha256:same"),
+                patch("composer.watcher.tag_digest", return_value=("sha256:same", "")),
                 patch("composer.watcher._local_repo_digest", return_value="sha256:same"),
             ):
                 watch.maybe_check_availability()
