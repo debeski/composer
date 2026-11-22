@@ -500,15 +500,21 @@ class DockerComposeLauncher(
                 service for service in self.restart_services if service not in excluded
             ]
 
-    def prepare_app_data(self) -> Tuple[bool, str]:
-        """``(ready, note)``: give a non-root app image access to its data before ``up``."""
+    def prepare_app_data(self, services: Optional[List[str]] = None) -> Tuple[bool, str]:
+        """``(ready, note)``: give a non-root app image access to its data before ``up``.
+
+        ``services`` scopes it to a recreate of those services: nothing to do
+        when none of them runs the app image.
+        """
         from . import app_permissions
 
-        config = self.compose_config_json()
-        image = app_permissions.app_image(config or {})
+        config = self.compose_config_json() or {}
+        image = app_permissions.app_image(config)
         if not image:
             return True, ""
-        return app_permissions.ensure_for_image(self, image)
+        if services is not None and not set(services) & set(app_permissions.app_services(config)):
+            return True, ""
+        return app_permissions.ensure_for_image(self, image, config)
 
     def run(self):
         try:
@@ -561,6 +567,7 @@ class DockerComposeLauncher(
                 self.handle_migrate(argv[1:])
                 return
             if argv and argv[0] == "dlux":
+                from .app_permissions import SHARED_UMASK
                 from .dlux_package_cli import parse_dlux_update_args, run_dlux_update
 
                 commands = ["check", "update", "rollback", "channel"]
@@ -570,6 +577,9 @@ class DockerComposeLauncher(
                 if argv[1] not in commands:
                     print(_group_usage("dlux", commands), file=sys.stderr)
                     sys.exit(2)
+                # These write the runtime volume (here, or in the sibling they re-run
+                # in): group-writable like every other Composer writer there.
+                os.umask(SHARED_UMASK)
                 if argv[1] == "channel":
                     from .dlux_package_cli import parse_dlux_channel_args, run_dlux_channel
 

@@ -86,6 +86,9 @@ def _run_recreate(operation_id: str, service: str) -> Tuple[int, str]:
             f"{service} was not recreated: the deployment's secrets could not be read, and a "
             f"container built without them would run on compose defaults. {secrets_error}"
         ).strip()[-1000:]
+    ready, note = launcher.prepare_app_data([service])
+    if not ready:
+        return 1, f"{service} was not recreated: {note}".strip()[-1000:]
     ok, out, err = launcher.run_docker_compose(
         ["up", "-d", "--no-deps", "--force-recreate", service], timeout=600,
     )
@@ -213,6 +216,7 @@ def _run_check_fix(operation_id: str, payload: Dict) -> Tuple[int, str]:
 # ack and result itself. It has to: that update recreates composer-agent AND
 # composer-executor, so neither process survives to report the outcome.
 _AGENT_UPDATE_SCRIPT = r"""
+umask 0002
 python -m composer agent update
 code=$?
 python - "$OPS_TOKEN" "$code" <<'PYEOF'

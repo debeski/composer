@@ -480,6 +480,14 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         self.last_progress_label = ""
         if not services:
             return True, "", ""
+        # A recreate runs the app image's entrypoint gate like any `up`.
+        prepare = getattr(self, "prepare_app_data", None)
+        if prepare is not None:
+            ready, note = prepare(list(services))
+            if not ready:
+                return False, "", note
+            if note:
+                print(f"🔐 {note}")
         return self.run_docker_compose_streaming(
             ["up", "-d", "--no-deps", "--force-recreate", *services],
             progress_callback=lambda line: self.emit_progress("Recreate", line),
