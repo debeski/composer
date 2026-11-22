@@ -1065,6 +1065,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if getattr(self, "resident_check", False):
             with_login = "with the registry login" if login else "without a login"
             return _result(OK, name, f"The resident pair reads {image} {with_login}.")
+        if self._is_local_build(image):
+            return _result(OK, name, f"{image} was built on this machine and never pulled, so there is no registry to read.")
         token = agent_env.get("COMPOSER_REGISTRY_TOKEN") or None
         digest, reason = registry.tag_digest(image, token=token, credentials=login, timeout=10)
         if digest:
@@ -1106,6 +1108,30 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "private CA at /etc/docker/certs.d/<registry host>/ca.crt on the host.",
             )
         return _result(WARN, name, f"Composer could not read {image} from {host}.")
+
+    @staticmethod
+    def _is_local_build(image: str) -> bool:
+        """True when the local image exists with no RepoDigest: built here, never pulled.
+
+        DjangoLux's Updates card reads such an image as a local build and shows no
+        registry warning; the check must not ask for a login it does not need.
+        """
+        import subprocess
+
+        try:
+            proc = subprocess.run(
+                ["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if proc.returncode != 0:
+            return False
+        try:
+            digests = json.loads(proc.stdout.strip() or "null")
+        except ValueError:
+            return False
+        return isinstance(digests, list) and not digests
 
     def _compose_env_with_secrets(self) -> Dict[str, str]:
         """The compose environment plus the secrets file's values, so a recreate never runs on defaults."""

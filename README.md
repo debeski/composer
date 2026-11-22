@@ -213,6 +213,7 @@ The `registry-login` finding reads the agent's watched image from the resolved C
 | the secrets file holds a login the stack does not pass to `composer-agent` or `composer-executor` | WARN: `check --fix` adds the lines |
 | the registry has no such tag (or hides a private one from an anonymous reader) | WARN |
 | the registry is not reachable from where `check` runs | OK, saying it was not checked |
+| `WEB_IMAGE` was built on this machine and never pulled (no repository digest) | OK, nothing to read |
 | Composer does not trust the registry's certificate (a private CA) | WARN |
 | no `composer-agent` | no finding |
 

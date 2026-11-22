@@ -6,6 +6,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import unittest
 import urllib.error
 from pathlib import Path
@@ -299,7 +300,7 @@ PASSED = {"WEB_IMAGE": IMAGE, "COMPOSER_REGISTRY_USERNAME": LOGIN[0],
 
 
 class RegistryLoginCheckTests(unittest.TestCase):
-    def _check(self, config, digest=("sha256:new", ""), secrets=None, resident=False):
+    def _check(self, config, digest=("sha256:new", ""), secrets=None, resident=False, local_build=False):
         launcher = DockerComposeLauncher()
         launcher.resident_check = resident
         calls = []
@@ -310,8 +311,27 @@ class RegistryLoginCheckTests(unittest.TestCase):
 
         with patch.object(launcher, "compose_config_json", return_value=config), \
                 patch.object(launcher, "_compose_env_with_secrets", return_value=secrets or {}), \
+                patch.object(launcher, "_is_local_build", return_value=local_build), \
                 patch.object(registry, "tag_digest", tag_digest):
             return launcher._check_registry_login(), calls
+
+    def test_a_local_build_is_ok_without_asking_the_registry(self):
+        result, calls = self._check(_config({"WEB_IMAGE": IMAGE}), digest=(None, registry.LOGIN_REQUIRED), local_build=True)
+        self.assertEqual(result["level"], OK)
+        self.assertIn("built on this machine", result["message"])
+        self.assertEqual(calls, [])
+
+    def test_local_build_reads_repo_digests(self):
+        def run(stdout, code=0):
+            return patch("subprocess.run", return_value=subprocess.CompletedProcess([], code, stdout=stdout, stderr=""))
+        with run("[]\n"):
+            self.assertTrue(DockerComposeLauncher._is_local_build(IMAGE))
+        with run('["registry.example.test/web/app@sha256:abc"]\n'):
+            self.assertFalse(DockerComposeLauncher._is_local_build(IMAGE))
+        with run("", code=1):
+            self.assertFalse(DockerComposeLauncher._is_local_build(IMAGE))
+        with patch("subprocess.run", side_effect=OSError("no docker")):
+            self.assertFalse(DockerComposeLauncher._is_local_build(IMAGE))
 
     def test_a_working_login_is_ok(self):
         result, calls = self._check(_config(PASSED))

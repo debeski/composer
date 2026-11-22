@@ -14,6 +14,7 @@
     - FAIL when it refuses the login;
     - WARN when the secrets file holds a login the stack does not pass;
     - OK and unchecked when the registry is unreachable.
+    - OK without asking when `WEB_IMAGE` was built locally and never pulled (no repository digest), the way DjangoLux's Updates card reads a local build.
     - WARN when Composer does not trust the registry's certificate.
     The resident check (Operations card, no registry route) skips the request.
   - The generated resident block, and `check --fix` on an older stack's block, pass the three keys to `composer-agent` and `composer-executor` as `"${KEY:-}"` after `WEB_IMAGE`, leaving a value the stack sets itself.
