@@ -15,6 +15,7 @@
     - WARN when the secrets file holds a login the stack does not pass;
     - OK and unchecked when the registry is unreachable.
     - OK without asking when `WEB_IMAGE` was built locally and never pulled (no repository digest), the way DjangoLux's Updates card reads a local build.
+    - OK when `WEB_IMAGE` is a bare name (`myapp:1.0`) that Docker Hub refuses: Hub holds bare names only as official images, never private ones, so it is a local build. The watcher then publishes no `reason` for it (`registry_login.is_bare_name`). Docker's containerd image store gives local builds a repository digest too, so the digest alone cannot tell.
     - WARN when Composer does not trust the registry's certificate.
     The resident check (Operations card, no registry route) skips the request.
   - The generated resident block, and `check --fix` on an older stack's block, pass the three keys to `composer-agent` and `composer-executor` as `"${KEY:-}"` after `WEB_IMAGE`, leaving a value the stack sets itself.

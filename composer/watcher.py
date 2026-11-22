@@ -31,7 +31,14 @@ from typing import List, Optional, Tuple
 
 from .agent_protocol import redact_text
 from . import registry_login
-from .registry import DEFAULT_VERSION_LABEL, REASON_TEXT, remote_image_labels, tag_digest
+from .registry import (
+    DEFAULT_VERSION_LABEL,
+    LOGIN_REQUIRED,
+    NOT_FOUND,
+    REASON_TEXT,
+    remote_image_labels,
+    tag_digest,
+)
 from .service_selection import join_service_list, parse_service_list
 
 
@@ -171,7 +178,9 @@ def check_availability(images: List[str]) -> Tuple[bool, list]:
             "local_digest": local,
             "update_available": new,
         }
-        if remote is None and reason:
+        if remote is None and reason and not (
+            reason in (LOGIN_REQUIRED, NOT_FOUND) and registry_login.is_bare_name(image)
+        ):
             # Still "unknown"; the reason lets DjangoLux say why (a login the
             # registry needs, a refused one, an unreachable registry).
             entry["reason"] = reason

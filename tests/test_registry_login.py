@@ -230,6 +230,16 @@ class WatcherLoginTests(unittest.TestCase):
         self.assertEqual(seen, {IMAGE: LOGIN, "caddy:2": None})
         self.assertEqual(images[0]["reason"], registry.LOGIN_REQUIRED)
 
+    @patch("composer.watcher._local_repo_digest", return_value="sha256:local")
+    @patch("composer.watcher.remote_image_labels", return_value={})
+    def test_a_refused_bare_name_is_a_local_build_without_a_reason(self, _labels, _local):
+        for reason in (registry.LOGIN_REQUIRED, registry.NOT_FOUND):
+            with patch.dict(os.environ, {}, clear=True), \
+                    patch("composer.watcher.tag_digest", return_value=(None, reason)):
+                _available, images = check_availability(["myapp:2.2.0", "team/app:1"])
+            self.assertNotIn("reason", images[0])
+            self.assertEqual(images[1]["reason"], reason)
+
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
     @patch("composer.watcher.remote_image_labels", return_value={})
     @patch("composer.watcher.tag_digest", return_value=("sha256:new", ""))
@@ -285,10 +295,10 @@ class StackLinesTests(unittest.TestCase):
             self.assertEqual(block.count(f'{key}: "${{{key}:-}}"'), 2)
 
 
-def _config(agent_env, executor_env=None):
+def _config(agent_env, executor_env=None, image=IMAGE):
     return {"services": {
         "composer-agent": {
-            "command": ["agent", "run", "--check-image", IMAGE],
+            "command": ["agent", "run", "--check-image", image],
             "environment": agent_env,
         },
         "composer-executor": {"environment": executor_env if executor_env is not None else agent_env},
@@ -320,6 +330,20 @@ class RegistryLoginCheckTests(unittest.TestCase):
         self.assertEqual(result["level"], OK)
         self.assertIn("built on this machine", result["message"])
         self.assertEqual(calls, [])
+
+    def test_a_refused_bare_name_is_a_local_build(self):
+        for reason in (registry.LOGIN_REQUIRED, registry.NOT_FOUND):
+            result, calls = self._check(_config({"WEB_IMAGE": "myapp:2.2.0"}, image="myapp:2.2.0"), digest=(None, reason))
+            self.assertEqual(result["level"], OK, reason)
+            self.assertIn("local build", result["message"])
+        result, _ = self._check(_config({"WEB_IMAGE": "team/app:1"}, image="team/app:1"), digest=(None, registry.LOGIN_REQUIRED))
+        self.assertEqual(result["level"], WARN)
+
+    def test_bare_names(self):
+        for image in ("myapp", "myapp:2.2.0", "myapp@sha256:abc"):
+            self.assertTrue(registry_login.is_bare_name(image), image)
+        for image in ("", "team/app:1", "localhost:5220/decrees:latest", "registry.local.eidc.gov.ly/web/eservices:main"):
+            self.assertFalse(registry_login.is_bare_name(image), image)
 
     def test_local_build_reads_repo_digests(self):
         def run(stdout, code=0):

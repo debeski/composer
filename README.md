@@ -214,6 +214,7 @@ The `registry-login` finding reads the agent's watched image from the resolved C
 | the registry has no such tag (or hides a private one from an anonymous reader) | WARN |
 | the registry is not reachable from where `check` runs | OK, saying it was not checked |
 | `WEB_IMAGE` was built on this machine and never pulled (no repository digest) | OK, nothing to read |
+| `WEB_IMAGE` is a bare name (no registry, no namespace, such as `myapp:1.0`) that Docker Hub refuses: Docker Hub holds bare names only as official images, which are never private, so it is a local build | OK, nothing to read; the availability document carries no reason, so DjangoLux's Updates card shows no warning |
 | Composer does not trust the registry's certificate (a private CA) | WARN |
 | no `composer-agent` | no finding |
 

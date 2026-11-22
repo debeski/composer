@@ -58,6 +58,17 @@ def image_host(image: str) -> str:
     return normalize_host(parse_image_ref(image)[0])
 
 
+def is_bare_name(image: str) -> bool:
+    """True for a name with no registry and no namespace (``myapp:1.0``).
+
+    Docker Hub holds such a name only as an official image, and official images
+    are never private. When Docker Hub refuses one, the image is a local build:
+    there is no registry to read and no login to ask for.
+    """
+    ref = str(image or "").strip().split("@", 1)[0]
+    return bool(ref) and "/" not in ref
+
+
 def login_host(environ: Optional[Mapping[str, str]] = None) -> str:
     """The registry the login belongs to, or ``""`` when nothing names one."""
     environ = os.environ if environ is None else environ

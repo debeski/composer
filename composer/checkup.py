@@ -1077,6 +1077,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "(for GitLab, a deploy token with read_registry only), then run './start.sh' so composer-agent and "
             "composer-executor read it."
         )
+        if reason in (registry.LOGIN_REQUIRED, registry.NOT_FOUND) and registry_login.is_bare_name(image):
+            return _result(
+                OK, name,
+                f"{image} names no registry or namespace and Docker Hub has no official image by that name, "
+                "so it is a local build with no registry to read.",
+            )
         if reason == registry.LOGIN_REQUIRED:
             return _result(
                 WARN, name,
