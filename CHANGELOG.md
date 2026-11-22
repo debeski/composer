@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.10.3b1
 
 - **Fetch Metadata Check**: New `fetch-metadata` finding of `composer check` (`composer/fetch_metadata.py`, `DockerComposeLauncher._check_fetch_metadata`). It WARNs for each of `.proxy/Caddyfile` and `.proxy/default.conf.template` that lacks DjangoLux's Fetch Metadata resource isolation policy, which refuses with 403 the requests another site's page makes a browser send in the background. It matches on the name `cross_site_request`: a `@cross_site_request` matcher plus `respond` (or `error`) `@cross_site_request 403` in the Caddyfile, and a `map … $cross_site_request` plus `if ($cross_site_request) { return 403; }` in the nginx template, ignoring comments. The fix text names what to add and where, points to DjangoLux's *Cross-site requests (Fetch Metadata)* docs, and ends with `./start.sh restart caddy` (or `nginx`). OK when every proxy file present has it, or when there is none. Report only, no `--fix`. Tests: `tests/test_fetch_metadata.py`, including the DjangoLux scaffold alongside (`DLUX_CHECKOUT` overrides `../pkg-django-lux/main`), which passes and fails once its block is removed.
 - **Private Registry Login**:
