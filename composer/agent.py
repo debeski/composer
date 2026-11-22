@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .app_permissions import SHARED_UMASK, share_runtime_dirs
 from .agent_protocol import ProtocolError, redact_text, utc_now, validate_command
 from .agent_store import AgentStore
 from .control_client import ControlPlaneClient, ControlPlaneError
@@ -62,6 +63,9 @@ class ComposerAgent:
         self.bridge_results = self.bridge_dir / "results"
         self.bridge_requests.mkdir(parents=True, exist_ok=True)
         self.bridge_results.mkdir(parents=True, exist_ok=True)
+        share_runtime_dirs(
+            trigger.parent.parent, trigger.parent, self.bridge_dir, self.bridge_requests, self.bridge_results
+        )
         # UI-driven pairing bridge files (DjangoLux <-> agent, sibling of snapshot.json):
         #   enroll-request.json : DLUX -> agent  (control_url + one-use pairing code)
         #   agent-status.json   : agent -> DLUX  (enrollment/connection status for the tile)
@@ -800,6 +804,7 @@ class ComposerAgent:
 
 
 def run_agent(args) -> int:
+    os.umask(SHARED_UMASK)
     try:
         return ComposerAgent(args).run()
     except (OSError, ValueError) as exc:

@@ -275,8 +275,10 @@ def run_executor(args) -> int:
     """Entry point for ``composer executor run``: serve the socket with the real
     operation handler, and (when a trigger file is configured) run the
     trigger-watched image-update loop sharing the same one-op-in-flight lease."""
+    from .app_permissions import SHARED_UMASK
     from .executor_ops import default_operation_handler
 
+    os.umask(SHARED_UMASK)
     socket_path = getattr(args, "socket", None) or resolve_socket_path()
     executor = Executor(
         socket_path,

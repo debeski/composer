@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .cli import (
     parse_agent_check_args,
@@ -500,6 +500,16 @@ class DockerComposeLauncher(
                 service for service in self.restart_services if service not in excluded
             ]
 
+    def prepare_app_data(self) -> Tuple[bool, str]:
+        """``(ready, note)``: give a non-root app image access to its data before ``up``."""
+        from . import app_permissions
+
+        config = self.compose_config_json()
+        image = app_permissions.app_image(config or {})
+        if not image:
+            return True, ""
+        return app_permissions.ensure_for_image(self, image)
+
     def run(self):
         try:
             argv = _normalize_leading_global_options(sys.argv[1:])
@@ -587,6 +597,10 @@ class DockerComposeLauncher(
                     print(_group_usage("relay", relay_commands), file=sys.stderr)
                     sys.exit(2)
                 sys.exit(run_relay(argv[1], argv[2:]))
+            if argv and argv[0] == "app-permissions":
+                from .app_permissions import run_cli
+
+                sys.exit(run_cli(argv[1:]))
             if argv and argv[0] == "agent":
                 commands = ["check", "update", "restart", "off", "watch", "run", "enable"]
                 if len(argv) == 1 or argv[1] in {"-h", "--help"}:
@@ -828,6 +842,18 @@ class DockerComposeLauncher(
                 self.write_status("failed", error=detail)
                 self.render("Failed to read compose services\n\n" + detail)
                 sys.exit(1)
+
+            # A DjangoLux image that runs as a non-root uid needs group access to
+            # data a root image wrote. Granted here, before anything is recreated;
+            # if it cannot be granted the running stack is left as it is.
+            ready, note = self.prepare_app_data()
+            if not ready:
+                self.sections["compose"] = ERROR
+                self.write_status("failed", error=note)
+                self.render(note)
+                sys.exit(1)
+            if note:
+                print(f"🔐 {note}")
 
             ok, out, err = self.launch_containers()
             if not ok:
