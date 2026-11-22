@@ -8,7 +8,15 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from . import front_proxy, maintenance_migration, maintenance_page, media_migration, relay_env, worker_migration
+from . import (
+    fetch_metadata,
+    front_proxy,
+    maintenance_migration,
+    maintenance_page,
+    media_migration,
+    relay_env,
+    worker_migration,
+)
 from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -679,6 +687,51 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return _result(OK, "stored-files", "No /media/ route in the proxy config.")
         return _result(OK, "stored-files", "Stored files go through DjangoLux's access check (since stack schema 4).")
 
+    def _check_fetch_metadata(self) -> Dict[str, Any]:
+        """Does the proxy refuse what other sites' pages make a browser load in the background?"""
+        name = "fetch-metadata"
+        try:
+            state = fetch_metadata.inspect(Path("."))
+        except (OSError, UnicodeDecodeError) as exc:
+            return _result(WARN, name, f"Could not read the proxy configuration: {exc}")
+        if not state["files"]:
+            return _result(OK, name, f"No {fetch_metadata.CADDYFILE} or {fetch_metadata.NGINX_TEMPLATE}; nothing to check.")
+        missing = state["missing"]
+        if missing:
+            caddy = str(fetch_metadata.CADDYFILE) in missing
+            nginx = str(fetch_metadata.NGINX_TEMPLATE) in missing
+            steps = []
+            if caddy:
+                steps.append(
+                    f"in {fetch_metadata.CADDYFILE}, the @cross_site_request matcher and "
+                    "'respond @cross_site_request 403', after the public /media/ handler and before the private "
+                    "/media/* handler"
+                )
+            if nginx:
+                steps.append(
+                    f"in {fetch_metadata.NGINX_TEMPLATE}, the $cross_site_request map and "
+                    "'if ($cross_site_request) { return 403; }' in the /media/, / and /health locations"
+                )
+            restart = " or ".join(service for service, wanted in (("caddy", caddy), ("nginx", nginx)) if wanted)
+            return _result(
+                WARN,
+                name,
+                " and ".join(missing) + (" has" if len(missing) == 1 else " have") + " no Fetch Metadata "
+                "resource isolation policy (cross_site_request), so another site's page can make a visitor's "
+                "browser load this site's pages, private files and endpoints in the background (images, scripts, "
+                "fetch(), form posts). CSRF tokens and SameSite cookies still stop forged changes; this is the "
+                "layer that refuses such requests before they reach the app.",
+                fix=f"Add the block from {fetch_metadata.DOCS} (also in a fresh 'python -m dlux startproject'): "
+                + "; ".join(steps)
+                + f". Then run './start.sh restart {restart}', since './start.sh' alone does not reload a changed "
+                "proxy file.",
+            )
+        return _result(
+            OK,
+            name,
+            "The proxy refuses requests other sites make in the background (Fetch Metadata, cross_site_request).",
+        )
+
     def _check_front_proxy(self) -> Dict[str, Any]:
         """Which front proxies may Caddy take a client address from (``DLUX_FRONT_PROXY``)?"""
         name = "front-proxy"
@@ -1139,6 +1192,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             results.append(self._check_stack_schema())
             results.append(self._check_maintenance_page())
             results.append(self._check_media_privacy())
+            results.append(self._check_fetch_metadata())
             results.append(self._check_front_proxy())
             results.append(self._check_relay_env())
             relay_version = self._check_relay_version()

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Fetch Metadata Check**: New `fetch-metadata` finding of `composer check` (`composer/fetch_metadata.py`, `DockerComposeLauncher._check_fetch_metadata`). It WARNs for each of `.proxy/Caddyfile` and `.proxy/default.conf.template` that lacks DjangoLux's Fetch Metadata resource isolation policy, which refuses with 403 the requests another site's page makes a browser send in the background. It matches on the name `cross_site_request`: a `@cross_site_request` matcher plus `respond` (or `error`) `@cross_site_request 403` in the Caddyfile, and a `map … $cross_site_request` plus `if ($cross_site_request) { return 403; }` in the nginx template, ignoring comments. The fix text names what to add and where, points to DjangoLux's *Cross-site requests (Fetch Metadata)* docs, and ends with `./start.sh restart caddy` (or `nginx`). OK when every proxy file present has it, or when there is none. Report only, no `--fix`. Tests: `tests/test_fetch_metadata.py`, including the DjangoLux scaffold alongside (`DLUX_CHECKOUT` overrides `../pkg-django-lux/main`), which passes and fails once its block is removed.
+
 ## v1.10.2
 
 - **Stable 1.10.2 For DjangoLux 1.16.2**: Promote the published and accepted 1.10.2b2, which includes 1.10.2b1. `composer check` reports `relay-env` (WARN while web and worker cannot see the SMTP relay's host, port, encryption and user, or the relay does not get `SMTP_RELAY_TLS_VERIFY` and `SMTP_RELAY_CA_FILE`) and `relay-version` (WARN while smtp-relay's image carries a DjangoLux older than 1.16.2, which signs in without checking the provider's certificate). `check --fix` shares the relay's settings through `x-environment` and keeps the password on `smtp-relay`. `dlux rollback` on the image's own release says there is nothing to roll back. The image builds on Python 3.15. Paired with DjangoLux 1.16.2. No runtime changes from the beta.
