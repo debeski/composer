@@ -47,6 +47,11 @@ echo "    help: all expected flags present"
 docker run --rm --entrypoint docker "$IMAGE" --version >/dev/null
 docker run --rm --entrypoint docker "$IMAGE" compose version >/dev/null
 echo "    tooling: docker, docker compose runnable"
+docker run --rm --entrypoint python "$IMAGE" -c '
+import importlib.util, sys
+sys.exit("pip is installed in the image" if importlib.util.find_spec("pip") else 0)
+'
+echo "    tooling: no pip in the final image"
 
 # 3b. The egress relay's sealed secrets work in this image: the shared fixture (sealed
 # by DjangoLux's sender) opens with the fixture key, and a fresh agent key is created.

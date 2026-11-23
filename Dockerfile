@@ -3,7 +3,8 @@ FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87
 WORKDIR /app
 ENV PYTHONPATH=/app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# `upgrade` pulls the Debian security fixes published after the base image.
+RUN apt-get update && apt-get -y upgrade && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -36,7 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `cryptography` is what the egress relay's sealed secrets use (composer/relay.py).
 # It arrives today as a dependency of pypi-attestations, but this image relies on
 # it directly, so it is named here rather than left to a transitive install.
-RUN pip install --no-cache-dir "pypi-attestations>=0.0.29" "packaging>=23.2" "cryptography>=42"
+# pip goes afterwards: Composer never calls it, and image scanners flag the
+# packages it vendors.
+RUN pip install --no-cache-dir "pypi-attestations>=0.0.29" "packaging>=23.2" "cryptography>=42" && \
+    python -m pip uninstall --yes pip
 
 COPY composer /app/composer
 COPY release-manifest.json /app/release-manifest.json

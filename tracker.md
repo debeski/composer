@@ -46,7 +46,7 @@
 
 ### Incomplete Tasks:
 - **Priority 1:**
-  - [ ] Composer 1.10.2 stable (`1.10/release_1_10_2`): after green CI and the owner's OK, merge and tag `v1.10.2` (stable, latest) before DjangoLux tags `v1.16.2`; then consumers move to the stables. Later: `relay-version` prints versions without the beta suffix, and reads a 1.16.2b1 relay as 1.16.2 (OK) while DjangoLux's Email step warns on it. The Fetch Metadata check (`1.10/fetch_metadata`) ships beside DjangoLux 1.16.3.
+  - [ ] **`1.10/deps_refresh` (2026-11-23, committed, not pushed; owner: in 1.10.3 with DjangoLux 1.16.3b1)**: `Dockerfile` `apt-get -y upgrade` + `python -m pip uninstall --yes pip`; `scripts/smoke-test.sh` fails an image with pip. Trivy 0.76.2 gate: 1.10.2 had 8 HIGH; 2 HIGH left in Docker's newest `docker-buildx-plugin` 0.39.1 (moby/go-archive v0.2.0) and `docker-compose-plugin` 5.8.0 (x/net v0.60.0), no upstream fix yet; re-check at 1.10.3 assembly. DjangoLux pair: `1.16/deps_refresh`.
   - [ ] Accept `1.10/update_guards` on a testbed, then PR it: two `dlux update --version X --staged-wheel …` a second apart (one refused "already running; nothing was changed"), a rollback during an update, a release that fails its health check (refused next time with its reason; `--retry-quarantined` retries; a healthy retry leaves `failed/X.retried-<time>/`), and `dlux check` / the Updates card no longer offering it.
   - [ ] A pinned `dlux update --version X` right after X is published fails "not published" while PyPI's CDN serves a stale simple index (seen 2026-10-09 with 1.11.0b6); the stale-index re-read only covers unpinned updates. Retry pinned resolution the same way.
   - [ ] `release_channels_plan.md` remaining: the shared reference-stack acceptance harness (§7), published-artifact acceptance as a dependent job (§3.8), promotion serialization/alias comparison under concurrency (§3.6), and a Composer 1.4.0 retirement inventory (§9 — none exists yet). 1.9.0b1/1.4.0b1 stay the first feature betas.
@@ -75,12 +75,12 @@
 ### One-line info about last verified Tests:
 - 2026-11-18: `1.10/relay_image_check` in the scratch venv (Python 3.14, CI's set): suite 1127 OK (16 skips), compileall OK; the `python -m dlux --version` probe read 1.16.0b1 / 1.16.2b1 from the testbed-dlux images (no stack started).
 - 2026-11-17: `1.10/relay_env` in a scratch venv (Python 3.14, CI's set): suite 1115 OK (16 skips; main 6b5e071: 1073 OK, 15 skips); real `docker compose config` rewrite of schema-4 + testbed-dlux copies (nothing started); `composer:test-relay-env` (c6b297bf857b) `scripts/smoke-test.sh` passed. Host-suite caveat: `test_agent.AgentOnlyPackageUpdateTests` opens a live PyPI HTTPS connection and can stall the run for minutes.
-- 2026-11-14: `1.10/update_guards` in a host venv (Python 3.14, CI's dependency set; sibling `pkg-django-lux/main` read): suite 1031 OK (15 skips; baseline on 757384f 996 OK, 15 skips). No Docker, image build or smoke test run.
+- 2026-11-23: `1.10/deps_refresh` in a scratch venv (Python 3.14, CI's set): suite 1128 OK (16 skips). amd64 image (`--no-cache`): `smoke-test.sh` PASS (no pip); Trivy 0.76.2 gate rc=1 on 2 HIGH, both in Docker's plugins (buildx 0.39.1 moby/go-archive, compose 5.8.0 x/net), plus 4 MEDIUM there; Debian and Python clean (1.10.2: 8 HIGH). Evidence `deps_refresh/.xclude/validation/1.10.3-deps-refresh-2026-11-23/`.
 - Host Python cannot run the suite (no cryptography/packaging/yaml): use a venv with CI's set (`PyYAML==6.0.3 "packaging>=23.2" "cryptography>=42"`), or run it in the built image with `pip install PyYAML==6.0.3` and `~/Desktop/depy` mounted at `/depy`, so the sibling `pkg-django-lux` comparisons run.
 ### One-line info about last time edited Docs:
 - 2026-11-18: `1.10/relay_image_check`: README "SMTP relay settings for the Email step" (relay runs the image's DjangoLux, `relay-version` finding); CHANGELOG `## Unreleased` (1 entry).
 - 2026-11-17: `1.10/relay_env`: README check sentence + "SMTP relay settings for the Email step" section (states table, fix rules); CHANGELOG `## Unreleased` (1 entry).
-- 2026-11-14: `1.10/update_guards`: README `dlux check`/`update`/`rollback` (operation lock, quarantine rule, `--retry-quarantined`, `quarantined` in the availability report), executor-hardening §C step 4; CHANGELOG `## Unreleased` (2 entries).
+- 2026-11-23: `1.10/deps_refresh`: CHANGELOG `## Unreleased` (1 entry); no doc owns the image's packages.
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Image without pip, with current Debian fixes (`1.10/deps_refresh`)**: the `Dockerfile` runs `apt-get -y upgrade` in its first apt step and uninstalls pip (`python -m pip uninstall --yes pip`) after installing `pypi-attestations`, `packaging` and `cryptography`. Composer never calls pip. With `trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1` (Trivy 0.76.2), the 1.10.2 image reported 8 HIGH: zlib1g (CVE-2026-85091, fixed in Debian), the vendored msgpack, urllib3 and setuptools of pip 26.2.2, and two in Docker's Go binaries. The pip and Debian findings are gone; the two left are in the newest releases of `docker-buildx-plugin` 0.39.1 (`github.com/moby/go-archive` v0.2.0, CVE-2026-17106) and `docker-compose-plugin` 5.8.0 (`golang.org/x/net` v0.60.0, CVE-2026-78661), and clear when Docker ships rebuilt plugins. `scripts/smoke-test.sh` fails an image that still has pip. Paired with DjangoLux's scaffold `Dockerfile` change in the same release cycle; no runtime or protocol changes.
+
 ## v1.10.2
 
 - **Stable 1.10.2 For DjangoLux 1.16.2**: Promote the published and accepted 1.10.2b2, which includes 1.10.2b1. `composer check` reports `relay-env` (WARN while web and worker cannot see the SMTP relay's host, port, encryption and user, or the relay does not get `SMTP_RELAY_TLS_VERIFY` and `SMTP_RELAY_CA_FILE`) and `relay-version` (WARN while smtp-relay's image carries a DjangoLux older than 1.16.2, which signs in without checking the provider's certificate). `check --fix` shares the relay's settings through `x-environment` and keeps the password on `smtp-relay`. `dlux rollback` on the image's own release says there is nothing to roll back. The image builds on Python 3.15. Paired with DjangoLux 1.16.2. No runtime changes from the beta.
