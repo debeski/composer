@@ -397,17 +397,19 @@ class ContractInteropTests(unittest.TestCase):
 class PublishedContractTests(unittest.TestCase):
     """Composer's writer must satisfy the contract DjangoLux publishes.
 
-    dlux/runtime_contract.json is fetched in production through
+    dlux/contracts/runtime.json is fetched in production through
     `manage.py dlux_runtime_contract`; here it is read from the sibling checkout
     when one is present, so the two implementations are checked against the same
     document rather than against each other's habits.
     """
 
     def setUp(self):
-        path = (Path(__file__).resolve().parents[2] / "pkg-django-lux"
-                / "dlux" / "runtime_contract.json")
+        checkout = Path(
+            os.environ.get("DLUX_CHECKOUT") or Path(__file__).resolve().parents[3] / "pkg-django-lux" / "main"
+        )
+        path = checkout / "dlux" / "contracts" / "runtime.json"
         if not path.exists():
-            self.skipTest("DjangoLux checkout not present; contract check skipped")
+            self.skipTest(f"No DjangoLux checkout at {checkout}; contract check skipped")
         self.contract = json.loads(path.read_text(encoding="utf-8"))
         self._tmp = TemporaryDirectory()
         self.root = Path(self._tmp.name)

@@ -1,4 +1,7 @@
+import os
+import re
 import unittest
+from pathlib import Path
 
 from composer.agent_installer import (
     COMPOSER_AGENT_END,
@@ -132,6 +135,29 @@ class HardenedStackTests(unittest.TestCase):
     def test_executor_is_excluded_from_managed_operations(self):
         ex = _section(self.block, "composer-executor")
         self.assertIn("composer-executor", ex.split("COMPOSER_EXCLUDE_SERVICES")[1].split("\n")[0])
+
+
+DLUX_CHECKOUT = Path(
+    os.environ.get("DLUX_CHECKOUT") or Path(__file__).resolve().parents[3] / "pkg-django-lux" / "main"
+)
+DLUX_COMPOSE = DLUX_CHECKOUT / "dlux" / "scaffold" / "templates" / "project" / "compose.yml.tmpl"
+
+
+class DjangoLuxScaffoldMirrorTests(unittest.TestCase):
+    """DjangoLux's scaffold writes the socket proxy image ``check --fix`` enforces.
+
+    Found by the 1.16.3b1 schema audit: the scaffold shipped ``:latest``, so every
+    new project drifted on its first ``check --fix`` and ran a moving tag until then.
+    """
+
+    def test_the_scaffold_pins_the_same_socket_proxy_image(self):
+        if not DLUX_COMPOSE.is_file():
+            self.skipTest(f"No DjangoLux checkout at {DLUX_CHECKOUT}")
+        images = re.findall(
+            r"(?m)^\s*image:\s*(tecnativa/docker-socket-proxy\S*)\s*$",
+            DLUX_COMPOSE.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(images, [DOCKER_SOCKET_PROXY_IMAGE])
 
 
 if __name__ == "__main__":
