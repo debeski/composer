@@ -8,11 +8,11 @@ There is no local Python setup. Composer runs from a container, so the only thin
 
 ## what it does
 
-- **Deploys** a Compose project with secrets resolved from a plaintext env file, health-checked, with post-start tasks (DjangoLux's migrator) run exactly once. See [the surface](#the-surface).
-- **Updates** in two ways: whole application images (`update`, `pull`) behind a version gate that refuses to recreate onto an older image, and **inline DjangoLux releases** (`dlux update`, `dlux rollback`) applied from PyPI onto a runtime volume, with Trusted Publisher attestation, SHA-256 and release-manifest checks, and automatic rollback.
-- **Diagnoses and repairs** the outside of a stack with `check` / `check --fix`: topology, obsolete services and proxy routes, retired wiring, wrapper drift, and deployer/resident version drift, always archived under `.xclude/` first.
-- **Runs resident inside the stack** as a privilege-split pair, `composer-agent` (network-facing, read-only Docker) and `composer-executor` (sole holder of Docker write authority), so an update or repair can be triggered from the DjangoLux admin UI without giving the web-facing side the Docker socket. See [Agent Protocol v1](docs/agent-protocol-v1.md) and [executor hardening](docs/executor-hardening.md).
-- **Publishes state for the application to show**: deploy status and a console log, image and package availability, the active DjangoLux channel, and results for the Operations card. Composer writes these files; DjangoLux reads them.
+- **Deploys** a Compose project with secrets resolved from a plaintext env file, health-checked, with post-start tasks (DjangoLux's migrator) run exactly once. See [deploying](docs/deploying.md).
+- **Updates** in two ways: whole application images (`update`, `pull`) behind a version gate that refuses to recreate onto an older image, and **inline DjangoLux releases** (`dlux update`, `dlux rollback`) applied from PyPI onto a runtime volume, with Trusted Publisher attestation, SHA-256 and release-manifest checks, and automatic rollback. See [updates and channels](docs/updates.md).
+- **Diagnoses and repairs** the outside of a stack with `check` / `check --fix`: topology, obsolete services and proxy routes, retired wiring, wrapper drift, and deployer/resident version drift, always archived under `.xclude/` first. See [`composer check`](docs/check.md) and [stack migrations](docs/stack-migrations.md).
+- **Runs resident inside the stack** as a privilege-split pair, `composer-agent` (network-facing, read-only Docker) and `composer-executor` (sole holder of Docker write authority), so an update or repair can be triggered from the DjangoLux admin UI without giving the web-facing side the Docker socket. See [the resident pair](docs/resident-pair.md) and [executor hardening](docs/executor-hardening.md).
+- **Publishes state for the application to show**: deploy status and a console log, image and package availability, the active DjangoLux channel, and results for the Operations card. Composer writes these files; DjangoLux reads them ([Agent Protocol v1](docs/agent-protocol-v1.md)).
 - **Manages release channels** for both Composer itself and DjangoLux (stable or beta, independently), and updates itself with `update self` (plain `update` refreshes it first).
 
 ## how it fits
@@ -41,472 +41,46 @@ Three faces of one image (`debeski/composer`):
 
 The wrappers, the image, and the resident pair are versioned separately, so `check` reports drift between them and `update self` / `agent update` bring them back in line.
 
-## setup
+## quick start
 
-Put `start.sh` or `start.ps1` in your project root. The DLUX scaffold writes them once; composer owns them from then on and `check --fix` keeps them current (see [wrapper versioning](#wrapper-versioning)).
-
-To leave DjangoLux's initial setup wizard available even when the image contains
-`config.json`, use `./start.sh --skip-config` (or `./start.sh -d --skip-config`).
-This requires DjangoLux 1.9.4+; see [manual first-deploy setup](docs/first-deploy.md).
-
-## deployment
-Just start it.
+Put `start.sh` or `start.ps1` in your project root. The DLUX scaffold writes them once; Composer owns them from then on and `check --fix` keeps them current ([wrappers](docs/deploying.md#wrappers)). Then just start it:
 
 ```bash
 ./start.sh
 ```
 
-Composer resolves secrets automatically. It looks for a plaintext env file —
-`.env`, `secrets/.env`, then `.secrets/.env` — and uses the first one that
-supplies every variable the compose file requires.
+Composer resolves secrets automatically: it uses the first of `.env`, `secrets/.env` and `.secrets/.env` that supplies every variable the compose file requires ([secrets](docs/deploying.md#secrets)). To leave DjangoLux's setup wizard available on a first deploy, use `./start.sh --skip-config` ([manual first-deploy setup](docs/first-deploy.md)).
 
 ## command map
 
 | I want to… | run |
 | --- | --- |
 | bring the stack up | `./start.sh` (`-d` for dev, `-b` to build) |
-| update the application image | `./start.sh update` |
+| update Composer, then the application image and the resident pair | `./start.sh update` |
 | only download images | `./start.sh pull` |
+| update only Composer itself | `./start.sh update self` |
 | update DjangoLux inline, or roll it back | `./start.sh dlux update` / `dlux rollback` |
 | see or request the DjangoLux channel | `./start.sh dlux channel [stable\|beta]` |
+| switch Composer's own channel | `./start.sh check --beta` / `--stable` |
 | diagnose, then repair, a deployment | `./start.sh check` / `check --fix` |
 | undo a group-access grant on app data | `./start.sh app-permissions revert <manifest>` |
-| switch Composer's own channel | `./start.sh check --beta` / `--stable` |
-| update Composer, then the stack and resident pair | `./start.sh update` |
-| update only Composer itself | `./start.sh update self` |
 | manage the resident pair | `agent update\|restart\|off\|enable`, `executor enable` |
 | run a command in a service | `./start.sh run -m web migrate --noinput` |
 | run DjangoLux's migrator | `./start.sh migrate` |
 | read logs | `./start.sh log -n 200 web` |
 | stop | `./start.sh stop` (`-v`, `-p` are destructive and confirmed) |
 
-The rest of this file is the reference for each.
+Every command, flag and exit code: [commands](docs/commands.md).
 
-## resident agent secret access
+## documentation
 
-A resident `composer-agent` must retain the same values for later image-update
-runs. The `start.sh`/`start.ps1` wrappers pass the selected file to the one-shot
-Composer container with Docker's `--env-file`; when Composer creates or recreates
-`composer-agent`, its private mode-`0600` runtime override forwards those values
-and a key manifest only to that service. The agent and its update children then
-use the inherited environment instead of reopening the host bind-mounted file.
-Host mode-`0600` secrets therefore need no ACL or capability exception.
+The [docs index](docs/README.md) lists every page. The most used:
 
-New deployments run the hardened resident pair: `composer agent run` plus
-`composer executor run`. Legacy `composer-updater` stacks still deploy, but
-`composer check` reports them as a legacy topology and `check --fix` (or
-`composer agent enable --apply`) migrates them to `composer-agent`.
-
-## the surface
-
-`composer run [-m] [-s] [-F] [-f FILE] [-d] <service> <command...>` runs a command inside a service instead of typing `docker exec`/`docker run` by hand. Defaults to `docker compose exec <service> …`; `-m`/`--manage` prepends `python manage.py` (e.g. `./start.sh run -m web migrate --noinput`), run under DjangoLux's runtime supervisor when the service itself is, so it uses the active release even with a `manage.py` too old to resolve it, `-s`/`--shell` runs the command via `sh -c` so pipes/`&&` work, and `-F`/`--fresh` uses a one-off `docker compose run --rm`. TTY is auto-detected: a terminal gets an interactive session, a pipe gets `-T` and reads your piped stdin (`echo yes | ./start.sh run -m web collectstatic`). Note the wrapper nests two ptys, so type-ahead into an interactive prompt is dropped until the inner container attaches — prefer `--noinput` in scripts. See `composer run --help`.
-
-`composer migrate [-s SERVICE] [-f FILE] [-d] [MIGRATOR_ARGS...]` runs DjangoLux's supervised migrator directly in the running `web` service. `--service` selects another service, and every unrecognized argument is passed to the migrator: `./start.sh migrate -mm -a documents`, `./start.sh migrate -nm`, or `./start.sh migrate -d --service web -- -mm`. The command uses the service's `org.dlux.post-start` command when present, otherwise it matches the existing `dlux-updater` supervisor and defaults to the packaged supervisor; its output and exit code remain attached to the terminal. See `composer migrate --help`.
-
-`composer restart [-f FILE] [-d] [--status-file PATH] [service]` restarts running containers through `docker compose restart`, then waits for their health checks. Containers are preserved and post-start tasks are skipped. Pass a service to restart only that service. `composer -r ...` and `composer --restart ...` remain short leading aliases. See `composer restart --help`.
-
-`composer update [-b] [--force] [-nm] [-mm] [-a APP] [--status-file PATH] [-f FILE] [-d] [service...]` pulls the latest application image(s), recreates the affected containers, waits for health checks, and runs post-start tasks. Name services to scope both the pull and recreate; the resident agent/executor and the watcher use this same subcommand internally. `-u [service]` remains the compact argument form. See `composer update --help`.
-
-### Post-start tasks and the migrator contract
-
-A service opts into a post-start task with an `org.dlux.post-start` label naming the command:
-
-```yaml
-  web:
-    labels:
-      org.dlux.post-start: "python -m dlux.updater.supervisor --no-watch -- python manage.py migrator"
-```
-
-Composer runs it once, after the stack is healthy, appending whichever flags the run was given. A label is used rather than Compose's native `post_start` hook because Compose runs that hook itself, on container start, without composer's flags — which meant two migrators running at the same time. Deployments still carrying a native `post_start` block keep working (composer execs it and says so); `composer check --fix` folds it into the label. Existing DLUX updater stacks missing both declarations use a narrowly gated compatibility migrator instead of silently doing nothing, and `check --fix` installs the missing label. Post-start execution is non-interactive (`compose exec -T`), and a failed or unhealthy hook now fails the Composer run rather than ending with a false “Environment ready.”
-
-When the command is DjangoLux's `migrator`, `-a APP`, `-mm`, and `-nm` are forwarded and mean:
-
-| flags | makemigrations | migrate | collectstatic |
-| --- | --- | --- | --- |
-| *(none)* | only apps with no `migrations/0001_*.py` | yes | yes |
-| `-mm` | **all** target apps, forced | yes | yes |
-| `-nm` | no | no | **yes** |
-
-`-mm` and `-nm` are mutually exclusive. `-a APP` scopes which apps are considered; without it the migrator auto-discovers local apps. `-mm` writes migrations into the container filesystem, so they are lost on recreate unless the app source is bind-mounted — it is a development affordance.
-
-`composer pull [--status-file PATH] [-f FILE] [-d] [service...]` only downloads images. It never recreates containers, runs health checks, or executes post-start tasks. This replaces the retired `-uo` and `update -o` forms.
-
-`composer update self` pulls the Composer deployer used by `start.sh` (`debeski/composer:latest`, or `:beta` on the beta channel) and leaves the stack alone. With wrapper 5 or newer, a plain `composer update` with no named services does this first, so the stack update that follows runs on the new deployer; naming services skips it. `self update` remains a deprecated alias. Set `COMPOSER_SELF_IMAGE` only when using a compatible Composer image mirror.
-
-`composer check [--fix] [-y] [--deep] [--json] [--beta|--stable] [-f FILE] [-d]` is the doctor for the *outside* of a DLUX stack. It verifies Docker + Compose v2, that the compose config resolves, that a secrets source is present/readable/non-empty, that every externally-required compose variable has a value, the topology mode (hardened `composer-agent` + `composer-executor`, agent-only, legacy `composer-updater`, or unmanaged), obsolete DLUX services and proxy routes, whether the generated stack files agree on their DjangoLux stack schema stamp, whether the proxy refuses cross-site background requests (`fetch-metadata`), which front proxies Caddy takes client addresses from, whether `web` and `worker` see the SMTP relay's settings, whether the uid the app image runs as can use the data its services mount, and version drift between the deploying composer and the resident `composer-agent`. A mixed `composer-agent` + `composer-updater` topology fails closed. It warns when `pgadmin`, `db-backup`, or the legacy `db_backup` spelling is present, and independently detects recognized pgAdmin routes in `.proxy/Caddyfile`, `.proxy/default.conf.template`, and `.nginx/nginx.conf`. Guarded `--fix` validates the complete cleaned Compose candidate, archives every changed deployment/proxy file under `.xclude/composer-check/`, validates each changed proxy mounted by Caddy or Nginx, stops and removes only detected obsolete containers with targeted `docker compose rm -sf`, applies the service and route cleanup, rediscovers services, and verifies every pre-existing named Docker volume remains. A running Caddy or direct-config Nginx service is reloaded; template-backed Nginx is restarted and checked so its live rendered configuration is regenerated. This proxy-only path also repairs projects whose obsolete services were removed by v1.2.6. Unrecognized customized pgAdmin routes fail closed for manual review. The fix never uses a broad orphan-cleaning redeploy and never removes volumes; it also migrates legacy `composer-updater` stacks straight to the hardened `composer-agent` + `composer-executor` topology, hardens agent-only stacks, normalizes generated resident commands to `agent run`/`executor run`, rewrites retired local DLUX tools commands (`tools.dlux_runtime_supervisor`, `tools.smtp_relay`) to package-owned modules, removes generated local `tools/` bind mounts, adds missing `org.dlux.restart` labels, strips updater-era `web.post_start` hooks when `dlux-updater` is retired into init containers (`pre_start` on `worker`, or on `celery` before stack schema 5), and installs or normalizes the `org.dlux.post-start` migrator label only for stacks that still need that compatibility path. Runtime-command rewrites are gated on the project image shipping the needed DLUX module (`1.6.2+` for `dlux.updater.supervisor`, `1.7.0+` for `dlux.smtp_relay`). With `-d`, `--fix` also validates and normalizes `compose.dev.yml` against the merged base/dev config: it removes dev `dlux-updater` overrides, keeps the runtime mount of `worker` and `celery` writable, and disables inline updates in dev containers. `--deep` relays the in-container app-level doctor — `python manage.py dlux_doctor` in the `web` service by default, overridable with `--deep-service`/`--deep-command` — and prints its output. When that service runs under DjangoLux's runtime supervisor, the doctor does too (`--no-watch`), so it reports the active release rather than the package baked into the image. `--json` emits structured results; exit is non-zero on a blocking problem or failed fix/postflight. This is the single evolving check that replaces per-change `enable-*` one-offs: composer owns the outside and hands the rest to the container(s). See `composer check --help`.
-
-**Stored files (security, DjangoLux stack schema 4).** Stacks generated before DjangoLux 1.15.3 have a proxy that serves every `/media/` file straight from disk, so anyone who can reach the site can download stored files by URL without signing in. `composer check` reports this as a `stored-files` **FAIL** (a hand-edited `/media/` section is a WARN instead). Once the running DjangoLux is 1.15.3 or later (the active inline release, or the image's), `composer check --fix` rewrites an unmodified generated `.proxy/Caddyfile` / `.proxy/default.conf.template`:
-- only `media/public/`, branding and managed images and fonts stay public;
-- every other `/media/` file is first checked by DjangoLux (`forward_auth` / `auth_request` to `/sys/files/media-access/`);
-- the new config is validated before anything is written, the files are restamped 3 → 4 (the secrets file in place, see [stack schema stamps](#stack-schema-stamps)) and the originals archived under `.xclude/composer-check/`, and the proxy is recreated.
-
-With an older DjangoLux the fix refuses, because the proxy would then refuse every private file. Before fixing, list folders your site shows to signed-out visitors (product photos, for example) in DjangoLux's `DLUX_PUBLIC_MEDIA`, or move them under `media/public/`.
-
-**Cross-site requests (Fetch Metadata).** DjangoLux's generated proxy refuses with 403 what another site's page makes a visitor's browser send in the background (images, scripts, `fetch()`, form posts, `<object>`/`<embed>`), using the browser's `Sec-Fetch-*` headers ([web.dev resource isolation policy](https://web.dev/articles/fetch-metadata)). Links from other sites, same-site requests and clients without the headers pass, and static files and public media stay open to other sites. Composer finds the policy by its name, `cross_site_request`, in each proxy file present:
-
-| File | Present when it has | `fetch-metadata` finding |
-| --- | --- | --- |
-| `.proxy/Caddyfile` | a `@cross_site_request` matcher and `respond @cross_site_request 403` (or `error … 403`) | OK, else WARN |
-| `.proxy/default.conf.template` | a `map … $cross_site_request` and `if ($cross_site_request) { return 403; }` | OK, else WARN |
-| neither file | | OK, nothing to check |
-
-Comments and formatting don't count, a matcher nothing refuses is missing, and a custom expression under the same name is accepted. The WARN names each file without it. The fix is to copy the block from DjangoLux's docs (`docs/deployment-configuration.md`, *Cross-site requests (Fetch Metadata)*) or a fresh `python -m dlux startproject`, then run `./start.sh restart caddy` (or `nginx`), since `./start.sh` alone doesn't reload a changed proxy file. CSRF tokens and `SameSite` cookies already stop forged changes, so this is a WARN and `check --fix` leaves the file alone.
-
-**App data permissions (non-root DjangoLux images).** A DjangoLux image can run as uid `10001` with group `0` (`USER 10001:0`). Data a root image wrote is `root:root` with directories at `0755`, so that user can read it but cannot create, delete or rename anything; it reaches the data through group `0` instead. `composer check` reports this as the `app-permissions` finding:
-- the image runs as root: **OK** when the data is ready for uid 10001, **WARN** when it is not (fixable at any time, because root ignores the bits);
-- the image runs as a non-root uid: **OK** when it can use its data, **FAIL** when it cannot, because DjangoLux's entrypoint then refuses to start (exit 78).
-
-A plain `check` looks at the top two levels of every mount; `--deep` and `--fix` walk everything. The mounts come from the merged compose config: every bind directory and named volume a service on the app image mounts, so a project's own mounts are included. Missing named volumes are left for Docker to create.
-
-`check --fix` grants what is missing. It adds group read, write and search bits to directories, group write to log files, and group read where a file is not readable. On the runtime volume only the top-level directories and the `state/` tree get group write: the app replaces a file there by renaming a new one over it, so the files themselves need only group read. The group changes only on an entry owned by neither group 0 nor the app. Nothing is moved, renamed or rewritten, links are never followed, the walk stays on each mount's filesystem, and a file with more than one hard link is reported, never changed. The walk runs in a short-lived container from Composer's own image with `--network none`, `no-new-privileges` and only `DAC_READ_SEARCH`, plus `FOWNER` and `CHOWN` when it grants. Every change is listed in `.xclude/composer-check/<UTC>/app-permissions/app-permissions.tsv.gz`; `./start.sh app-permissions revert <that file>` restores the previous mode and group of each entry that still has the granted ones.
-
-Before every `up` (`./start.sh`, `update`, and the executor's image update) and every recreate of an app service (`dlux update`, the Operations card's recreate), Composer reads the app image's `Config.User`. An app image that is not on the host yet is pulled first, through the same compose environment as `up` (and built first for a service with a `build` section, as `up --build` would), so the uid comes from the image about to run. For a non-root uid it scans and, when something is missing, grants access first. When the image cannot be read or the grant fails, it reports `failed` and recreates nothing, so the running stack keeps serving. A user name instead of a numeric `uid:gid` is refused, because Composer cannot tell which uid needs access. Composer's own writes on the runtime volume are `0664` files in `0775` directories (umask `0002` in the agent, the executor, the watcher, every `composer dlux` command and the resident-update helper; `agent check` publishes `0664`), and the agent opens the directories it owns there to group 0 when it starts.
-
-**Trusted front proxies (Caddy).** The generated `.proxy/Caddyfile` keeps an incoming `X-Forwarded-For` from any peer on a private network and appends the peer, and DjangoLux records the client address from that header. A deployment behind a front proxy on a private address (pfSense, HAProxy, another nginx, a cloud load balancer) needs this to see real client addresses; without a front proxy, a client on a private network that reaches Caddy directly can choose the address DjangoLux records, which sidesteps the per-address login lockout and puts a false address in the audit log. The trusted range is the optional `DLUX_FRONT_PROXY` line in the secrets file (`.secrets/.env`), which the Caddyfile reads as `trusted_proxies static {$DLUX_FRONT_PROXY:private_ranges}` and compose passes to `caddy` as `DLUX_FRONT_PROXY: "${DLUX_FRONT_PROXY-private_ranges}"`:
-
-| `DLUX_FRONT_PROXY` | Caddy trusts | `front-proxy` finding |
-| --- | --- | --- |
-| not set | every private network | WARN |
-| `private_ranges` | every private network, as a deliberate choice | OK |
-| empty (`DLUX_FRONT_PROXY=`) | no proxy: it records the address that connects to it | OK |
-| `10.0.0.5` or `10.0.0.5 192.168.10.0/24` | only those addresses and ranges (space-separated, no quotes) | OK |
-| anything else (`none`, comma-separated lists) | Caddy does not start | FAIL, naming the entries |
-| a quoted value (`"10.0.0.5 10.0.0.6"`) | `./start.sh` passes the quotes to Caddy, which does not start with a quoted list | FAIL |
-
-The WARN names three ways out: set `DLUX_FRONT_PROXY` to the front proxy's address(es), set it empty when users reach the server directly, or leave it unset and firewall the server so only the front proxy reaches Caddy's published port (`CADDY_PORT`, else `NGINX_PORT`, else 80). Caddy reads the value when its container is created, so apply a changed secrets file with `./start.sh`, which recreates `caddy` because its environment changed. `composer check --fix` brings an unmodified generated stack to this form: it rewrites the `trusted_proxies static private_ranges` line of `.proxy/Caddyfile` (indentation and the other `servers` options kept) and adds the variable to the `caddy` service's `environment` in the Compose file that defines it, in that mapping's or list's own style, or as a new mapping after `ports`. Until then the finding is a WARN that the stack cannot be told which proxies to trust, also when `DLUX_FRONT_PROXY` is already set. Left unset, the rewritten stack trusts exactly what it trusted before. The fix validates the Compose configuration and then the Caddyfile with `caddy validate` under the new environment, archives the originals under `.xclude/composer-check/`, and recreates a running `caddy`; it refuses while `DLUX_FRONT_PROXY` holds an invalid entry or is in quotes. A `trusted_proxies` line of the project's own, a Caddyfile without one, or a `caddy` service that sets its own `DLUX_FRONT_PROXY` value is reported as custom and left alone; an `environment` written as an alias or flow mapping is reported with the line to add by hand. The Operations card previews the same change.
-
-**SMTP relay settings for the Email step.** DjangoLux's System Settings Email step (DjangoLux 1.16.2 or later), with delivery path *Internal SMTP relay* and provider settings *Environment*, shows the relay's host, port, encryption and user, and whether a password is set, from web's own environment. The generated compose shares them in the `x-environment` block, which `web`, `worker` and `smtp-relay` merge: `SMTP_RELAY_HOST`, `SMTP_RELAY_PORT`, `SMTP_RELAY_USE_TLS`, `SMTP_RELAY_USE_SSL` (empty: SSL on port 465, STARTTLS otherwise) and `SMTP_RELAY_USER`, each as `"${SMTP_RELAY_<KEY>:-<default>}"`, plus `SMTP_RELAY_PASSWORD_SET: "${SMTP_RELAY_PASSWORD:+yes}"`. The password itself stays in `smtp-relay`'s environment, so web only learns whether one is set. The same block passes the relay its certificate check: `SMTP_RELAY_TLS_VERIFY: "${SMTP_RELAY_TLS_VERIFY:-True}"` (`False` accepts any provider certificate) and `SMTP_RELAY_CA_FILE: "${SMTP_RELAY_CA_FILE:-}"` (a private CA bundle's path inside `smtp-relay`). The relay reads both from its own environment, so on a compose that does not pass them it always verifies against the system CAs and setting them in the secrets file has no effect.
-
-| Compose | `relay-env` finding |
-| --- | --- |
-| the settings reach `smtp-relay` only, in the generated `"${SMTP_RELAY_<KEY>:-<default>}"` form | WARN: the Email step cannot show them (it still sends) |
-| the mail settings are shared but not `SMTP_RELAY_TLS_VERIFY` and `SMTP_RELAY_CA_FILE` | WARN: the relay's certificate check cannot be configured |
-| shared through `x-environment` as above | OK |
-| no `smtp-relay` service running DjangoLux's relay | OK |
-| custom: a value written into `smtp-relay` instead of the secrets file, a missing generated line, an `x-environment` block that sets some of them its own way, or an environment Composer cannot edit | OK, naming what it left alone |
-| `x-environment` passes `SMTP_RELAY_PASSWORD` itself, to every service that merges it | WARN |
-
-`composer check --fix` brings an unmodified generated stack to the shared form: it moves the `smtp-relay` lines into the `x-environment` block after `DEFAULT_FROM_EMAIL` (or at the block's end), keeping each default the stack used, adds `SMTP_RELAY_USE_SSL` and `SMTP_RELAY_PASSWORD_SET`, then the two certificate lines (after `SMTP_RELAY_PASSWORD_SET` on a stack that already shares the mail settings, moving them out of `smtp-relay` with their defaults if they are there), and leaves `SMTP_RELAY_PASSWORD` in `smtp-relay`. It never adds a CA mount: a bind mount of a missing file makes Docker create a directory there. To trust a private CA, save the bundle as `.secrets/smtp-relay-ca.pem`, add `volumes: [./.secrets/smtp-relay-ca.pem:/etc/dlux/smtp-relay-ca.pem:ro]` to `smtp-relay` and set `SMTP_RELAY_CA_FILE=/etc/dlux/smtp-relay-ca.pem` in the secrets file; a mount of the project's own is left alone. It validates the result with `docker compose config` and refuses when another Compose file would give `web` or `worker` different values from `smtp-relay`, or hand the password to any other service. It archives the original under `.xclude/composer-check/` and recreates a running `web`, `worker` and `smtp-relay`, which read their environment only when created. It never reads the secrets file or shows the password, in the preview or anywhere else, and the secrets file needs no change: an unset `SMTP_RELAY_USE_SSL`, `SMTP_RELAY_TLS_VERIFY` or `SMTP_RELAY_CA_FILE` reads as its default. A custom stack is left alone; to have Composer share its settings, keep the values in the secrets file (`SMTP_RELAY_HOST=smtp.office365.com`) and pass them to `smtp-relay` in the generated form. The Operations card previews the same change.
-
-`smtp-relay` runs the DjangoLux baked into the project image: it mounts no runtime volume, so an inline DjangoLux update (`composer dlux update`) reaches `web` and `worker` but not the relay. A relay older than DjangoLux 1.16.2 signs in to the provider without checking its certificate and ignores `SMTP_RELAY_TLS_VERIFY` and `SMTP_RELAY_CA_FILE`, while a web on 1.16.2 or later shows the check in the Email step. So when web runs 1.16.2 or later, the `relay-version` finding reads the relay's version from its image in a fresh container (`docker compose run --rm --no-deps`, `python -m dlux --version`): OK at 1.16.2 or later, WARN when older. There is no finding on an older web, without a relay, or when the version cannot be read. `check --fix` cannot change an image: move the stack to a project image built on DjangoLux 1.16.2 or later (a project release, or a rebuild from source), then run `./start.sh`.
-
-**Private registry login.** A `WEB_IMAGE` in a private registry (a private GitLab project, a private Docker Hub repository) needs a login to be read, both by `composer-agent`'s update check and by every pull: `composer-executor`'s image update, `./start.sh update` and an `up` that has to fetch an image. Put a read-only login in the secrets file:
-
-```
-COMPOSER_REGISTRY_USERNAME=gitlab+deploy-token-12
-COMPOSER_REGISTRY_PASSWORD=<the deploy token>
-```
-
-For GitLab, create a deploy token with the `read_registry` scope only (Settings > Repository > Deploy tokens); for Docker Hub, an access token with read-only scope. The login belongs to the registry `WEB_IMAGE` names; `COMPOSER_REGISTRY_HOST=registry.example.com` names another one. Composer never sends it to any other registry, so public images (caddy, postgres) are pulled as before:
-- the update check follows the registry's `WWW-Authenticate` challenge and sends the login as Basic auth to the token service the challenge names (GitLab's `/jwt/auth`, Docker Hub's `auth.docker.io`), or to the registry itself when it asks for Basic auth. It goes over https only, never across a redirect, and never to the storage host a blob read is redirected to;
-- every `docker compose` Composer runs gets a private `DOCKER_CONFIG` holding only this login (directory `0700`, `config.json` `0600`, removed when the Composer process exits). The Docker daemon takes registry credentials from its client, and the Composer containers have no Docker login of their own: a `docker login` on the host does not reach them.
-
-The generated resident block passes `COMPOSER_REGISTRY_USERNAME`, `COMPOSER_REGISTRY_PASSWORD` and `COMPOSER_REGISTRY_HOST` to `composer-agent` and `composer-executor` as `"${KEY:-}"`, empty unless the secrets file sets them. `composer check --fix` adds the lines to an older stack's resident block, after each role's `WEB_IMAGE`; a value the stack sets itself stays. After that fix, and after any change to the login in the secrets file, run `./start.sh`, which recreates the pair because their environment changed. `COMPOSER_REGISTRY_TOKEN`, a static bearer token sent straight to the registry, still works for registries that accept one; GitLab's registry tokens expire within minutes, so use the login there.
-
-The `registry-login` finding reads the agent's watched image from the resolved Compose configuration and asks its registry for the tag, the way the agent asks:
-
-| Situation | `registry-login` finding |
-| --- | --- |
-| the registry answers, with the login, a static token or without a login | OK |
-| the registry needs a login and the stack passes none | WARN, naming the two keys |
-| the registry refused the login (wrong token, expired, no access to the repository) | FAIL |
-| the secrets file holds a login the stack does not pass to `composer-agent` or `composer-executor` | WARN: `check --fix` adds the lines |
-| the registry has no such tag (or hides a private one from an anonymous reader) | WARN |
-| the registry is not reachable from where `check` runs | OK, saying it was not checked |
-| `WEB_IMAGE` was built on this machine and never pulled (no repository digest) | OK, nothing to read |
-| `WEB_IMAGE` is a bare name (no registry, no namespace, such as `myapp:1.0`) that Docker Hub refuses: Docker Hub holds bare names only as official images, which are never private, so it is a local build | OK, nothing to read; the availability document carries no reason, so DjangoLux's Updates card shows no warning |
-| Composer does not trust the registry's certificate (a private CA) | WARN |
-| no `composer-agent` | no finding |
-
-The Operations card's check runs in `composer-executor`, which has no route to a registry, so there it reports only whether the pair receives a login. While the registry cannot be read, the availability document stays "unknown" and never reports an update; its image entry carries `reason` (`login-required`, `login-refused`, `not-found`, `unreachable`, `certificate`, `failed`), which `composer agent check` prints. The update check trusts the public certificate authorities only. A registry with a certificate from a private CA must also be trusted by the Docker daemon for pulls (`/etc/docker/certs.d/<registry host>/ca.crt` on the host). The update check runs in `composer-agent` and resolves the registry (and its token service) through Docker's DNS, which does not read the host's `/etc/hosts`; the Docker daemon's pulls do. A registry name only the host resolves through `/etc/hosts` therefore also needs `extra_hosts` on `composer-agent` (for GitLab, both the registry and the GitLab host), or a DNS server that both use. Otherwise pulls work while the update check reports the registry unreachable.
-
-**DjangoLux's task worker (stack schema 5).** DjangoLux 1.16 runs its own tasks with `python manage.py dlux_worker` in a `worker` service, which takes over everything `celery` did for DjangoLux. The `task-worker` finding is a WARN when the running DjangoLux is 1.16 or later and the stack has no `worker` (its tasks are queued and never run), and OK otherwise. `composer check --fix` adds the service once the stack's DjangoLux has `dlux_worker`: the running release (the active inline release, or the image's), or with `-d` the `django-lux` version `requirements.txt`/`pyproject.toml` pins, since a development stack builds from the source. On an older DjangoLux it changes nothing, because `worker` could not start. The fix:
-- copies `celery` to `worker` with its mounts, environment anchors, networks and dependencies, and gives it the command `python -m dlux.updater.supervisor -- python manage.py dlux_worker`, the healthcheck `python manage.py dlux_worker --check` and `stop_grace_period: 30s`;
-- moves the init containers (`dlux_reconcile`, then `migrator`) and `DLUX_BOOT_GATE: "apply"` from `celery` to `worker`, which mounts `dlux_runtime` and `static` read-write;
-- keeps `celery` for the project's own tasks: no `pre_start`, so its boot gate waits like `web`; its command, healthcheck and read-write runtime mount stay (project tasks may write relay requests);
-- adds `worker` to `COMPOSER_AGENT_RESTART_SERVICES` right after `web`, and with `-d` mirrors the `compose.dev.yml` `celery` override for `worker`;
-- restamps files stamped 4 to 5, the secrets file among them, also on a stack whose `compose.yml` is already stamped 5. An unstamped `compose.yml` gets `DLUX_STACK_SCHEMA: "5"` only when nothing older is left: no `tools/` runtime modules, the maintenance page published by Composer, and stored files private. Otherwise it stays unstamped and the result says why; a later `check --fix` stamps it once the rest is done.
-
-The merged configuration is validated with `docker compose config` before anything is written, the originals are archived under `.xclude/composer-check/`, and nothing is recreated: the next deploy (`./start.sh`, or `./start.sh -d -b`) starts `worker`. The step runs after the others, so a stack still on the old layout (`dlux-updater`, `tools.dlux_runtime_supervisor`, the project's maintenance page) reaches schema 5 in one `check --fix`. DjangoLux 1.16 cannot be installed inline onto an older stack, and the step waits for a project image on 1.16, so the order is: put the image on DjangoLux 1.16 first (`./start.sh pull`, or bump the `django-lux` pin and rebuild), then run `./start.sh check --fix`, then deploy. A development stack runs `./start.sh -d check --fix` after bumping the pin, then `./start.sh -d -b`.
-
-`composer agent check [--json] [--no-publish] [--availability-file PATH] [-f FILE] [-d] [IMAGE ...]` checks image availability without pulling, recreating, or enabling maintenance. With no explicit images or output path, a deployment check reads the resident agent/updater's watched images and availability path from resolved Compose configuration, then atomically publishes the result through that running service. This refreshes the shared document the DLUX UI reads immediately instead of waiting for the hourly registry check; the UI displays it on its next refresh. It works from the deployment wrapper even though the wrapper does not mount the runtime volume. `--no-publish` opts out. Explicit image arguments remain diagnostic; `--availability-file PATH` instead writes to that path in the CLI's filesystem. Outside a configured deployment, image discovery falls back to `COMPOSER_CHECK_IMAGE`, `WEB_IMAGE`, then the Compose agent block. `-f FILE` selects an alternate Compose file; `-d` includes the development override when using default Compose files. `--json` emits the availability document, including optional candidate `version` and release `manifest` metadata. Exit `0` means every registry lookup and any requested publication succeeded, even when an update exists; exit `1` means a lookup was unknown, configuration discovery failed, or publication failed (for example, the resident service is stopped); exit `2` means invalid images or no image was found. Digest-pinned references are rejected. An unknown lookup prints its reason, such as a registry that needs a login. The registry login (`COMPOSER_REGISTRY_USERNAME`, `COMPOSER_REGISTRY_PASSWORD`, see [Private registry login](#the-surface)), `COMPOSER_REGISTRY_TOKEN`, `COMPOSER_VERSION_LABEL`, and `COMPOSER_RELEASE_MANIFEST_LABEL` apply as in the agent.
-
-`composer.ops` answers DjangoLux's **Operations card**: a request file naming one operation from its table (`check`, which also previews the repairs it would apply, `check-fix-apply`, `agent-check`, `agent-update`, and since 1.7.0b2 `services`, `service-restart`, `service-recreate` and `logs-tail` for DjangoLux's Operations panel) is performed by the resident agent and answered with a token-matched result on the runtime volume. An apply carries the digest of the files its preview read and is refused if they have changed since, so the repair that lands is the one the operator confirmed. An operation outside that table is refused rather than attempted, and the request carries no command, path or flags — only, for the service operations, a service name the agent checks against the stack (and the executor checks again against `COMPOSER_AGENT_RESTART_SERVICES` and the protected services) and a log line count capped at 1000. See [docs/agent-protocol-v1.md](docs/agent-protocol-v1.md).
-
-The resident services have three host-side lifecycle commands: `composer agent update` pulls and recreates, `composer agent restart` restarts and health-checks, and `composer agent off` stops — without touching the application or Compose project. When the compose file defines `composer-executor`, all three target the `composer-agent` + `composer-executor` pair together (both run the same image, so they can never drift to different versions); legacy stacks resolve to just `composer-agent`. The dedicated commands ignore the resident services' normal self-exclusion only for those explicit targets. `agent update` does not run application version gates or post-start hooks.
-
-`composer dlux check [--version V] [--availability-file PATH] [-f FILE] [-d]` publishes what is available to `state/package-available.json`, the document DjangoLux reads instead of polling PyPI itself. The report carries the offered release's own notes as `display` (`summary`, `highlights`, `release_url` from the verified wheel's manifest), which DjangoLux 1.15.2b2+ shows in its review dialog. The newest-release choice skips releases quarantined on this deployment (see below) and offers the next newest eligible one, or reports none available; the report lists them as `quarantined`, and a check pinned to one with `--version` publishes it with `inline_safe: false` and a reason that says how to retry it, so DjangoLux's Updates card does not offer a release that already failed here. `composer dlux update [--dry-run] [--version V] [--retry-quarantined] [--backup data|full|skip] [--restart-service SERVICE] [--status-file PATH] [-f FILE] [-d]` applies an inline DjangoLux release on the runtime volume: it resolves the newest wheel on the deployment's DjangoLux channel (or the pinned `--version`, honoured on either channel) from PyPI, verifies its Trusted Publisher attestation and SHA-256, honours the manifest's `inline_safe`, activates it under `state/active.json`, and brings up the services that load DjangoLux (by default `web`, `worker` and `celery`, each where the stack defines it; `dlux-updater` is deliberately excluded) with the same health wait `composer update` uses — the service whose `pre_start` applies migrations is **recreated** so Compose runs those hooks (a plain restart skips them, and a release carrying migrations would then activate with nobody applying them), every other service is restarted. An unpinned update re-reads PyPI's index a few times when it resolves an older release than the last `dlux check` published for the channel, because PyPI's CDN can briefly serve an index without a just-published release. When the services do not come back healthy, the update restores the previous release and quarantines the new one: it moves to `failed/<version>/` on the runtime volume with the reason in `quarantine-reason.txt`. Asking for a quarantined release again is refused with nothing changed (before anything is fetched or backed up), and the message names the release, the recorded reason and the retry command; an unpinned update skips it. `--retry-quarantined` (it needs `--version`) applies it anyway: a healthy retry renames its record to `failed/<version>.retried-<UTC time>/`, which is kept and no longer counts as a quarantine, and a retry that fails again sets the earlier record aside the same way before recording the new failure. `composer dlux rollback [--backup data|full|skip] [--restart-service SERVICE] [--status-file PATH] [-f FILE] [-d]` restores the previous release: the newest staged release below the active one that is newer than the DjangoLux baked into the project image, else the image's own release. When the image's own release is already running, there is nothing older to return to: it says so and exits `0` without a backup or a restart. DjangoLux's runtime supervisor runs a volume release only when it is newer than the baked one, so an older staged release would be activated and never run. Composer reads the baked version from the image in a fresh `web` container (`docker compose run --rm --no-deps`, `DLUX_BAKED_VERSION` else `dlux.__version__`); when it cannot, it takes the newest staged release below the active one. Before either swaps anything — once the release is resolved and is not already active — it takes a DjangoLux system backup inside the stack (`--backup data`, the default, is the database; `full` adds media; `skip` takes none; `COMPOSER_DLUX_BACKUP` sets the default): it execs `manage.py dlux_backup --trigger update` in `worker` (else `celery`, else `web`) under the runtime supervisor, so the active release takes it, and falls back to `manage.py shell` and the backup API on a DjangoLux without that command. A failed backup stops the update with nothing changed. When DjangoLux hands an update over (the executor runs it with `COMPOSER_OPERATION_ID` set), Composer takes no backup: DjangoLux 1.10.2b2+/1.11.0b5+ backs up before it writes the request, and a second one would only double the wait. Exit `3` means the rollback was also unhealthy — a deployment that needs a human, and one a caller must not retry. An update, a rollback and a `--dry-run` each hold `state/package-operation.lock` for their whole run: an exclusive `flock` on the runtime volume, so it covers the deployer CLI, the sibling container it re-runs in and the resident executor alike. One started while another runs is refused at once with "Another DjangoLux update or rollback is already running; nothing was changed." (exit `1`) instead of waiting; the lock belongs to the running process, so a run that dies leaves none behind. In the hardened topology the two halves split the work: `composer-agent` owns the package trigger and stages the verified wheel on the runtime volume (it has the egress), then hands `composer-executor` the version, filename and digest over the private socket, and the executor applies it offline (`--staged-wheel`/`--staged-sha256`, the same flags an air-gapped operator can use by hand). The runtime root (`/opt/dlux-runtime`, `DLUX_UPDATE_RUNTIME_ROOT`, or `--runtime-root`) is a container path, so run from the project root composer locates the project's runtime volume in the compose config and re-runs itself in a sibling container with that volume attached; it refuses when no service mounts that path or when Docker does not have the volume yet. See `composer dlux --help`.
-
-`composer dlux channel [stable|beta] [-f FILE] [-d]` reports or requests the **DjangoLux** release channel for this deployment. Stable is the default and admits no prerelease; beta is an explicit opt-in that widens eligibility only — every digest, attestation, manifest and migration check is identical on both. Composer *reads* the channel from `state/channel-policy.json` and never writes it: the DjangoLux worker owns that file because it owns the database row it mirrors, and two writers of one policy is how a deployment ends up disagreeing with itself. So `composer dlux channel beta` leaves a token-carrying request beside the policy and reports "requested, not yet applied" until that worker acknowledges it. A missing, unreadable, malformed or future-schema policy reads as **stable** — a deployment that never opted in is never handed a beta because a file was missing.
-
-`composer check --beta` / `--stable` switch **Composer's own** channel, which is independent of the DjangoLux one: running a Composer beta to test Composer is not a reason to start feeding a production deployment beta framework releases. One operation moves both halves together — the persisted `.composer-channel` file that the wrappers read before any Composer code runs, and the image the resident `composer-agent`/`composer-executor` pair run inside the stack — because a deployer on `:beta` talking to an agent on `:latest` is a configuration nobody chose. The retag is scoped to `debeski/composer:*` images inside the generated block, so the third-party socket proxy and anything outside the markers are untouched. Both flags are confirmation-gated (`-y` honoured), mutually exclusive, and dry-run first: the channel file is written only after the Compose edit validates. Plain `composer check` reports drift between the two halves without changing anything, and `check --fix` preserves the channel. An explicit `COMPOSER_SELF_IMAGE` pin always wins over the channel — an operator who pinned an image asked for that image.
-
-Composer 1.3.10 accepts DjangoLux release-manifest schemas 1 and 2. Schema-2 package updates enforce `install.inline`, migration rollback safety, `requires.services.composer` and `requires.stack_schema` (the stack schema stamp in the project's `compose.yml`; below it the release is reported but not installed inline, and the reason says to run `check --fix`); update both the deployer (`self update`) and resident pair (`agent update`) before applying a release whose manifest raises that floor. `check --fix` continues to normalize deployment topology, retired local DLUX tools wiring, restart labels, dev overrides, and deployer/resident version drift.
-
-`composer stop [-v] [-p] [-y] [-f FILE] [-d] [service...]` stops and removes the whole Compose project when unscoped. Pass service names to use `docker compose stop` for only those containers. Secrets, health checks, and post-start tasks are skipped. `-v`/`--volumes` and `-p`/`--purge` are destructive and project-wide, so they cannot be combined with service names and require a typed confirmation (see below). `composer down ...` is an alias and `composer --down ...` remains a flat-flag equivalent. See `composer stop --help`.
-
-`composer log [-n N|all] [-F] [-t] [--since TIME] [-f FILE] [-d] [service...]` reads Compose logs for the whole stack (interleaved, one color per service) or for the services you name. Defaults to the last 50 lines per service; `-n all` (or `-n 0`) lifts the limit, `-F`/`--follow` streams, `-t`/`--timestamps` prefixes each line, and `--since`/`--until` bound the window. `composer logs` is an alias. See `composer log --help`.
-
-`composer agent watch --trigger-file PATH [--interval N]` runs composer as a resident, in-compose updater. It watches the trigger file and, on each new request (a changed `token`, or the file's `mtime`), runs the full `composer update` pipeline (pull → version gate → recreate → health → post_start). The processed token and child exit code are recorded in `<trigger-file>.ack`, so a request is applied once and survives a restart. Add `--status-file PATH` to have each run publish [deploy status](#deploy-status); if the child exits before publishing its own terminal failure, the watcher guarantees a token-matched `failed` status so maintenance consumers are never left waiting on a dead process. See `composer agent watch --help`.
-
-`composer agent run` is the durable successor to `agent watch`. It preserves the same local trigger/status/ack and registry-availability files, adds a typed DLUX spool, SQLite command/outbox replay, operation correlation, safe restart allowlisting, and optional outbound HTTPS long polling. Configure `COMPOSER_CONTROL_URL`, a 15-minute one-use `COMPOSER_ENROLLMENT_TOKEN`, and `COMPOSER_AGENT_STATE_DIR` (default `/var/lib/composer-agent`). Enrollment pins the normalized control URL in local state; changing panels requires revocation and re-enrollment or an explicit local state reset. Control requests reject redirects. Pending snapshots coalesce to the newest state, while commands and events retain durable replay. Local DLUX-triggered updates continue while the control plane is unavailable or the machine credential is revoked. See [Agent Protocol v1](docs/agent-protocol-v1.md).
-
-`composer executor run` runs the privileged half of the hardened topology. The executor is the sole holder of Docker write authority: it owns the real `docker.sock`, runs the trigger-watched image-update loop, and serves typed restart/recovery operations to the agent over a private Unix socket (`COMPOSER_EXECUTOR_SOCKET`). The network-facing `composer-agent` keeps only read-only Docker access through a `docker-socket-proxy` with POST and exec disabled, and delegates every write. The generated Compose block starts it; it is not for interactive use. See [docs/executor-hardening.md](docs/executor-hardening.md).
-
-Migrate an existing generated DLUX project with Composer itself. Its wrapper
-may predate `update self` (wrapper 5), so refresh the deployer with
-`self update`, which every wrapper still accepts:
-
-```bash
-./start.sh self update
-./start.sh agent enable
-./start.sh agent enable --apply
-./start.sh executor enable
-./start.sh executor enable --apply
-```
-
-The default dry run prints the exact Compose diff. Apply accepts only a recognized
-DLUX-generated updater block, validates the candidate with `docker compose config`
-before writing, preserves the original under
-`.xclude/dlux-agent-bootstrap/<timestamp>/`, and replaces it atomically. The
-replacement keeps the deployment's own topology: the networks attached to the
-outgoing `docker-socket-proxy`/`composer-updater` services, that block's
-`COMPOSER_VERSION_LABEL`, and its `WEB_IMAGE` reference are carried forward
-verbatim, so projects generated before the DjangoLux 1.5 scaffold (`egress` /
-`docker_proxy`) migrate without renaming networks or losing the baked-version
-gate. A network the project never declares is reported by name before any write.
-Only the Compose file is read and rewritten, so this runs in a deployment
-directory that holds nothing but `compose.yml`, `.proxy/`, and `.secrets/`. When a
-`requirements.txt`/`pyproject.toml` is present it must declare DjangoLux 1.5.0+
-or apply refuses without `--allow-unverified-dlux`; with no manifest to read the
-check is reported as an advisory warning instead.
-`composer executor enable` takes the second step: it hardens an existing
-`composer-agent` stack by moving Docker write authority into a new
-`composer-executor` service, demoting `docker-socket-proxy` to read-only, and
-leaving the agent to observe and delegate. It uses the same guardrails —
-dry-run by default, `.xclude/` backup, `docker compose config` validation,
-atomic write, idempotent re-runs — and `composer check --fix` runs whichever
-migration applies automatically.
-
-A locally installed binary may instead run `composer agent enable --project-dir
-/path/to/project` (or `executor enable --project-dir ...`); Composer is the sole
-transformer.
-
-When `watch` runs inside the same Compose project it is updating, it excludes the resident services from child runs by default (`composer-updater` and `composer-agent`), so pull/config/up/health/post-start operate on the application services and do not recreate the container that is supervising the update. Override the excluded name(s) with `COMPOSER_WATCH_SELF_SERVICE`, disable the default with `COMPOSER_WATCH_SELF_SERVICE=""`, or set additional exclusions with `COMPOSER_EXCLUDE_SERVICES`.
-
-`watch` can also **detect a newer image** and publish availability for another process to act on: `--check-image IMAGE` (repeatable) + `--availability-file PATH` (and `--check-interval SECONDS`, default 900; DjangoLux 1.9.0+ overrides it with the interval chosen in Options, published to `state/check-policy.json`) poll the registry's tag digest vs the locally-pulled one and write `{ "available": …, "images": [ … ] }`. It only reports *readable* differences (an unreachable registry is "unknown", never a false positive), needs no registry access from the consumer, and re-checks right after an applied update. A private repository is read with the registry login (`COMPOSER_REGISTRY_USERNAME`, `COMPOSER_REGISTRY_PASSWORD`, see **Private registry login** under [the surface](#the-surface)) or a static `COMPOSER_REGISTRY_TOKEN`; an unknown entry carries the `reason` it could not be read.
-
-The published document also self-corrects after an update applied by **someone else** — `composer update` run from the project root, the executor in the hardened topology, a manual `docker compose pull`. Between scheduled checks the watched images' local digests are polled every 30s, and a moved digest re-publishes immediately, so an already-installed update stops being advertised within seconds instead of lingering until the next `--check-interval`. An unreadable local digest is "unknown" and never triggers a re-publish.
-
-For an available image, Composer also reads remote image labels once and publishes two independent, optional fields. `version` comes from `COMPOSER_VERSION_LABEL` (default `org.opencontainers.image.version`). `manifest` comes from `COMPOSER_RELEASE_MANIFEST_LABEL` (default `org.dlux.project.release-manifest`) when that label contains a schema-1 JSON object with any of `version`, `summary`, up to eight `highlights`, or an HTTPS `release_url`. Raw JSON remains supported, but CI/build pipelines should use `base64:<URL-safe-base64-JSON>` so quoting cannot corrupt the label while it crosses YAML, action inputs, and Docker build arguments. Missing or malformed metadata is omitted without affecting digest detection or deployment.
-
-With `--status-file` (or `--log-file PATH`), each update run also writes a clean, ANSI-free **console log** (`deploy-log.txt` beside the status file, fresh per run). Together with the deploy status, a proxy can render a live progress page + console while the app is being recreated and unreachable.
-
-| flag | result |
-| :--- | :--- |
-| `-d`, `--dev` | Development mode. Loads `compose.dev.yml` on top of the base compose file (two files) and forces `DEBUG=True` / `DEBUG_STATUS=True` into every service. |
-| `-u [service]` | Compact form of `update`: pull the latest image(s), then recreate immediately. Pass a service name to scope it. |
-| `-b`, `--build` | Rebuild images during startup. The image ships `docker-buildx-plugin` (1.5.4b1+), so builds run on BuildKit instead of the classic builder and its per-step containers. |
-| `--force` | Bypass the preflight version gate (allow updating onto an older image version). |
-| `--status-file PATH` | Write a JSON deploy-status file to `PATH` (overrides `COMPOSER_STATUS_FILE`). |
-| `--down` | Stop everything (see the `stop` subcommand). |
-| `-v`, `--volumes` | With `--down`: Remove volumes too. Confirmation required. |
-| `-p`, `--purge` | With `--down`: also remove built untagged images, volumes, networks, orphans, and dangling build cache. Confirmation required. |
-| `-y`, `--yes` | Answer the confirmation prompt in advance. |
-
-## confirmation guard
-
-Actions that destroy data — `-v`/`--volumes` and `-p`/`--purge` — stop and print
-exactly what will be removed, then wait for you to type `y` or `yes`. Anything
-else aborts before Docker is called.
-
-Pass `-y`/`--yes` (or set `COMPOSER_ASSUME_YES=1`) to confirm up front. The guard
-fails **closed**: when stdin is not a terminal (CI, cron, a piped script) and
-neither the flag nor the variable is set, the run is refused instead of silently
-proceeding. `composer check --fix` asks the same way before it applies a
-migration. The variable reaches a native `python -m composer` run only: the
-`start.sh`/`start.ps1` wrappers do not pass it into the deployer container, so a
-non-interactive run through them needs the flag (`./start.sh check --fix -y`).
-
-```bash
-./start.sh stop            # no prompt, nothing is destroyed
-./start.sh stop web        # only the web service
-./start.sh stop -v         # prompts: type y or yes
-./start.sh stop -p -y      # no prompt, purges immediately
-```
-
-## surviving the terminal
-
-Closing the terminal (or dropping an SSH session) no longer aborts a run. On the
-hangup composer keeps going in the background, finishes the deploy — recreate,
-health checks, post-start hooks — and moves its console output to
-`composer-detached.log` in the deployment root (`COMPOSER_DETACH_LOG` overrides
-the path; an already-configured `COMPOSER_LOG_FILE` is reused). Compose itself
-runs in its own session, so the hangup never reaches it either.
-
-**Ctrl+C is still the way out**: an explicit interrupt is relayed to the running
-Compose command and exits `130`. `run`, `migrate`, `log`, and `logs` stay bound to the
-terminal — they are the terminal — and end with it.
-
-```bash
-./start.sh update            # close the terminal: the update finishes anyway
-tail -f composer-detached.log
-```
-
-## wrapper versioning
-
-Composer owns `start.sh` and `start.ps1`. Every line in them is composer's own
-invocation contract — the self image, `-i`/`-t`, the `--env-file` secrets
-handoff, the `update self` route and the deployer refresh before `update` — and composer is the only component still
-running in a project after it is created: the DLUX scaffold writes the wrappers
-once and then refuses to overwrite them. DLUX's `scaffold_templates/project/`
-copies are mirrors of the files here, not the source.
-
-Both carry a marker on line 2:
-
-```bash
-# composer-wrapper: 2
-```
-
-It is a plain integer, bumped only when the wrapper bytes change — deliberately
-**not** composer's release version. Composer ships far more often than the
-wrapper does, and a marker that tracked it would report every project stale
-after every release until nobody read the warning.
-
-`composer check` compares the project's wrappers against the copies baked into
-`/app/wrappers/` in the image it is running, so verification needs no registry
-and works air-gapped. `wrappers-history.json` records the sha256 of every
-published version, which is what separates *old but pristine* from *edited
-locally*:
-
-| Reported | Meaning |
-| --- | --- |
-| `is at wrapper version N` | matches the image byte for byte |
-| `is wrapper version N, this composer ships M` | stale; `check --fix` updates it |
-| `predates wrapper versioning` | older than the marker itself; `check --fix` updates it |
-| `contents do not match what that version shipped` | local edits — diff before replacing |
-| `newer than the M this composer ships` | the **image** is behind; run `update self`, not `--fix` |
-
-`check --fix` archives the current file under `.xclude/composer-check/<stamp>/`
-and then swaps it via `os.replace`, so a `start.sh` that is executing the very
-check that replaces it keeps reading the file it was launched from.
-
-```bash
-./start.sh check          # report drift
-./start.sh check --fix    # update, archiving the old copy first
-```
-
-To publish a new wrapper version: edit both files, bump the marker in both, run
-the test suite (it prints the sha256 to record), add those to
-`wrappers-history.json`, and re-copy both into DLUX's
-`scaffold_templates/project/`.
-
-## deploy status
-
-Pass `--status-file PATH` (or set `COMPOSER_STATUS_FILE`) and composer writes an
-atomic JSON document as it works, so another process (a Django admin panel, a
-dashboard) can watch a deploy:
-
-```json
-{ "status": "migrating", "updated_at": "2026-07-04T08:31:38+00:00",
-  "composer_version": "1.3.1", "compose_files": ["compose.yml"],
-  "target_images": ["debeski/app:latest"], "target_version": "1.2.10",
-  "active_version": "1.2.9" }
-```
-
-States: `starting` → `pulling` → `recreating` → `migrating` → `ready`, or
-`failed` (with an `error`). `pull` reports `starting` → `pulling` → `pulled`.
-The restart flow reports `restarting`/`ready`/`failed`.
-Nothing is written unless configured.
-
-## version gate
-
-When deploying through `update` or `-u`, composer can refuse to recreate onto an image that
-is **older** than the version already deployed — the one thing a pull-and-restart
-can't safely undo when forward-only migrations have already run. It is opt-in and
-generic: set `COMPOSER_ACTIVE_VERSION_FILE` (a JSON file, e.g. a runtime
-`active.json`) and, if needed, `COMPOSER_ACTIVE_VERSION_KEY` (default `version`)
-and `COMPOSER_VERSION_LABEL` (the image label to compare, default
-`org.opencontainers.image.version`). With no active-version source configured the
-gate is disabled. `--force` overrides a block.
-
-Since Composer 1.3.13, an older image can also pass when the running DjangoLux
-deployment confirms it will keep its newer runtime-volume release. Composer runs
-`python manage.py dlux_image_gate --baked-dlux-version VERSION` in `web`, or the
-service selected by `COMPOSER_RUNTIME_GATE_SERVICE`. The command ships in Dlux
-1.8.12+ and checks the active release's `requires.baked_image` floor. Only a
-`keep` verdict permits this exception; an abort, unavailable service, missing
-command or invalid response still blocks. `--force` bypasses the check explicitly.
-
-## stack schema stamps
-
-DjangoLux stamps each generated stack file with the stack contract schema it was
-written for: `DLUX_STACK_SCHEMA: "N"` in compose.yml's `x-environment`,
-`LABEL org.dlux.stack-schema="N"` in the Dockerfile, and a `dlux stack schema N`
-header in `compose.dev.yml`, `entrypoint.sh`, `gunicorn.py`, the secrets file in
-use and `.proxy/*`. The `stack-schema` finding of `composer check` reads them
-(`composer/stack_schema.py` uses the same rule as DjangoLux's
-`dlux.contracts.stack.read_stamp`):
-
-| Files | Finding |
-| --- | --- |
-| none stamped | `ok`: the stack predates stamping |
-| compose.yml stamped, every other stamp agrees | `ok`, with the count of unstamped files |
-| stamps disagree, or other files stamped but compose.yml is not | `warn`, naming the files per schema |
-
-Composer compares the files with each other. Whether compose.yml's schema is the
-one the running DjangoLux expects is the app's `stack.schema` doctor check,
-which `check --deep` relays. `start.sh`/`start.ps1` are not stamped; they carry
-composer's own `composer-wrapper` marker.
-
-Each schema migration of `check --fix` (2 → 3 the maintenance page, 3 → 4 stored
-files, 4 → 5 `worker`) restamps every file stamped with the schema it leaves,
-including the secrets file `check` reads (the first of `.env`, `secrets/.env`,
-`.secrets/.env`). In the secrets file only the stamp changes: it is rewritten in
-place byte for byte, keeping its mode, owner and line endings; it is not copied
-to the `.xclude/composer-check/` backup; and the repair preview lists it without
-showing any of its lines. An unstamped secrets file is left as it is.
-
-## maintenance page
-
-The page the proxy shows while DjangoLux is in maintenance or `web` is down ships
-in this image (`composer/assets/maintenance/`: `index.html`, `maintenance.css`,
-`maintenance.js`, no inline script or style). `composer-agent` publishes it on
-every start to the runtime volume at `proxy/maintenance/`, which the proxy already
-mounts read-only, so an `agent update` refreshes it everywhere. The proxy serves
-the page from there on 502/503/504 and its assets under `/_dlux/maintenance/`,
-which bypasses `web` so they load during an outage (DjangoLux stack schema 3).
-
-A project that wants its own page keeps it in `.proxy/maintenance/` (an
-`index.html` plus any assets). `composer maintenance publish --override DIR`
-copies it over the published page and drops a `.custom` marker, which the agent
-respects. `composer maintenance publish` (inside `composer-agent`) republishes
-the bundled page.
-
-Stacks generated before schema 3 serve `.proxy/maintenance.html` from a bind
-mount. `check` reports that as a `maintenance-page` warning and `check --fix`
-(resident agent 1.7+) migrates it: it rewrites `.proxy/Caddyfile` /
-`.proxy/default.conf.template`, drops the mount from compose, validates the new
-proxy config in a throwaway container before changing anything, keeps a
-customised page as the `.proxy/maintenance/` override, archives the originals
-under `.xclude/composer-check/`, publishes through the agent and recreates the
-proxy. `composer/assets/maintenance.html.tmpl` is kept only to recognise a stock
-legacy page.
-
-## mechanics
-- **Secrets**: Plaintext env file (`.env` → `secrets/.env` → `.secrets/.env`); the first that satisfies the compose's required vars wins.
-- **Version**: Every service gets `COMPOSER_VERSION`.
-- **Runtime override**: The generated Compose override is a private system-temp file, not a project-root file, so Composer supports host-owned and read-only project mounts without extra Linux capabilities.
-- **Service exclusions**: `COMPOSER_EXCLUDE_SERVICES` is a comma/space-separated service list omitted from generated runtime overrides, bulk pulls, bulk `up -d`, health checks, and diagnostics. Explicit `update SERVICE`, `pull SERVICE`, and `-u SERVICE` still target the named service.
-- **UI**: Progress stays on one status line. Image pulls (`update self`, `update`/`-u`, and any `up` that has to fetch an image) draw an aggregated bar — `web ████████░░░░ 62% · 2/4 layers (2 cached) · 144MB/240MB` — built from the per-layer phases Docker reports. It names every image still in flight and drops each one as Compose reports it pulled, because Compose interleaves layers without saying which service they belong to; `(n cached)` counts the layers already on the host, so a full re-download is visible as `0 cached`. Progress only moves forward and reaches 100% when the pull actually reports it. Non-pull output keeps the plain status line, and a detached run logs coarse summaries instead of redrawing.
-- **Service circles**: ⚪ not seen · 🔵 updating · 🟡 starting · 🟢 healthy · 🔴 failed. A service stops showing 🟢 the moment its pull/recreate/restart starts — the health it last reported belongs to the container being replaced — and health monitoring resolves it back.
-- **Image**: Wrapper scripts target `debeski/composer:latest`, overridable with `COMPOSER_SELF_IMAGE`.
+- [Commands](docs/commands.md) · [Deploying](docs/deploying.md) · [Updates and channels](docs/updates.md) · [`composer check`](docs/check.md)
+- [Stack migrations](docs/stack-migrations.md) · [The generated proxy](docs/proxy.md) · [App data permissions](docs/app-permissions.md) · [Private registry login](docs/private-registry.md) · [SMTP relay settings](docs/smtp-relay-settings.md) · [Maintenance page](docs/maintenance-page.md)
+- [The resident pair](docs/resident-pair.md) · [Executor hardening](docs/executor-hardening.md) · [Agent Protocol v1](docs/agent-protocol-v1.md) · [The egress relay](docs/relay.md)
+- [Releasing](docs/RELEASING.md) · [CHANGELOG](CHANGELOG.md)
 
 ## why
-Installing Python and a compose toolchain on every host is friction, and letting an application container hold the Docker socket to update itself is a risk. Composer keeps the toolchain inside its own image, leaves the project root alone, and splits the resident work across a network-facing agent and a privileged executor, so the application can ask for an update or a repair without ever being able to perform one.
 
-Operations deployment checks run in the executor's identity. Terminal `check`
-also verifies that executor can open the configured secrets file, so a readable
-host-side file cannot conceal a resident-only permission failure. See
-[secrets access recovery](docs/first-deploy.md#secrets-access-differs-between-processes)
-for mapped-UID diagnostics and terminal-side sudo instructions.
+Installing Python and a compose toolchain on every host is friction, and letting an application container hold the Docker socket to update itself is a risk. Composer keeps the toolchain inside its own image, leaves the project root alone, and splits the resident work across a network-facing agent and a privileged executor, so the application can ask for an update or a repair without ever being able to perform one.

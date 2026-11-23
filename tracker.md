@@ -38,7 +38,7 @@
 ### Current Project's Unsolved Known Bugs:
 - A stable `vX.Y.0` tag fails its own unit tests unless the job checks out tags (fixed in 1.4.1 with `fetch-depth: 0`). `v1.4.0` was burned needlessly: nothing had been published, and the owner's admin bypass can delete a tag (`git push origin :refs/tags/vX.Y.Z`), so it should have been re-cut as 1.4.0. Do that next time a release fails before publication; only a published version is unrecoverable.
 - A compromised networked agent can abuse the POST-enabled Docker proxy with host-root-equivalent impact.
-- Shared-volume temp paths permit symlink clobbering; spool, output, event, and command queues need effective bounds.
+- Shared-volume temp paths permit symlink clobbering; spool, output, event, and command queues need effective bounds. The executor socket's peer-uid check is off unless `COMPOSER_EXECUTOR_PEER_UID` is set, which the generated block never does.
 - Version gating fails open on missing labels; mutable refs and Windows `shell=True` reconstruction widen risk.
 
 ### Incomplete Tasks:
@@ -75,11 +75,8 @@
 - 2026-11-23: `1.10/deps_refresh` in a scratch venv (Python 3.14, CI's set): suite 1128 OK (16 skips). amd64 image (`--no-cache`): `smoke-test.sh` PASS (no pip); Trivy 0.76.2 gate rc=1 on 2 HIGH, both in Docker's plugins (buildx 0.39.1 moby/go-archive, compose 5.8.0 x/net), plus 4 MEDIUM there; Debian and Python clean (1.10.2: 8 HIGH). Evidence `deps_refresh/.xclude/validation/1.10.3-deps-refresh-2026-11-23/`.
 - Host Python cannot run the suite (no cryptography/packaging/yaml): use a venv with CI's set (`PyYAML==6.0.3 "packaging>=23.2" "cryptography>=42"`), or run it in the built image with `pip install PyYAML==6.0.3` and `~/Desktop/depy` mounted at `/depy`, so the sibling `pkg-django-lux` comparisons run.
 ### One-line info about last time edited Docs:
-- 2026-11-18: `1.10/fetch_metadata`: README check sentence + "Cross-site requests (Fetch Metadata)" section (markers table, fix); CHANGELOG `## Unreleased` (1 entry).
-- 2026-11-23 `1.10/non_root_app`: README App data permissions (state files read-only, pre-up pull, recreates, writers); earlier command map, check summary, `docs/executor-hardening.md` §5, CLI usage; CHANGELOG Unreleased.
-- 2026-11-19: `1.10/private_registry`: README **Private registry login** (findings table), `agent check` and `watch` paragraphs; CHANGELOG `## Unreleased` (1 entry).
+- 2026-11-23: `1.10/docs_reorg`: README cut to a front page; topics moved to `docs/` (index `docs/README.md`, `check.md` one entry per finding); `executor-hardening.md` rewritten present-tense; doc claims fixed to match code; CHANGELOG `## Unreleased` (1 entry). Pre-rewrite copies in that checkout's `.xclude/`.
 - 2026-11-19: `1.10/non_root_app` in a scratch venv (Python 3.14, CI's set): suite 1160 OK (16 skips), compileall OK, `scripts/smoke-test.sh composer:test-non-root` passed; live migration run on `testbeds/nonroot-migration` PASS.
-- 2026-11-19 `1.10/non_root_app`: README App data permissions + command map + check summary, `docs/executor-hardening.md` §5 group-writable runtime files, CLI usage, CHANGELOG Unreleased.
 - 2026-11-23: `1.10/deps_refresh`: CHANGELOG `## Unreleased` (1 entry); no doc owns the image's packages.
 
 ## Part 2: Global
@@ -92,9 +89,10 @@
 
 ### Agent Handoff Rules:
 - 1.10.3b1: release branch `1.10/release_1_10_3` (`~/Desktop/depy/app-composer/release_1_10_3`), merges done; push, PR and tag only on the owner's OK.
+- `1.10/docs_reorg` (`~/Desktop/depy/app-composer/docs_reorg`) is local: push/PR only on the owner's OK. New docs go in the topic doc that owns the subject (`docs/README.md` lists them), never back into README.
 - Re-run syntax/tests after edits; latest generated caches moved to `.xclude/test-cache-20260905-nested-commands/`.
 - `1.10/update_guards` (`~/Desktop/depy/app-composer/update_guards`, 3 commits on 757384f) is local only: no push, PR, tag or version change until the owner's testbed acceptance passes. Its `tracker.md` will conflict with `1.10/record_1_10_0b3`; merge that first, then rebase this one.
 
 ### References and Links:
 - Docker Compose CLI reference: https://docs.docker.com/engine/reference/commandline/
-- Executor hardening design: `docs/executor-hardening.md`. Fleet-mgmt plan (dlux repo): `panelPLAN.md` §2.3.
+- Docs index: `docs/README.md`; security model: `docs/executor-hardening.md`. Fleet-mgmt plan (dlux repo): `panelPLAN.md` §2.3.
