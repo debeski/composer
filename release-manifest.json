@@ -1,14 +1,15 @@
 {
   "schema_version": 1,
   "version": "1.10.3b1",
-  "summary": "For DjangoLux 1.16.3: Composer reads and pulls a WEB_IMAGE from a private registry with a read-only login (COMPOSER_REGISTRY_USERNAME / COMPOSER_REGISTRY_PASSWORD in .secrets/.env, scoped to that registry), and `check` reports whether that login works (`registry-login`). `check` also warns when the proxy lacks DjangoLux's cross-site request policy (`fetch-metadata`), and whether a non-root DjangoLux image (uid 10001, group 0) can use the data its services mount (`app-permissions`); `check --fix` grants group access without changing owners, and every `up` grants or refuses before starting a non-root image.",
+  "summary": "For DjangoLux 1.16.3: Composer reads and pulls a WEB_IMAGE from a private registry with a read-only login (COMPOSER_REGISTRY_USERNAME / COMPOSER_REGISTRY_PASSWORD in .secrets/.env, scoped to that registry), and `check` reports whether that login works (`registry-login`). `check` also warns when the proxy lacks DjangoLux's cross-site request policy (`fetch-metadata`), and whether a non-root DjangoLux image (uid 10001, group 0) can use the data its services mount (`app-permissions`); `check --fix` grants group access without changing owners, and every `up` grants or refuses before starting a non-root image. The image ships without pip and with the current Debian fixes.",
   "highlights": [
     "Private registry: a read-only login in .secrets/.env lets the update check and pulls reach a private WEB_IMAGE; it is never sent to another registry.",
     "`check` reports `registry-login`: OK, login needed, login refused, untrusted certificate or unreachable.",
     "`check --fix` passes the registry login keys to composer-agent and composer-executor on older stacks.",
     "`check` warns when .proxy/Caddyfile or default.conf.template lacks DjangoLux's cross-site request policy (`fetch-metadata`).",
     "`app-permissions`: `check` says whether a non-root image (uid 10001, group 0) can use its data; `--fix` adds group bits only.",
-    "Before every `up` of a non-root image, Composer grants what is missing or refuses to start it."
+    "Before every `up` of a non-root image, Composer grants what is missing or refuses to start it.",
+    "The Composer image no longer ships pip and takes the current Debian security fixes."
   ],
   "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.3b1"
 }
