@@ -7,6 +7,15 @@ from composer import ops, executor_ops, executor_protocol as protocol
 from composer.launcher import DockerComposeLauncher
 
 
+def _reader(frame):
+    position={'at':0}
+    def recv_exactly(n):
+        chunk=frame[position['at']:position['at']+n]
+        position['at']+=n
+        return chunk
+    return recv_exactly
+
+
 class DeploymentCheckTests(unittest.TestCase):
     def request(self, payload):
         return protocol.validate_executor_request({'protocol_version':1, 'operation_id':str(uuid.uuid4()),
@@ -42,6 +51,48 @@ class DeploymentCheckTests(unittest.TestCase):
         self.assertEqual(result['report'],report)
         self.assertFalse(check.call_args.args[0].args.dev)
         self.assertLess(len(protocol.encode_frame(result)),protocol.MAX_EXECUTOR_MESSAGE_BYTES)
+
+    def test_a_report_too_big_for_one_frame_has_its_longest_diffs_shortened_to_fit(self):
+        """Each repair diff may be 20,000 characters: a stack needing several repairs overflows."""
+        def diff(tag, lines):
+            return ''.join(f'+  {tag}: "line {n}"\n' for n in range(lines))
+        report={'exit_code':1,'findings':[{'level':'warn','name':'topology','message':'repairs pending'}],
+                'repairs':[{'name':'agent-enable','files':['compose.yml'],'diff':diff('a',ops.MAX_DIFF_CHARS//20),'note':''},
+                           {'name':'executor-enable','files':['compose.yml'],'diff':diff('b',ops.MAX_DIFF_CHARS//20),'note':'kept a custom block'},
+                           {'name':'dlux-runtime','files':['compose.yml'],'diff':diff('c',ops.MAX_DIFF_CHARS//20),'note':''},
+                           {'name':'maintenance-page','files':['Caddyfile'],'diff':diff('d',ops.MAX_DIFF_CHARS//20),'note':''},
+                           {'name':'restart-labels','files':['compose.yml'],'diff':'+  org.dlux.restart: "safe"\n','note':''}],
+                'compose_digest':'f'*64}
+        before={r['name']:r['diff'] for r in report['repairs']}
+        self.assertGreater(protocol.encoded_size({'report':report}),protocol.MAX_EXECUTOR_MESSAGE_BYTES)
+
+        with patch('composer.ops._run_check_local',return_value=report):
+            result=executor_ops.default_operation_handler(self.request({'dev':False}))
+
+        self.assertEqual(result['state'],'succeeded')
+        self.assertLessEqual(protocol.encoded_size(result),protocol.MAX_EXECUTOR_MESSAGE_BYTES)
+        sent=protocol.read_frame(_reader(protocol.encode_result_frame(result)))
+        repairs={r['name']:r for r in sent['report']['repairs']}
+        shortened=[name for name,r in repairs.items() if r['diff']!=before[name]]
+        self.assertTrue(shortened)
+        for name,repair in repairs.items():
+            with self.subTest(repair=name):
+                self.assertTrue(before[name].startswith(repair['diff']))
+                self.assertTrue(repair['diff']=='' or repair['diff'].endswith('\n'))
+                self.assertEqual(executor_ops.SHORTENED_DIFF_NOTE in repair['note'],name in shortened)
+        self.assertTrue(repairs['executor-enable']['note'].startswith('kept a custom block'))
+        self.assertEqual(repairs['restart-labels']['diff'],before['restart-labels'])
+        self.assertEqual(sent['report']['compose_digest'],'f'*64)
+        self.assertEqual(sent['report']['findings'],report['findings'])
+
+    def test_a_failed_executor_check_is_reported_without_update_advice(self):
+        detail='Executor result is 70000 bytes, over the 64 KiB limit, so it was not sent.'
+        with patch('composer.executor_client.executor_configured',return_value=True), \
+             patch('composer.executor_client.send_request',return_value={'state':'failed','detail':detail}):
+            with self.assertRaises(ValueError) as raised:
+                ops._run_check(SimpleNamespace(args=SimpleNamespace(dev=False)))
+        self.assertIn(detail,str(raised.exception))
+        self.assertNotIn('Update both',str(raised.exception))
 
     def test_inaccessible_secret_parent_is_not_reported_as_a_missing_file(self):
         def stat(path,*args,**kwargs):

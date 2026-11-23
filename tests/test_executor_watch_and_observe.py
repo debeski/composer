@@ -59,6 +59,16 @@ class ExecutorWatchBuildTests(unittest.TestCase):
             self.assertIsNotNone(watch)
             self.assertFalse(watch.availability_enabled)  # reads stay with the agent
 
+    def test_executor_run_takes_no_package_trigger_flag(self):
+        """The agent owns the package trigger; the executor loop never read it."""
+        from composer.cli import parse_executor_args, parse_watch_args
+
+        self.assertFalse(hasattr(parse_executor_args([]), "package_trigger_file"))
+        with patch("sys.stderr"), self.assertRaises(SystemExit):
+            parse_executor_args(["--package-trigger-file", "/tmp/package-update-request.json"])
+        agent = parse_watch_args(["--trigger-file", "t.json", "--package-trigger-file", "p.json"])
+        self.assertEqual(agent.package_trigger_file, "p.json")
+
 
 class ExecutorWatchLoopTests(unittest.TestCase):
     def test_loop_processes_a_trigger_under_the_lease_and_writes_ack(self):

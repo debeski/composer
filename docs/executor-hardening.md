@@ -177,8 +177,10 @@ backup rules are the same as for an operator's `dlux update`
   Setting `COMPOSER_EXECUTOR_PEER_UID` adds an `SO_PEERCRED` check of the connecting
   uid where the platform reports it.
 - **Framing:** a 4-byte big-endian length prefix and a JSON body, requests and results
-  each capped at 64 KiB. One request per connection; the executor closes after the
-  result. At most four connections are handled at once.
+  each capped at 64 KiB. A result that would exceed the cap is replaced by a `failed`
+  result for the same operation that gives its size, so the agent always gets an
+  answer. One request per connection; the executor closes after the result. At most
+  four connections are handled at once.
 - **Versioning:** every request carries `protocol_version`; the executor rejects an
   unknown or mismatched version with a typed error instead of guessing. A transient
   agent/executor skew (mid-update, say) therefore fails safe: the agent reports the

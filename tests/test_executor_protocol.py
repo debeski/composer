@@ -125,6 +125,33 @@ class ExecutorFramingTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             proto.read_frame(self._reader_for(frame))
 
+    def test_a_result_that_fits_is_sent_as_it_is(self):
+        result = proto.build_result("op-1", "succeeded", detail="ok")
+        self.assertEqual(proto.encode_result_frame(result), proto.encode_frame(result))
+
+    def test_an_oversize_result_becomes_a_failed_result_naming_its_size(self):
+        result = proto.build_result("op-1", "succeeded")
+        result["report"] = {"blob": "x" * proto.MAX_EXECUTOR_MESSAGE_BYTES}
+        size = proto.encoded_size(result)
+
+        got = proto.read_frame(self._reader_for(proto.encode_result_frame(result)))
+
+        self.assertEqual(got["state"], "failed")
+        self.assertEqual(got["operation_id"], "op-1")
+        self.assertEqual(got["exit_code"], 1)
+        self.assertIn(f"{size} bytes", got["detail"])
+        self.assertIn("64 KiB", got["detail"])
+        self.assertNotIn("report", got)
+
+    def test_a_result_that_is_not_json_becomes_a_failed_result(self):
+        result = proto.build_result("op-1", "succeeded")
+        result["report"] = {"when": object()}
+
+        got = proto.read_frame(self._reader_for(proto.encode_result_frame(result)))
+
+        self.assertEqual((got["state"], got["operation_id"]), ("failed", "op-1"))
+        self.assertIn("JSON", got["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

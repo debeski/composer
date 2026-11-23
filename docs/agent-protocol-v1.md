@@ -77,9 +77,12 @@ executor's `deployment_check`. Its only inputs are `dev` (a strict boolean) and 
 optional project-local Compose filename; commands, arbitrary paths and symlinks
 escaping the project are rejected. It performs check/repair-preview inspection
 without applying repairs, and returns already-redacted findings and diffs in a
-bounded executor frame. A check that finds failures is a successfully completed
-inspection, with failures retained in the report. A missing/older executor returns
-an actionable failure, never a clean result. Update both resident services together.
+bounded executor frame. When the report would not fit the frame, the longest repair
+diffs are shortened at a line end until it does, and each shortened repair's note says
+that applying makes the whole change, not only the part shown. A check that finds
+failures is a successfully completed inspection, with failures retained in the
+report. A missing/older executor returns an actionable failure, never a clean
+result. Update both resident services together.
 
 The agent forwards this report to DjangoLux. It does not read deployment secrets or
 gain Docker-exec authority. Post-repair verification follows the same route.
