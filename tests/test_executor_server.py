@@ -75,6 +75,21 @@ class ExecutorServerTests(unittest.TestCase):
         self.assertEqual(seen["op"], "restart")
         self.assertEqual(seen["payload"], {"service": "web"})
 
+    def test_an_oversize_result_reaches_the_client_as_a_failed_result(self):
+        """A result too big for a frame used to be dropped, and the client saw a closed socket."""
+        request = _valid_restart()
+
+        def handler(request):
+            result = proto.build_result(request["operation_id"], "succeeded")
+            result["report"] = {"blob": "x" * proto.MAX_EXECUTOR_MESSAGE_BYTES}
+            return result
+
+        self._serve(handler)
+        result = _client_request(self.socket_path, request)
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["operation_id"], request["operation_id"])
+        self.assertIn("64 KiB", result["detail"])
+
     def test_unknown_op_rejected_without_invoking_handler(self):
         calls = {"n": 0}
 

@@ -271,6 +271,43 @@ def _run_agent_update(operation_id: str, payload: Dict) -> Tuple[int, str]:
     return 0, ""
 
 
+SHORTENED_DIFF_NOTE = (
+    "Diff shortened to fit the executor's reply: "
+    "applying makes the whole change, not only the part shown."
+)
+
+
+def _fit_check_result(operation_id: str, report: Dict) -> Dict:
+    """The ``deployment_check`` result, its repair diffs shortened until it fits a frame.
+
+    Diffs are the part of the report that grows with the stack (each up to
+    ``ops.MAX_DIFF_CHARS``), and a result over the frame limit cannot be sent at
+    all. The longest diff gives way first, cut at a line end, and its repair's
+    note says so. A report that still does not fit is answered by
+    ``encode_result_frame`` with its size.
+    """
+    result = proto.build_result(operation_id, "succeeded")
+    result["report"] = report
+    repairs = [
+        repair for repair in report.get("repairs") or []
+        if isinstance(repair, dict) and isinstance(repair.get("diff"), str) and repair["diff"]
+    ]
+    while repairs:
+        excess = proto.encoded_size(result) - proto.MAX_EXECUTOR_MESSAGE_BYTES
+        if excess <= 0:
+            break
+        repair = max(repairs, key=lambda item: len(item["diff"]))
+        note = str(repair.get("note") or "")
+        if SHORTENED_DIFF_NOTE not in note:
+            repair["note"] = f"{note}; {SHORTENED_DIFF_NOTE}" if note else SHORTENED_DIFF_NOTE
+            continue
+        kept = repair["diff"][: max(0, len(repair["diff"]) - excess)]
+        repair["diff"] = kept[: kept.rfind("\n") + 1]
+        if not repair["diff"]:
+            repairs.remove(repair)
+    return result
+
+
 def default_operation_handler(request: Dict) -> Dict:
     """Map a validated executor request to a redacted typed result."""
     operation_id = request["operation_id"]
@@ -285,10 +322,7 @@ def default_operation_handler(request: Dict) -> Dict:
         if filename and Path(filename).resolve().parent != Path.cwd().resolve():
             return proto.build_result(operation_id, 'rejected', exit_code=2, detail='Compose file must stay within the project directory.')
         runtime = SimpleNamespace(args=SimpleNamespace(file=filename, dev=payload['dev']))
-        report = _run_check_local(runtime)
-        result = proto.build_result(operation_id, 'succeeded')
-        result['report'] = report
-        return result
+        return _fit_check_result(operation_id, _run_check_local(runtime))
     if op in ("start", "stop"):
         exit_code, detail = _run_service_lifecycle(operation_id, payload["service"], op)
     elif op == "restart":

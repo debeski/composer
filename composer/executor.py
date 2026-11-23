@@ -205,10 +205,11 @@ class Executor:
         return uid == self.expected_peer_uid
 
     def _send(self, conn: socket.socket, obj: Dict) -> None:
+        frame = proto.encode_result_frame(obj)
         try:
-            conn.sendall(proto.encode_frame(obj))
-        except (OSError, proto.ProtocolError):
-            pass
+            conn.sendall(frame)
+        except OSError:
+            pass  # the agent hung up; there is no one left to tell
 
 
 def _expected_peer_uid_from_env() -> Optional[int]:
@@ -256,7 +257,6 @@ def _build_watch_runtime(args):
 
     watch_args = SimpleNamespace(
         trigger_file=trigger,
-        package_trigger_file=getattr(args, "package_trigger_file", None),
         status_file=getattr(args, "status_file", None),
         log_file=getattr(args, "log_file", None),
         interval=getattr(args, "interval", 2) or 2,

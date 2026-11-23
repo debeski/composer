@@ -69,14 +69,14 @@
   - [x] v1.3.9: `check --fix` normalizes retired local DLUX tools wiring, restart labels, one-pass legacy hardening, native post_start stripping, and `-d` dev overrides.
   - [x] v1.3.8 released: schema-2 DjangoLux manifests enforce inline install safety, migration rollback compatibility, supported service requirements, and the Composer version floor.
 ### One-line info about last verified Tests:
-- 2026-11-18: `1.10/fetch_metadata` with `pkg-django-lux/main/.venv` (Python 3.13, PyYAML 6.0.3, CI's set) and `DLUX_CHECKOUT=../pkg-django-lux/fetch_metadata`: suite 1143 OK (14 skips); `test_fetch_metadata` 15 OK incl. the scaffold passing and failing without its block.
+- 2026-11-23: `1.10/code_followups` with `pkg-django-lux/main/.venv`: suite 1,232 OK (9 skips); log `code_followups/.xclude/validation/suite-2026-11-23.log`. Unit tests only, no image or live run.
 - 2026-11-23: `1.10/non_root_app` review fixes in the scratch venv (CI's set): suite 1173 OK (17 skips; the DjangoLux contract mirror passes against `pkg-django-lux/non_root_app`), compileall OK; unit tests only. 2026-11-19 smoke test + live run PASS.
 - 2026-11-23: `1.10/release_1_10_3` `99e1ee1`: suite 1,206 OK (18 skips), compileall; image smoke incl. no pip; contract mirror checked by hand against DjangoLux `1.16/release_1_16_3`.
 - 2026-11-23: `1.10/deps_refresh` in a scratch venv (Python 3.14, CI's set): suite 1128 OK (16 skips). amd64 image (`--no-cache`): `smoke-test.sh` PASS (no pip); Trivy 0.76.2 gate rc=1 on 2 HIGH, both in Docker's plugins (buildx 0.39.1 moby/go-archive, compose 5.8.0 x/net), plus 4 MEDIUM there; Debian and Python clean (1.10.2: 8 HIGH). Evidence `deps_refresh/.xclude/validation/1.10.3-deps-refresh-2026-11-23/`.
 - Host Python cannot run the suite (no cryptography/packaging/yaml): use a venv with CI's set (`PyYAML==6.0.3 "packaging>=23.2" "cryptography>=42"`), or run it in the built image with `pip install PyYAML==6.0.3` and `~/Desktop/depy` mounted at `/depy`, so the sibling `pkg-django-lux` comparisons run.
 ### One-line info about last time edited Docs:
 - 2026-11-23: `1.10/docs_reorg`: README cut to a front page; topics moved to `docs/` (index `docs/README.md`, `check.md` one entry per finding); `executor-hardening.md` rewritten present-tense; doc claims fixed to match code; CHANGELOG `## Unreleased` (1 entry). Pre-rewrite copies in that checkout's `.xclude/`.
-- 2026-11-19: `1.10/non_root_app` in a scratch venv (Python 3.14, CI's set): suite 1160 OK (16 skips), compileall OK, `scripts/smoke-test.sh composer:test-non-root` passed; live migration run on `testbeds/nonroot-migration` PASS.
+- 2026-11-23: `1.10/code_followups`: `executor-hardening.md` Framing (oversize result → `failed`), `agent-protocol-v1.md` deployment checks (shortened diffs); CHANGELOG `## Unreleased` (3 entries).
 - 2026-11-23: `1.10/deps_refresh`: CHANGELOG `## Unreleased` (1 entry); no doc owns the image's packages.
 
 ## Part 2: Global

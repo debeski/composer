@@ -185,12 +185,41 @@ def build_result(operation_id: str, state: str, *, exit_code: int = 0, detail: s
     }
 
 
+def _frame_body(obj: Dict[str, Any]) -> bytes:
+    return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+
+def encoded_size(obj: Dict[str, Any]) -> int:
+    """Bytes ``obj`` takes as a frame body, the size the 64 KiB limit applies to."""
+    return len(_frame_body(obj))
+
+
 def encode_frame(obj: Dict[str, Any]) -> bytes:
     """Encode one length-prefixed JSON frame (4-byte big-endian length + body)."""
-    body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+    body = _frame_body(obj)
     if len(body) > MAX_EXECUTOR_MESSAGE_BYTES:
         raise ProtocolError("Executor message exceeds the 64 KiB limit.")
     return len(body).to_bytes(_LENGTH_PREFIX_BYTES, "big") + body
+
+
+def encode_result_frame(result: Dict[str, Any]) -> bytes:
+    """Encode an executor result, or a ``failed`` result saying why it cannot travel.
+
+    A result that is over the frame limit, or is not JSON, cannot be sent. Dropping
+    it would leave the agent with nothing but a closed connection to report, so the
+    agent gets a typed failure for the same operation instead.
+    """
+    try:
+        return encode_frame(result)
+    except ProtocolError:
+        detail = (
+            f"Executor result is {encoded_size(result)} bytes, over the "
+            f"{MAX_EXECUTOR_MESSAGE_BYTES // 1024} KiB limit, so it was not sent."
+        )
+    except (TypeError, ValueError):
+        detail = "Executor result could not be encoded as JSON, so it was not sent."
+    operation_id = result.get("operation_id", "") if isinstance(result, dict) else ""
+    return encode_frame(build_result(str(operation_id or ""), "failed", exit_code=1, detail=detail))
 
 
 def read_frame(recv_exactly: Callable[[int], bytes]) -> Dict[str, Any]:

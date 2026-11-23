@@ -79,10 +79,15 @@ def _run_check(runtime) -> dict:
         result = executor_client.send_request('deployment_check', {
             'dev': bool(getattr(runtime.args, 'dev', False)), 'file': getattr(runtime.args, 'file', None) or '',
         })
-        if result.get('state') != 'succeeded' or not isinstance(result.get('report'), dict):
-            raise ValueError('Deployment check could not run in the executor. Update both Composer resident services and retry. '
-                             + str(result.get('detail') or ''))
-        return result['report']
+        if result.get('state') == 'succeeded' and isinstance(result.get('report'), dict):
+            return result['report']
+        detail = str(result.get('detail') or '')
+        if result.get('state') == 'failed' and detail:
+            # The executor ran the check and says why it has no report: an
+            # update would not change that, so do not advise one.
+            raise ValueError('Deployment check failed in the executor: ' + detail)
+        raise ValueError('Deployment check could not run in the executor. Update both Composer resident services and retry. '
+                         + detail)
     return _run_check_local(runtime)
 
 

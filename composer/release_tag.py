@@ -156,7 +156,7 @@ def published_image_tags(tags, *, runner=subprocess.run) -> list:
 
 
 def validate_beta_first(version, *, tags=None, fetch_published=published_image_tags) -> list:
-    """Refuse a new minor or major stable release that no published beta preceded.
+    """Refuse any stable release, patches included, that no published beta preceded.
 
     Enforces release_channels_plan.md §1 — 1.4.0 must not first appear as stable
     — in CI rather than in someone's memory. Two conditions, both required: a

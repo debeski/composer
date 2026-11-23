@@ -12,9 +12,11 @@ the container being swapped.
 Compose change is required.
 
 **This is a cross-repo contract.** The layout, the ``active.json`` schema and the
-generation semantics are mirrored from ``dlux/updater/runtime.py``. Do not
-"improve" them here — a change has to land on both sides, gated by
-``schema_version`` (see docs/updater-consolidation.md).
+generation semantics are DjangoLux's runtime contract (``dlux/contracts/runtime.json``,
+printed by ``manage.py dlux_runtime_contract``; the reader is
+``dlux/updater/runtime.py``), and ``tests/test_dlux_runtime.py`` checks this module
+against it. Do not "improve" them here — a change has to land on both sides, gated
+by the contract's ``schema_version`` (``CONTRACT_SCHEMA_VERSION``).
 """
 
 from __future__ import annotations

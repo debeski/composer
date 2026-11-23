@@ -42,7 +42,8 @@ def parse_args():
             "      pulling or deploying. Defaults to COMPOSER_CHECK_IMAGE,\n"
             "      WEB_IMAGE, or the compose file's agent-watched images.\n"
             "  agent update | agent restart | agent off\n"
-            "      Update, restart, or stop this stack's composer-agent service.\n"
+            "      Update, restart, or stop this stack's resident pair: composer-agent,\n"
+            "      plus composer-executor when the stack defines it.\n"
             "  log [-n N|all] [--follow] [-f FILE] [-d] [service...]\n"
             "      Read Compose logs for the whole stack or named services\n"
             "      (default: last 50 lines). Run 'composer log --help'.\n"
@@ -384,7 +385,8 @@ def parse_agent_update_args(argv):
     return _parse_agent_service_args(
         argv,
         "composer agent update",
-        "Pull and recreate only this stack's composer-agent service.",
+        "Pull and recreate only this stack's resident pair (composer-agent, plus "
+        "composer-executor when defined).",
         status_file=True,
     )
 
@@ -393,7 +395,8 @@ def parse_agent_restart_args(argv):
     return _parse_agent_service_args(
         argv,
         "composer agent restart",
-        "Restart and health-check only this stack's composer-agent service.",
+        "Restart and health-check only this stack's resident pair (composer-agent, "
+        "plus composer-executor when defined).",
         status_file=True,
     )
 
@@ -402,7 +405,8 @@ def parse_agent_off_args(argv):
     return _parse_agent_service_args(
         argv,
         "composer agent off",
-        "Stop this stack's composer-agent service without changing the application.",
+        "Stop this stack's resident pair (composer-agent, plus composer-executor when "
+        "defined) without changing the application.",
     )
 
 
@@ -811,12 +815,4 @@ def parse_executor_args(argv):
     parser.add_argument("--interval", type=float, default=2.0, help="Watch poll interval seconds")
     parser.add_argument("-f", "--file", help="Alternate compose file")
     parser.add_argument("-d", "--dev", action="store_true", help="Target the dev compose files")
-    parser.add_argument(
-        "--package-trigger-file",
-        default=None,
-        help=(
-            "Local DLUX inline package-update trigger "
-            "(default: 'package-update-request.json' beside the image trigger)"
-        ),
-    )
     return parser.parse_args(argv)
