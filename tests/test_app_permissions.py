@@ -98,12 +98,22 @@ class RuleTests(unittest.TestCase):
         file = _st(0, 0, 0o644, stat.S_IFREG)
         self.assertIsNone(ap.planned(file, 10001, 0, ap.needs(file, "data", False)))
 
-    def test_log_files_and_runtime_state_need_group_write(self):
+    def test_log_files_need_group_write(self):
         log = _st(0, 0, 0o644, stat.S_IFREG)
         self.assertEqual(ap.planned(log, 10001, 0, ap.needs(log, "logs", False)), (None, 0o664))
+
+    def test_runtime_state_files_need_only_group_read(self):
+        # DjangoLux replaces them by renaming a new file over the old one, which
+        # takes write on the directory, never on the file.
+        state = ("state", "image-available.json")
+        published = _st(0, 0, 0o644, stat.S_IFREG)
+        self.assertIsNone(ap.planned(published, 10001, 0, ap.needs(published, "runtime", False, state)))
         private = _st(0, 0, 0o600, stat.S_IFREG)
-        state = ("state", "deploy-status.json")
-        self.assertEqual(ap.planned(private, 10001, 0, ap.needs(private, "runtime", False, state)), (None, 0o660))
+        self.assertEqual(ap.planned(private, 10001, 0, ap.needs(private, "runtime", False, state)), (None, 0o640))
+        directory = _st(0, 0, 0o755)
+        for parts in (("state",), ("state", "relay"), ()):
+            self.assertEqual(ap.planned(directory, 10001, 0, ap.needs(directory, "runtime", False, parts)),
+                             (None, 0o775))
 
     def test_installed_releases_are_only_read(self):
         package_dir = _st(0, 0, 0o755)
@@ -288,20 +298,37 @@ class SiblingCommandTests(unittest.TestCase):
 
 
 class FakeLauncher:
-    def __init__(self, project, sibling_targets, user="10001:0"):
+    def __init__(self, project, sibling_targets, user="10001:0", local=True, pulled_user=None, pull_ok=True):
         self.project = project
         self.config = _config(project)
         self.sibling_targets = sibling_targets
         self.user = user
+        self.local = local
+        self.pulled_user = user if pulled_user is None else pulled_user
+        self.pull_ok = pull_ok
+        self.build_images = False
         self.commands = []
+        self.compose = []
         self.last_runtime_diagnostic = ""
 
     def compose_config_json(self):
         return self.config
 
+    def run_docker_compose(self, args, timeout=None):
+        self.compose.append(list(args))
+        if args[0] == "pull" and self.pull_ok:
+            self.local, self.user = True, self.pulled_user
+            return True, "", ""
+        if args[0] == "build":
+            self.local = True
+            return True, "", ""
+        return False, "", "pull access denied for debeski/archive"
+
     def run_command(self, argv, timeout=None, env=None):
         self.commands.append(argv)
         if argv[:3] == ["docker", "image", "inspect"]:
+            if not self.local:
+                return False, "", "No such image"
             return True, self.user + "\n", ""
         if argv[:3] == ["docker", "volume", "inspect"]:
             return True, "[]", ""
@@ -365,16 +392,109 @@ class RunTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("nothing was recreated", note)
 
-    def test_root_and_unknown_images_need_nothing(self):
+    def test_a_root_image_needs_nothing(self):
         launcher = FakeLauncher(self.project, lambda action: [], user="")
         self.assertEqual(ap.ensure_for_image(launcher, "img"), (True, ""))
         self.assertFalse(any(c[:2] == ["docker", "run"] for c in launcher.commands))
+        self.assertEqual(launcher.compose, [])
+
+    def test_an_image_not_on_the_host_is_pulled_and_then_granted_for(self):
+        # `up` would pull it and recreate web and worker straight onto data the
+        # new uid cannot use; the pull happens here first so the grant can run.
+        def answer(action):
+            if action == "scan":
+                return [{"label": "./media", "wrong": 2}]
+            return [{"label": "./media", "wrong": 2, "changed": 2}]
+
+        launcher = FakeLauncher(self.project, answer, user="", local=False, pulled_user="10001:0")
+        with patch("os.getcwd", return_value=self.project):
+            ready, note = ap.ensure_for_image(launcher, "debeski/archive:latest")
+
+        self.assertTrue(ready)
+        self.assertIn("granted group access to 2 entries", note)
+        self.assertEqual(launcher.compose, [["pull", "ocr", "web", "worker"]])
+        first_walk = next(i for i, c in enumerate(launcher.commands) if c[:2] == ["docker", "run"])
+        inspects = [i for i, c in enumerate(launcher.commands) if c[:3] == ["docker", "image", "inspect"]]
+        self.assertEqual(len(inspects), 2)
+        self.assertLess(inspects[-1], first_walk)
+
+    def test_a_pulled_root_image_needs_nothing(self):
+        launcher = FakeLauncher(self.project, lambda action: [], user="", local=False, pulled_user="")
+        self.assertEqual(ap.ensure_for_image(launcher, "img"), (True, ""))
+        self.assertFalse(any(c[:2] == ["docker", "run"] for c in launcher.commands))
+
+    def test_an_image_that_cannot_be_pulled_refuses_with_the_reason(self):
+        launcher = FakeLauncher(self.project, lambda action: [], local=False, pull_ok=False)
+        ready, note = ap.ensure_for_image(launcher, "debeski/archive:latest")
+        self.assertFalse(ready)
+        self.assertIn("nothing was recreated", note)
+        self.assertIn("pull access denied", note)
+        self.assertFalse(any(c[:2] == ["docker", "run"] for c in launcher.commands))
+
+    def test_a_buildable_service_is_built_when_the_pull_leaves_no_image(self):
+        launcher = FakeLauncher(self.project, lambda action: [], user="", local=False, pull_ok=False)
+        launcher.config["services"]["web"]["build"] = {"context": "."}
+        self.assertEqual(ap.ensure_for_image(launcher, "img"), (True, ""))
+        self.assertEqual(launcher.compose, [["pull", "--ignore-pull-failures", "ocr", "web", "worker"], ["build", "web"]])
+
+    def test_build_mode_builds_before_reading_the_user(self):
+        # `up --build` would run a freshly built image, whatever the local one says.
+        launcher = FakeLauncher(self.project, lambda action: [], user="")
+        launcher.config["services"]["web"]["build"] = {"context": "."}
+        launcher.build_images = True
+        ap.ensure_for_image(launcher, "img")
+        self.assertEqual(launcher.compose, [["build", "web"]])
+        self.assertLess(0, len(launcher.commands))
 
     def test_a_named_user_is_refused(self):
         launcher = FakeLauncher(self.project, lambda action: [], user="app")
         ready, note = ap.ensure_for_image(launcher, "img")
         self.assertFalse(ready)
         self.assertIn("numeric USER", note)
+
+
+class PrepareScopeTests(unittest.TestCase):
+    """Recreates (``dlux update``, the Operations card) run the same pre-up step."""
+
+    def _launcher(self, ready=(True, "")):
+        from composer.launcher import DockerComposeLauncher
+
+        launcher = DockerComposeLauncher()
+        launcher.compose_config_json = lambda: _config("/srv/a")
+        return launcher
+
+    def test_a_recreate_of_other_services_skips_it(self):
+        launcher = self._launcher()
+        with patch.object(ap, "ensure_for_image") as ensure:
+            self.assertEqual(launcher.prepare_app_data(["caddy"]), (True, ""))
+        ensure.assert_not_called()
+
+    def test_a_recreate_of_an_app_service_runs_it(self):
+        launcher = self._launcher()
+        with patch.object(ap, "ensure_for_image", return_value=(True, "")) as ensure:
+            launcher.prepare_app_data(["worker"])
+        ensure.assert_called_once()
+
+    def test_a_refused_grant_recreates_nothing(self):
+        launcher = self._launcher()
+        launcher.run_docker_compose_streaming = lambda *a, **k: self.fail("recreated")
+        with patch.object(ap, "ensure_for_image", return_value=(False, "Could not prepare")):
+            self.assertEqual(launcher.recreate_containers(["web"]), (False, "", "Could not prepare"))
+
+    def test_the_operations_recreate_refuses_too(self):
+        from composer import executor_ops
+
+        with patch.dict(os.environ, {"COMPOSER_AGENT_RESTART_SERVICES": "web"}), \
+                patch("composer.launcher.DockerComposeLauncher.resolve_secrets", autospec=True, return_value=(True, "")), \
+                patch("composer.launcher.DockerComposeLauncher.resolve_active_compose_files", autospec=True), \
+                patch("composer.launcher.DockerComposeLauncher.prepare_app_data", autospec=True,
+                      return_value=(False, "Could not prepare")) as prepare, \
+                patch("composer.launcher.DockerComposeLauncher.run_docker_compose", autospec=True) as run:
+            code, message = executor_ops._run_recreate("op", "web")
+        self.assertEqual(code, 1)
+        self.assertIn("web was not recreated: Could not prepare", message)
+        self.assertEqual(prepare.call_args.args[1], ["web"])
+        run.assert_not_called()
 
 
 class CheckLevelTests(unittest.TestCase):
@@ -421,6 +541,32 @@ class RuntimeWriterModeTests(unittest.TestCase):
         writer.active_compose_files = []
         writer.write_status("ready")
         self.assertEqual(stat.S_IMODE((self.root / "deploy-status.json").stat().st_mode), 0o664)
+
+    def test_the_package_lock_is_group_shared(self):
+        from composer.dlux_runtime import PACKAGE_LOCK_FILENAME, DluxRuntime
+
+        os.umask(0o002)
+        runtime = DluxRuntime(self.root)
+        with runtime.package_operation_lock():
+            pass
+        self.assertEqual(stat.S_IMODE((self.root / "state" / PACKAGE_LOCK_FILENAME).stat().st_mode), 0o664)
+
+    def test_dlux_commands_write_with_the_shared_umask(self):
+        # They write state/ on the runtime volume, on the host or in the
+        # sibling container they re-run in, outside the umask-0002 processes.
+        from composer.launcher import DockerComposeLauncher
+
+        seen = []
+        with patch("sys.argv", ["composer", "dlux", "channel"]), \
+                patch("composer.dlux_package_cli.run_dlux_channel", side_effect=lambda *a: seen.append(os.umask(0o022)) or 0):
+            with self.assertRaises(SystemExit):
+                DockerComposeLauncher().run()
+        self.assertEqual(seen, [ap.SHARED_UMASK])
+
+    def test_the_resident_update_helper_writes_with_the_shared_umask(self):
+        from composer.executor_ops import _AGENT_UPDATE_SCRIPT
+
+        self.assertEqual(_AGENT_UPDATE_SCRIPT.strip().splitlines()[0], "umask 0002")
 
     def test_owned_runtime_directories_are_opened_to_the_group(self):
         directory = self.root / "state"

@@ -59,7 +59,7 @@ class AgentCheckPublicationTests(unittest.TestCase):
         self.assertEqual((code, stderr), (0, ""))
         self.assertEqual(json.loads(stdout), self.payload)
         self.assertEqual(json.loads(self.target.read_text()), self.payload)
-        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o664)
         self.assertEqual(list(self.root.glob(".image-available.json.*")), [])
         build.assert_called_once_with(["app:latest", "worker:latest"])
         self.launcher.run_docker_compose.assert_called_once()

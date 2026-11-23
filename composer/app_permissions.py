@@ -22,11 +22,12 @@ image, and the grant can run while the stack serves.
 
 What the app needs per entry, on a mount any app service writes: directories
 ``rwx``; files ``r``; files on a ``logs`` mount ``rw`` (a log handler appends
-and rotates). On the runtime volume the app writes only the top-level
-directories and the ``state/`` tree (``rwx`` directories, ``rw`` files);
-installed releases are only read. On a mount every app service reads only:
-directories ``r-x``, files ``r``. DjangoLux's ``dlux.mount_access`` applies the
-same rule.
+and rotates). On the runtime volume the app writes only into the top-level
+directories and the ``state/`` tree (``rwx`` directories); it replaces a file
+there by renaming a new one over it, never by writing into it, so every file
+needs only ``r``, and installed releases are only read. On a mount every app
+service reads only: directories ``r-x``, files ``r``. DjangoLux's
+``dlux.mount_access`` applies the same rule.
 
 The walk runs in a short-lived container from Composer's own image with only
 the capabilities it needs (none for a scan beyond reading) and no network: the
@@ -215,10 +216,10 @@ def needs(st, role: str, read_only: bool, parts: Tuple[str, ...] = ()) -> int:
     if read_only:
         return READ | SEARCH if is_dir else READ
     if role == "runtime":
-        in_state = parts[:1] == ("state",)
         if is_dir:
-            return READ | WRITE | SEARCH if len(parts) <= 1 or in_state else READ | SEARCH
-        return READ | WRITE if in_state else READ
+            writes = len(parts) <= 1 or parts[:1] == ("state",)
+            return READ | WRITE | SEARCH if writes else READ | SEARCH
+        return READ
     if is_dir:
         return READ | WRITE | SEARCH
     return READ | WRITE if role == "logs" else READ
@@ -552,14 +553,66 @@ def examples(summary: dict, limit: int = 3) -> str:
     return "; ".join(shown)
 
 
-def ensure_for_image(launcher, image: str) -> Tuple[bool, str]:
+def _compose(launcher, args: List[str]) -> Tuple[bool, str, str]:
+    """A compose pull or build through the launcher, with the same env (and progress) ``up`` gets."""
+    stream = getattr(launcher, "run_docker_compose_streaming", None)
+    emit = getattr(launcher, "emit_pull_progress", None)
+    if stream is None or emit is None:
+        return launcher.run_docker_compose(args)
+    progress = getattr(launcher, "pull_progress", None)
+    if progress is not None:
+        progress.reset()
+    label = "Pull" if args[0] == "pull" else "Build"
+    return stream(args, progress_callback=lambda line: emit(label, line))
+
+
+def fetch_app_image(launcher, config: dict, image: str) -> Tuple[str, Optional[int], Optional[int], str]:
+    """``image_identity`` of the image ``up`` is about to run, fetching it first when needed.
+
+    ``up`` pulls an image that is not on the host and builds one with ``--build``,
+    then recreates at once, so reading only what is local would grant for the
+    wrong user, or for none. The app services are pulled (or built, for those
+    with a ``build`` section) here instead, the way ``up`` would get them. The
+    last item is the pull or build output when the image still cannot be read.
+    """
+    services = app_services(config)
+    specs = config.get("services") or {}
+    buildable = [name for name in services if isinstance(specs.get(name), dict) and specs[name].get("build")]
+    if buildable and getattr(launcher, "build_images", False):
+        ok, out, err = _compose(launcher, ["build", *buildable])
+        if not ok:
+            return "unknown", None, None, (err or out).strip()
+    kind, uid, gid = image_identity(launcher.run_command, image)
+    if kind != "unknown" or not services:
+        return kind, uid, gid, ""
+    pull = ["pull", "--ignore-pull-failures"] if buildable else ["pull"]
+    ok, out, err = _compose(launcher, [*pull, *services])
+    detail = (err or out).strip()
+    kind, uid, gid = image_identity(launcher.run_command, image)
+    if kind == "unknown" and buildable:
+        ok, out, err = _compose(launcher, ["build", *buildable])
+        detail = (err or out).strip()
+        kind, uid, gid = image_identity(launcher.run_command, image)
+    return kind, uid, gid, detail if kind == "unknown" else ""
+
+
+def ensure_for_image(launcher, image: str, config: Optional[dict] = None) -> Tuple[bool, str]:
     """Before ``up``: grant the image's non-root uid what it needs, or refuse.
 
-    A root image needs nothing. An image that is not present yet cannot be read;
-    DjangoLux's own entrypoint gate stops it if its data is not ready.
+    A root image needs nothing. An image that is not on the host yet is pulled
+    (or built) first, so the uid is read from the image ``up`` will run; when it
+    still cannot be read, nothing is recreated.
     """
-    kind, uid, gid = image_identity(launcher.run_command, image)
-    if kind in {"root", "unknown"}:
+    if config is None:
+        config = launcher.compose_config_json() or {}
+    kind, uid, gid, detail = fetch_app_image(launcher, config, image)
+    if kind == "unknown":
+        return False, (
+            f"Could not read which user {image} runs as: it is not on this host and could not be "
+            "pulled or built, so nothing was recreated."
+            + (f"\n{detail[-1500:]}" if detail else "")
+        )
+    if kind == "root":
         return True, ""
     if kind == "named":
         return False, (

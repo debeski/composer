@@ -360,7 +360,7 @@ class DluxRuntime:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             # flock needs no write access; O_NOFOLLOW refuses a symlink planted
             # by another writer of this volume.
-            fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+            fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, SHARED_FILE_MODE)
         except OSError as exc:
             raise DluxRuntimeError(
                 f"Could not open the DjangoLux update lock {path}: "
