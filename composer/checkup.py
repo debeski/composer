@@ -8,7 +8,16 @@ from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
 from .secrets_manager import SecretsMixin
-from . import front_proxy, maintenance_migration, maintenance_page, media_migration, relay_env, worker_migration
+from . import (
+    app_permissions,
+    fetch_metadata,
+    front_proxy,
+    maintenance_migration,
+    maintenance_page,
+    media_migration,
+    relay_env,
+    worker_migration,
+)
 from .stack_schema import collect_stamps, read_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
@@ -679,6 +688,51 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return _result(OK, "stored-files", "No /media/ route in the proxy config.")
         return _result(OK, "stored-files", "Stored files go through DjangoLux's access check (since stack schema 4).")
 
+    def _check_fetch_metadata(self) -> Dict[str, Any]:
+        """Does the proxy refuse what other sites' pages make a browser load in the background?"""
+        name = "fetch-metadata"
+        try:
+            state = fetch_metadata.inspect(Path("."))
+        except (OSError, UnicodeDecodeError) as exc:
+            return _result(WARN, name, f"Could not read the proxy configuration: {exc}")
+        if not state["files"]:
+            return _result(OK, name, f"No {fetch_metadata.CADDYFILE} or {fetch_metadata.NGINX_TEMPLATE}; nothing to check.")
+        missing = state["missing"]
+        if missing:
+            caddy = str(fetch_metadata.CADDYFILE) in missing
+            nginx = str(fetch_metadata.NGINX_TEMPLATE) in missing
+            steps = []
+            if caddy:
+                steps.append(
+                    f"in {fetch_metadata.CADDYFILE}, the @cross_site_request matcher and "
+                    "'respond @cross_site_request 403', after the public /media/ handler and before the private "
+                    "/media/* handler"
+                )
+            if nginx:
+                steps.append(
+                    f"in {fetch_metadata.NGINX_TEMPLATE}, the $cross_site_request map and "
+                    "'if ($cross_site_request) { return 403; }' in the /media/, / and /health locations"
+                )
+            restart = " or ".join(service for service, wanted in (("caddy", caddy), ("nginx", nginx)) if wanted)
+            return _result(
+                WARN,
+                name,
+                " and ".join(missing) + (" has" if len(missing) == 1 else " have") + " no Fetch Metadata "
+                "resource isolation policy (cross_site_request), so another site's page can make a visitor's "
+                "browser load this site's pages, private files and endpoints in the background (images, scripts, "
+                "fetch(), form posts). CSRF tokens and SameSite cookies still stop forged changes; this is the "
+                "layer that refuses such requests before they reach the app.",
+                fix=f"Add the block from {fetch_metadata.DOCS} (also in a fresh 'python -m dlux startproject'): "
+                + "; ".join(steps)
+                + f". Then run './start.sh restart {restart}', since './start.sh' alone does not reload a changed "
+                "proxy file.",
+            )
+        return _result(
+            OK,
+            name,
+            "The proxy refuses requests other sites make in the background (Fetch Metadata, cross_site_request).",
+        )
+
     def _check_front_proxy(self) -> Dict[str, Any]:
         """Which front proxies may Caddy take a client address from (``DLUX_FRONT_PROXY``)?"""
         name = "front-proxy"
@@ -786,6 +840,88 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             f"(DLUX_FRONT_PROXY in {where})."
         )
 
+    def _check_app_permissions(self, deep: bool = False) -> Optional[Dict[str, Any]]:
+        """Can the uid the app image runs as use the data its services mount?
+
+        DjangoLux images run as uid 10001 with group 0 and reach data a root
+        image wrote through group bits. While the image still runs as root this
+        reports whether the data is ready for that move (WARN, fixable at any
+        time: root ignores the bits); once it runs as a non-root uid, data it
+        cannot use is a FAIL, because DjangoLux refuses to start on it.
+        """
+        name = "app-permissions"
+        self._app_permissions_state = None
+        config = self.compose_config_json()
+        image = app_permissions.app_image(config or {})
+        if not config or not image:
+            return None
+        kind, uid, gid = app_permissions.image_identity(self.run_command, image)
+        if kind == "named":
+            return _result(
+                WARN, name,
+                f"{image} runs as a named user, so Composer cannot tell which uid needs access to its data.",
+                fix="Use a numeric USER uid:gid in the Dockerfile (DjangoLux images use 10001:0).",
+            )
+        as_root = kind in {"root", "unknown"}
+        if as_root:
+            uid, gid = app_permissions.APP_UID, app_permissions.APP_GID
+        try:
+            summary = app_permissions.run(
+                self, "scan", uid=uid, gid=gid, depth=None if deep else app_permissions.QUICK_DEPTH
+            )
+        except app_permissions.PermissionsError as exc:
+            return _result(WARN, name, f"Could not check the app's data: {exc}")
+        wrong = app_permissions.totals(summary)["wrong"]
+        missing = [] if as_root else summary["missing"]
+        self._app_permissions_state = {"uid": uid, "gid": gid, "wrong": wrong, "missing": missing}
+        scope = "" if deep else " (top two levels; --deep checks every entry)"
+        who = f"uid {uid} (gid {gid})"
+        example = app_permissions.examples(summary)
+        detail = f", e.g. {example}" if example else ""
+        if missing:
+            detail += f"; missing: {', '.join(missing)}"
+        count = wrong + len(missing)
+        entries = f"{count} entr{'y' if count == 1 else 'ies'}"
+        fix = (
+            "./start.sh check --fix adds the group bits the app needs (only modes change; nothing is moved "
+            "or rewritten; the previous root image keeps working)."
+        )
+        if as_root:
+            if not count:
+                return _result(OK, name, f"The app image runs as root; its data is also ready for {who}{scope}.")
+            return _result(
+                WARN, name,
+                f"The app image runs as root. Before an image running as {who} can use its data, {entries} "
+                f"need group access{scope}{detail}.",
+                fix=fix,
+            )
+        if not count:
+            return _result(OK, name, f"The app runs as {who} and can use its data{scope}.")
+        return _result(
+            FAIL, name,
+            f"The app runs as {who} but cannot use {entries} of its data{scope}{detail}. "
+            "DjangoLux refuses to start until it can.",
+            fix=fix,
+        )
+
+    def _fix_app_permissions(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            summary = app_permissions.run(self, "apply", uid=state["uid"], gid=state["gid"])
+        except app_permissions.PermissionsError as exc:
+            return _result(FAIL, "fix:app-permissions", str(exc))
+        counts = app_permissions.totals(summary)
+        detail = (
+            f"Granted uid {state['uid']} (gid {state['gid']}) group access to {counts['changed']} "
+            f"entr{'y' if counts['changed'] == 1 else 'ies'}"
+        )
+        if summary.get("manifest"):
+            detail += f". Manifest (for 'composer app-permissions revert'): {summary['manifest']}"
+        if counts["hardlinks"]:
+            detail += f". {counts['hardlinks']} multiply-linked file(s) were left unchanged"
+        if counts["errors"]:
+            return _result(FAIL, "fix:app-permissions", f"{detail}. {counts['errors']} entries could not be changed.")
+        return _result(OK, "fix:app-permissions", detail + ".")
+
     def _check_relay_env(self) -> Dict[str, Any]:
         """Can DjangoLux's Email step see the SMTP relay's settings (all but the password)?"""
         name = "relay-env"
@@ -880,6 +1016,128 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "provider whose certificate it cannot verify; for a private CA, set SMTP_RELAY_CA_FILE (or "
             "SMTP_RELAY_TLS_VERIFY=False) in the secrets file.",
         )
+
+    def _check_registry_login(self) -> Optional[Dict[str, Any]]:
+        """Can the resident pair read WEB_IMAGE's registry, with the login when it needs one?
+
+        composer-agent's update check and composer-executor's pulls read the login
+        (``registry_login``) from their own environment, so it counts only once the
+        stack passes it to both. The registry is then asked for the watched tag the
+        way the agent asks. The resident check skips that request: composer-executor
+        answers it and has no route to a registry.
+        """
+        from . import registry, registry_login
+        from .agent_check_publication import _option_values
+
+        name = "registry-login"
+        config = self.compose_config_json() or {}
+        services = config.get("services") if isinstance(config.get("services"), dict) else {}
+        agent = services.get("composer-agent")
+        if not isinstance(agent, dict):
+            return None
+        command = agent.get("command") or []
+        command = command.split() if isinstance(command, str) else [str(word) for word in command]
+        environments = {
+            role: (services.get(role) or {}).get("environment") or {}
+            for role in registry_login.REGISTRY_ROLES if isinstance(services.get(role), dict)
+        }
+        agent_env = {key: str(value or "") for key, value in environments.get("composer-agent", {}).items()}
+        images = list(dict.fromkeys(_option_values(command, "--check-image"))) or (
+            [agent_env["WEB_IMAGE"]] if agent_env.get("WEB_IMAGE") else []
+        )
+        if not images:
+            return None
+        image = images[0]
+        host = registry_login.image_host(image)
+        lacking = sorted(
+            role for role, environment in environments.items()
+            if not all(key in environment for key in registry_login.KEYS)
+        )
+        if registry_login.credentials(self._compose_env_with_secrets()) and lacking:
+            return _result(
+                WARN, name,
+                f"The secrets file holds a registry login, but the stack does not pass it to {', '.join(lacking)}, "
+                f"so updates of {image} are neither noticed nor pulled.",
+                fix="Run 'composer check --fix': it passes COMPOSER_REGISTRY_USERNAME, COMPOSER_REGISTRY_PASSWORD and "
+                "COMPOSER_REGISTRY_HOST to composer-agent and composer-executor. Then run './start.sh' to recreate them.",
+            )
+        login = registry_login.credentials_for(image, agent_env)
+        if getattr(self, "resident_check", False):
+            with_login = "with the registry login" if login else "without a login"
+            return _result(OK, name, f"The resident pair reads {image} {with_login}.")
+        if self._is_local_build(image):
+            return _result(OK, name, f"{image} was built on this machine and never pulled, so there is no registry to read.")
+        token = agent_env.get("COMPOSER_REGISTRY_TOKEN") or None
+        digest, reason = registry.tag_digest(image, token=token, credentials=login, timeout=10)
+        if digest:
+            how = "with the registry login" if login else ("with COMPOSER_REGISTRY_TOKEN" if token else "without a login")
+            return _result(OK, name, f"{host} answers for {image} {how}.")
+        setting = (
+            "Put a read-only login in the secrets file: COMPOSER_REGISTRY_USERNAME and COMPOSER_REGISTRY_PASSWORD "
+            "(for GitLab, a deploy token with read_registry only), then run './start.sh' so composer-agent and "
+            "composer-executor read it."
+        )
+        if reason in (registry.LOGIN_REQUIRED, registry.NOT_FOUND) and registry_login.is_bare_name(image):
+            return _result(
+                OK, name,
+                f"{image} names no registry or namespace and Docker Hub has no official image by that name, "
+                "so it is a local build with no registry to read.",
+            )
+        if reason == registry.LOGIN_REQUIRED:
+            return _result(
+                WARN, name,
+                f"{host} needs a login to read {image}, and the stack passes none, so updates are neither noticed "
+                "nor pulled.",
+                fix=setting,
+            )
+        if reason == registry.LOGIN_REFUSED:
+            return _result(
+                FAIL, name,
+                f"{host} refused the registry login for {image}, so updates are neither noticed nor pulled.",
+                fix="Check COMPOSER_REGISTRY_USERNAME and COMPOSER_REGISTRY_PASSWORD in the secrets file (a deploy "
+                "token must be active and allowed to read this repository), then run './start.sh'.",
+            )
+        if reason == registry.NOT_FOUND:
+            return _result(
+                WARN, name,
+                f"{host} has no {image}" + ("." if login else ", or hides it until a login is given."),
+                fix="Check WEB_IMAGE. " + ("" if login else setting),
+            )
+        if reason == registry.UNREACHABLE:
+            return _result(OK, name, f"{host} is not reachable from here; {image} was not checked.")
+        if reason == registry.CERTIFICATE:
+            return _result(
+                WARN, name,
+                f"Composer does not trust {host}'s certificate, so updates of {image} are not noticed. Composer's "
+                "update check trusts the public certificate authorities only.",
+                fix="Use a registry certificate from a public authority. For pulls, the Docker daemon also needs a "
+                "private CA at /etc/docker/certs.d/<registry host>/ca.crt on the host.",
+            )
+        return _result(WARN, name, f"Composer could not read {image} from {host}.")
+
+    @staticmethod
+    def _is_local_build(image: str) -> bool:
+        """True when the local image exists with no RepoDigest: built here, never pulled.
+
+        DjangoLux's Updates card reads such an image as a local build and shows no
+        registry warning; the check must not ask for a login it does not need.
+        """
+        import subprocess
+
+        try:
+            proc = subprocess.run(
+                ["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if proc.returncode != 0:
+            return False
+        try:
+            digests = json.loads(proc.stdout.strip() or "null")
+        except ValueError:
+            return False
+        return isinstance(digests, list) and not digests
 
     def _compose_env_with_secrets(self) -> Dict[str, str]:
         """The compose environment plus the secrets file's values, so a recreate never runs on defaults."""
@@ -1139,11 +1397,18 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             results.append(self._check_stack_schema())
             results.append(self._check_maintenance_page())
             results.append(self._check_media_privacy())
+            results.append(self._check_fetch_metadata())
             results.append(self._check_front_proxy())
             results.append(self._check_relay_env())
             relay_version = self._check_relay_version()
             if relay_version is not None:
                 results.append(relay_version)
+            registry_check = self._check_registry_login()
+            if registry_check is not None:
+                results.append(registry_check)
+            permissions = self._check_app_permissions(deep=bool(args.deep or args.fix))
+            if permissions is not None:
+                results.append(permissions)
             worker = self._check_task_worker()
             if worker is not None:
                 results.append(worker)
@@ -1160,9 +1425,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 # A successful fix:stored-files must not leave the stale SECURITY
                 # FAIL behind, or `check --fix` exits 1 after fixing it.
                 "stored-files": self._check_media_privacy,
+                "app-permissions": lambda: self._check_app_permissions(deep=True),
             }
             for index, result in enumerate(results):
-                if result["name"] in rechecks and result["level"] == FAIL:
+                if result["name"] in rechecks and (result["level"] == FAIL or result["name"] == "app-permissions"):
                     rechecked = rechecks[result["name"]]()
                     if rechecked is not None:
                         results[index] = rechecked
@@ -1390,12 +1656,15 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             relay_env_files = relay_env.inspect(Path("."), self._maintenance_compose_files())["files"]
         except (OSError, ValueError):
             relay_env_files = []
+        grant_access = getattr(self, "_app_permissions_state", None) or {}
+        if not (grant_access.get("wrong") or grant_access.get("missing")):
+            grant_access = {}
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
                 and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration and not media_exposed
-                and not needs_worker and not front_proxy_files and not relay_env_files):
+                and not needs_worker and not front_proxy_files and not relay_env_files and not grant_access):
             return fixes
         consequences = []
         if maintenance_legacy:
@@ -1430,6 +1699,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "smtp-relay; web only learns whether one is set. The Compose configuration is validated, the "
                 "original archived under .xclude/composer-check/ and running web, worker and smtp-relay "
                 "recreated."
+            )
+        if grant_access:
+            consequences.append(
+                f"Give the app (uid {grant_access['uid']}, gid {grant_access['gid']}) group access to the data "
+                "its services mount: add the group read, write and search bits it needs to directories and files "
+                "(the group itself changes only on entries owned by neither group 0 nor the app). Nothing is "
+                "moved, renamed or rewritten, and the previous root image keeps working. Every change is listed "
+                "in .xclude/composer-check/<UTC>/app-permissions/ for 'composer app-permissions revert'."
             )
         if stale_wrappers:
             consequences.append(
@@ -1520,7 +1797,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "agent/executor run commands; give composer-executor cap_add: "
                 "DAC_OVERRIDE (replacing DAC_READ_SEARCH) so it can read the project's "
                 "0600 .secrets/.env to deploy; pin docker-socket-proxy by digest and "
-                "switch off its write endpoints."
+                "switch off its write endpoints; pass the private-registry login "
+                "(COMPOSER_REGISTRY_USERNAME, COMPOSER_REGISTRY_PASSWORD, COMPOSER_REGISTRY_HOST) "
+                "to composer-agent and composer-executor."
             )
         if needs_updater_migration:
             consequences.append(
@@ -1835,8 +2114,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         OK,
                         "fix:resident-block",
                         "Normalized the Composer resident block: nested 'agent run'/'executor run' "
-                        "commands, DAC_OVERRIDE as composer-executor's only added capability, and a "
-                        "digest-pinned read-only docker-socket-proxy. Recreate docker-socket-proxy, "
+                        "commands, DAC_OVERRIDE as composer-executor's only added capability, a "
+                        "digest-pinned read-only docker-socket-proxy, and the registry login passed to "
+                        "composer-agent and composer-executor. Recreate docker-socket-proxy, "
                         "composer-executor and composer-agent to apply. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )
@@ -1892,6 +2172,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     )
             except AgentInstallError as exc:
                 fixes.append(_result(FAIL, "fix:restart-labels", f"Restart-label repair failed: {exc}"))
+        if grant_access:
+            fixes.append(self._fix_app_permissions(grant_access))
         # Last: it builds on what the steps above made of an older layout.
         if needs_worker:
             from .stack_cleanup import StackCleanupError

@@ -62,6 +62,8 @@ def parse_args():
             "  dlux check | dlux update | dlux rollback | dlux channel\n"
             "      Check, apply, or roll back inline DjangoLux package releases.\n"
             "      Run 'composer dlux --help'.\n"
+            "  app-permissions revert MANIFEST\n"
+            "      Undo a group-access grant on app data ('check --fix' grants it).\n"
             "  relay list | relay approve\n"
             "      Review the outbound operations a project declares in relay/operations.json,\n"
             "      and approve them (pins their digests in relay/operations.lock).\n"

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from .agent_protocol import redact_text
+from .app_permissions import SHARED_FILE_MODE
 
 
 class StatusWriterMixin:
@@ -75,6 +76,7 @@ class StatusWriterMixin:
                 suffix=".tmp",
                 dir=str(target.parent),
             )
+            os.fchmod(fd, SHARED_FILE_MODE)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, sort_keys=True)
                 handle.write("\n")

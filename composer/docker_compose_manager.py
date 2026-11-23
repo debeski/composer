@@ -20,6 +20,7 @@ from .constants import (
     SUPERVISED_ONE_SHOT_PREFIX,
     SUPERVISOR_MODULE,
 )
+from . import registry_login
 from .output_utils import OutputUtilsMixin
 from .service_selection import scoped_service_list
 from .subprocess_runner import SubprocessRunnerMixin
@@ -64,6 +65,11 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         # is the correct default and a stale export must not become a flag.
         env[MIGRATOR_FLAGS_ENV] = " ".join(self.migrator_flags())
         env.setdefault("BUILDKIT_PROGRESS", "plain")
+        # A private WEB_IMAGE registry: pulls (and an `up` that has to fetch an
+        # image) need the login, and the daemon takes it from this client only.
+        login = registry_login.docker_config(env)
+        if login:
+            env["DOCKER_CONFIG"] = login
         return env
 
     def get_compose_commands(self, args: List[str]) -> List[List[str]]:
@@ -480,6 +486,14 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         self.last_progress_label = ""
         if not services:
             return True, "", ""
+        # A recreate runs the app image's entrypoint gate like any `up`.
+        prepare = getattr(self, "prepare_app_data", None)
+        if prepare is not None:
+            ready, note = prepare(list(services))
+            if not ready:
+                return False, "", note
+            if note:
+                print(f"🔐 {note}")
         return self.run_docker_compose_streaming(
             ["up", "-d", "--no-deps", "--force-recreate", *services],
             progress_callback=lambda line: self.emit_progress("Recreate", line),

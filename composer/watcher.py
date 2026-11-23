@@ -30,7 +30,15 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .agent_protocol import redact_text
-from .registry import DEFAULT_VERSION_LABEL, remote_image_labels, remote_tag_digest
+from . import registry_login
+from .registry import (
+    DEFAULT_VERSION_LABEL,
+    LOGIN_REQUIRED,
+    NOT_FOUND,
+    REASON_TEXT,
+    remote_image_labels,
+    tag_digest,
+)
 from .service_selection import join_service_list, parse_service_list
 
 
@@ -157,7 +165,8 @@ def check_availability(images: List[str]) -> Tuple[bool, list]:
     results = []
     any_new = False
     for image in images:
-        remote = remote_tag_digest(image, token=token)
+        credentials = registry_login.credentials_for(image)
+        remote, reason = tag_digest(image, token=token, credentials=credentials)
         local = _local_repo_digest(image)
         # A difference (or a remote we have never pulled) means an update exists.
         # An unreadable remote is "unknown" — never a false positive.
@@ -169,12 +178,18 @@ def check_availability(images: List[str]) -> Tuple[bool, list]:
             "local_digest": local,
             "update_available": new,
         }
+        if remote is None and reason and not (
+            reason in (LOGIN_REQUIRED, NOT_FOUND) and registry_login.is_bare_name(image)
+        ):
+            # Still "unknown"; the reason lets DjangoLux say why (a login the
+            # registry needs, a refused one, an unreachable registry).
+            entry["reason"] = reason
         # Best-effort image metadata. Version and project release manifest are
         # independently optional and share one config lookup. Metadata failure
         # never changes the digest-driven availability result.
         if new:
             try:
-                labels = remote_image_labels(image, token=token) or {}
+                labels = remote_image_labels(image, token=token, credentials=credentials) or {}
             except Exception:
                 labels = {}
             version = str(labels.get(version_label) or "").strip()
@@ -326,7 +341,11 @@ def run_agent_check(args) -> int:
             remote = entry["remote_digest"]
             local = entry["local_digest"]
             if not remote:
-                print(f"? {image}: registry digest unavailable (local: {local or 'missing'})")
+                why = REASON_TEXT.get(entry.get("reason", ""), "")
+                print(
+                    f"? {image}: registry digest unavailable"
+                    f"{': ' + why if why else ''} (local: {local or 'missing'})"
+                )
             elif entry["update_available"]:
                 version = f" · version {entry['version']}" if entry.get("version") else ""
                 print(
@@ -786,6 +805,9 @@ class WatchRuntime:
 
 
 def run_watch(args) -> int:
+    from .app_permissions import SHARED_UMASK
+
+    os.umask(SHARED_UMASK)
     runtime = WatchRuntime(args)
     print(
         f"👀 composer agent watch — trigger={runtime.trigger} interval={runtime.interval:g}s"

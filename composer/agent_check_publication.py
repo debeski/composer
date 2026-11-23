@@ -10,13 +10,14 @@ from pathlib import Path
 
 # Use only stdlib so the resident Composer need not be upgraded with the CLI.
 # A unique temporary file also avoids racing the resident agent's own writer.
+# 0664, like every runtime file Composer writes (app_permissions.SHARED_FILE_MODE).
 _PUBLISH_SCRIPT = """import os, sys, tempfile
 from pathlib import Path
 target = Path(sys.argv[1])
 with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
         dir=target.parent, prefix='.' + target.name + '.', delete=False) as stream:
     stream.write(sys.argv[2] + '\\n')
-    os.fchmod(stream.fileno(), 0o644)
+    os.fchmod(stream.fileno(), 0o664)
 os.replace(stream.name, target)
 """
 

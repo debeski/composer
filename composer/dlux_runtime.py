@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .app_permissions import SHARED_FILE_MODE
 from .versions import try_parse
 
 CONTRACT_SCHEMA_VERSION = 1
@@ -82,6 +83,7 @@ def _atomic_write(path: Path, text: str) -> None:
     handle, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
+        os.fchmod(handle, SHARED_FILE_MODE)
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(text)
             stream.flush()
@@ -358,7 +360,7 @@ class DluxRuntime:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             # flock needs no write access; O_NOFOLLOW refuses a symlink planted
             # by another writer of this volume.
-            fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+            fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, SHARED_FILE_MODE)
         except OSError as exc:
             raise DluxRuntimeError(
                 f"Could not open the DjangoLux update lock {path}: "
