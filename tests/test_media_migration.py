@@ -1,4 +1,6 @@
 import os
+import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,9 +11,10 @@ from composer import media_migration as media
 from composer.checkup import FAIL, OK, WARN
 from composer.launcher import DockerComposeLauncher
 
-DLUX_PROJECT = (
-    Path(__file__).resolve().parents[3] / "pkg-django-lux" / "main" / "dlux" / "scaffold" / "templates" / "project"
+DLUX_CHECKOUT = Path(
+    os.environ.get("DLUX_CHECKOUT") or Path(__file__).resolve().parents[3] / "pkg-django-lux" / "main"
 )
+DLUX_PROJECT = DLUX_CHECKOUT / "dlux" / "scaffold" / "templates" / "project"
 
 LEGACY_CADDY = """# dlux stack schema 3
 {$CADDY_SITE_ADDRESS::80} {
@@ -249,11 +252,29 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(launcher._running_dlux_version(), (1, 15, 2))
 
 
+def _without_fetch_metadata(text: str) -> str:
+    """The scaffold proxy text minus DjangoLux's Fetch Metadata policy.
+
+    The policy has its own finding and fix (``fetch-metadata``). Since DjangoLux
+    1.16.3 the scaffold places the Caddy matcher between the public and private
+    media routes and refuses cross-site requests inside nginx's ``/media/``
+    location, so the stored-files blocks are compared with it taken out.
+    """
+    text = re.sub(
+        r"(?ms)^\t\t# Fetch Metadata resource isolation.*?^\t\trespond @cross_site_request 403\n\n",
+        "",
+        text,
+    )
+    return re.sub(r"(?m)^[ \t]*if \(\$cross_site_request\) \{ return 403; \}\n", "", text)
+
+
 class DjangoLuxScaffoldTests(unittest.TestCase):
     def test_the_scaffold_proxies_carry_the_same_media_blocks(self):
         caddyfile = DLUX_PROJECT / ".proxy" / "Caddyfile.tmpl"
         nginx = DLUX_PROJECT / ".proxy" / "default.conf.template.tmpl"
         if not caddyfile.is_file() or media.ACCESS_URI not in caddyfile.read_text(encoding="utf-8"):
             self.skipTest("No stack-schema-4 DjangoLux checkout alongside")
-        self.assertIn(media.caddy_media_blocks("\t\t"), caddyfile.read_text(encoding="utf-8"))
-        self.assertIn(media.nginx_media_blocks("    "), nginx.read_text(encoding="utf-8"))
+        caddy_text = _without_fetch_metadata(caddyfile.read_text(encoding="utf-8"))
+        nginx_text = _without_fetch_metadata(nginx.read_text(encoding="utf-8"))
+        self.assertIn(media.caddy_media_blocks("\t\t"), caddy_text)
+        self.assertIn(media.nginx_media_blocks("    "), nginx_text)

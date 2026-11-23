@@ -19,9 +19,10 @@ from unittest.mock import patch
 from composer import app_permissions as ap
 from composer.checkup import FAIL, OK, WARN, CheckupMixin
 
-DLUX_CONTRACT = (
-    Path(__file__).resolve().parents[3] / "pkg-django-lux" / "main" / "dlux" / "contracts" / "runtime.json"
+DLUX_CHECKOUT = Path(
+    os.environ.get("DLUX_CHECKOUT") or Path(__file__).resolve().parents[3] / "pkg-django-lux" / "main"
 )
+DLUX_CONTRACT = DLUX_CHECKOUT / "dlux" / "contracts" / "runtime.json"
 
 
 def _st(uid, gid, mode, kind=stat.S_IFDIR, nlink=1):
