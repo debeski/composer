@@ -1,404 +1,228 @@
-# Composer Executor Hardening
+# Executor hardening
 
-Standalone security release. Replaces the network-facing agent's broad Docker
-authority with a small, typed **executor** that holds the Docker socket and
-exposes only the operations Composer actually performs.
+The resident pair splits Docker authority. The network-facing `composer-agent`
+holds none: it reads Docker through a read-only proxy and asks for every write. The
+`composer-executor` holds the Docker socket, is not network-facing, and performs
+only a fixed set of typed operations, re-validating each one.
 
-> **Independent of the fleet-management plan.** This hardening needs none of the
-> remote-settings / snapshot-v2 / alerts / profiles work and must ship, canary,
-> and roll back on its own track — ahead of, and decoupled from, any remote
-> mutation feature. It is a *prerequisite* for those features, not part of them.
+**Threat model.** The agent holds an outbound connection to a control plane and to
+package and image registries, and processes requests from DjangoLux and remote
+commands. A compromise of, or an injection bug in, that component must not turn
+into host-Docker control: `EXEC` on any container, or a container created with
+host mounts, is root-equivalent on the host in most deployments. So the agent gets
+no write path to Docker at all.
 
----
-
-## 1. Current state and why this matters
-
-Today the network-facing `composer-agent` is handed near-total Docker authority:
-
-- It reaches Docker through `DOCKER_HOST=tcp://docker-socket-proxy:2375`
-  ([agent_installer.py](../composer/agent_installer.py)).
-- The `docker-socket-proxy` (tecnativa) is granted
-  `CONTAINERS, IMAGES, NETWORKS, VOLUMES, EVENTS, EXEC, POST` all `=1`.
-  `EXEC=1` + `POST=1` across every resource is effectively **arbitrary code
-  execution in any container** plus full create/destroy of
-  containers/images/volumes/networks.
-
-Yet the agent's *actual* Docker-mutating surface is a small named set
-([`agent_protocol.REMOTE_ACTIONS`](../composer/agent_protocol.py)):
-
-| Action | What it does | Existing guard |
-|:--|:--|:--|
-| `dlux.image_update` | `compose pull` + `up -d --force-recreate` (scoped) | `version_gate` rejects downgrades; scoped service list |
-| `composer.restart` | `compose restart <service>` | `PROTECTED_RESTART_SERVICES` + `COMPOSER_AGENT_RESTART_SERVICES` allowlist |
-| `start` / `stop` (unreleased 1.8) | start/stop one existing auxiliary container | executor rechecks real service, state, protected labels, `PROTECTED_LIFECYCLE_SERVICES` and allowlist; Web/Celery/proxy/control/data services protected |
-| `composer.recovery_deploy` | recreate from known-good state | requires a reason |
-| `dlux.backup.create` | management command via `compose exec`/`run` | scoped one-off |
-| `agent.rotate_credentials` | credential store only | **no Docker authority** |
-
-Crucially, on a remote command the agent does **not** call Docker itself — it
-spawns a `python -m composer restart|update …` **child process**
-([agent.py `_run_child`](../composer/agent.py)) that drives `docker compose`.
-The privilege is over-provisioned relative to what's used: the whole attack
-surface exists to run four bounded operations.
-
-**Threat model.** The agent holds an outbound connection to a Control Plane and
-processes untrusted-ish remote commands. A compromise or a command-injection bug
-in that network-facing component currently converts to full host-Docker control
-(`EXEC` on any container = root-equivalent on the host in most deployments). The
-goal is to make the network-facing component hold **zero** Docker authority.
-
----
-
-## 2. Target architecture (decided)
-
-Two decisions are locked:
-
-1. **Separate executor, same image.** A new `composer-executor` role (reuses the
-   `debeski/composer` image, different command) holds the real Docker socket and
-   performs every Docker **write**. The `composer-agent` keeps all its
-   control-plane, enrollment, validation, and status logic and its **read-only**
-   Docker access — its `DOCKER_HOST` still points at `docker-socket-proxy`, but
-   that proxy is demoted so the agent can inspect and never mutate. The agent
-   holds **no real Docker socket and no write authority**; it asks the executor
-   to perform writes over a private Unix socket on a shared volume.
-2. **`docker-socket-proxy` demoted to read-only.** It stays for the agent's
-   health/inventory reads (`ps`, `inspect`, `image inspect`, events) but with
-   `POST=0, EXEC=0` — GET-only. A compromised agent can therefore enumerate but
-   never mutate; all write authority lives only in the executor.
+## Architecture
 
 ```
- Control Plane
+ Control Plane, registries, PyPI
      │ outbound only
      ▼
  composer-agent ──── reads ───▶ docker-socket-proxy   (POST=0, EXEC=0)
- (no real socket;                  │ ro (GET only)
-  DOCKER_HOST → RO proxy)          ▼
-     │ typed write request      dockerd
-     │ (private unix socket)       ▲
+ (no docker.sock;                  │ docker.sock:ro
+  DOCKER_HOST → proxy)             ▼
+     │ typed request            dockerd
+     │ (private Unix socket)       ▲
      ▼                             │ docker.sock (rw)
- composer-executor ───────────────┘
- (watches image-update trigger;
-  socket: restart, recovery_deploy;
+ composer-executor ────────────────┘
+ (watches the image-update trigger;
+  serves typed operations;
   re-validates every request)
 ```
 
+| Service | Docker access | Network | Job |
+| --- | --- | --- | --- |
+| `composer-agent` | `DOCKER_HOST: tcp://docker-socket-proxy:2375`, read-only; no socket mount | `egress` and `docker_proxy` | triggers, registry and PyPI checks, staging verified packages, the Operations card, the egress relay, the control plane |
+| `composer-executor` | the only service with `/var/run/docker.sock` read-write | the proxy's network only | image updates, restarts, recreates, start/stop, repairs, package activation |
+| `docker-socket-proxy` | `docker.sock:ro`, GET endpoints only | `docker_proxy` | the agent's reads (`ps`, `inspect`, `image inspect`, events) |
+
+`docker_proxy` is generated `internal: true` when the stack has an `egress`
+network, so the executor has no route out: giving it egress would put the
+host-root-equivalent process on a routed network. Migrated stacks keep the networks
+they already had (see [topology migrations](stack-migrations.md#topology-migrations)).
+
 The executor is the **sole holder of write authority** and the **security
-boundary**. The agent pre-validates for UX; the executor re-validates as the
-authority (defense in depth — never trust the caller).
+boundary**. The agent pre-validates for a useful error; the executor re-validates as
+the authority and never trusts the caller.
 
-### Capabilities: the deployer needs to read project secrets
+The generated block lives in [`agent_installer.py`](../composer/agent_installer.py)
+(`_hardened_stack`).
 
-Both roles run `cap_drop: ALL` with `no-new-privileges:true`. But the deploying
-role runs `docker compose up`, which reads the project's `0600` `.secrets/.env`
-locally to resolve secrets before handing the config to dockerd. `cap_drop: ALL`
-strips `CAP_DAC_OVERRIDE`, so even UID 0 cannot read a file it does not own —
-the deploy then fails the secrets guard with a Permission-denied error, and the
-only workaround is a manual per-host `setfacl`, which defeats unattended inline
-updates. The deploying role therefore carries `cap_add: [DAC_OVERRIDE]`, which is
-part of Docker's default capability set. The project mount is `:ro`, so it grants
-no write there. In the hardened topology that is `composer-executor` only; the
-network-facing `composer-agent` never deploys and keeps no file caps. Regressing
-this (dropping the `cap_add`) breaks every inline deploy — it is asserted in the
-stack tests.
+### Capabilities
 
-Never `DAC_READ_SEARCH`, which stacks generated through 1.5.3 carried. Docker
-leaves it out of the default set because it also unlocks `open_by_handle_at`,
-which can reach any file on the host filesystem behind a bind mount (the
-"Shocker" escape; the default seccomp profile allows the call once the cap is
-granted). `composer check --fix` swaps it for `DAC_OVERRIDE` on every role.
+All three services run `cap_drop: ALL` with `no-new-privileges:true`. The executor
+runs `docker compose up`, which reads the project's `0600` `.secrets/.env` locally to
+resolve secrets before handing the config to dockerd. `cap_drop: ALL` strips
+`CAP_DAC_OVERRIDE`, so even UID 0 cannot read a file it does not own: the deploy
+would fail the secrets guard with a Permission-denied error, and the only workaround
+would be a manual per-host `setfacl`, which defeats unattended inline updates. The
+executor therefore carries `cap_add: [DAC_OVERRIDE]`, which is part of Docker's
+default capability set. The project mount is `:ro`, so it grants no write there. The
+network-facing agent never deploys and keeps no file capabilities. Dropping that
+`cap_add` breaks every inline deploy, and the stack tests assert it.
+
+Never `DAC_READ_SEARCH`, which stacks generated through 1.5.3 carried. Docker leaves
+it out of the default set because it also unlocks `open_by_handle_at`, which can
+reach any file on the host filesystem behind a bind mount (the "Shocker" escape; the
+default seccomp profile allows the call once the cap is granted). `composer check
+--fix` swaps it for `DAC_OVERRIDE` on every role. (The short-lived app-permissions
+walk is a separate container with `--network none`; see
+[app data permissions](app-permissions.md#what-check---fix-grants).)
 
 ### The proxy is read-only and pinned
 
-`docker-socket-proxy` runs with `POST: 0` and `EXEC: 0`: any write endpoint lets
-a client start a privileged container, which is root on the host. `composer
-check` reports a write-enabled proxy as a `docker-proxy` FAIL. Its image is
-pinned by version and digest (`DOCKER_SOCKET_PROXY_IMAGE` in
-`composer/agent_installer.py`), because it mounts `docker.sock`. `composer check
---fix` repins an unpinned tag and switches the write endpoints off in the
-generated block; an image the operator already pinned by digest is kept.
+`docker-socket-proxy` runs with `CONTAINERS`, `IMAGES`, `EVENTS`, `INFO`, `PING` and
+`VERSION` on, and `POST`, `EXEC`, `NETWORKS` and `VOLUMES` off: any write endpoint
+lets a client start a privileged container, which is root on the host. `composer
+check` reports a write-enabled proxy as a `docker-proxy` FAIL. Its image is pinned
+by version and digest (`DOCKER_SOCKET_PROXY_IMAGE` in `agent_installer.py`), because
+it mounts `docker.sock`. `composer check --fix` repins an unpinned tag and switches
+the write endpoints off in the generated block; an image the operator already pinned
+by digest is kept.
 
-`agent enable` no longer produces the agent-only topology: from a legacy
-`composer-updater` block or an existing agent-only block it writes the hardened
-trio directly.
+## What the executor owns
 
----
+The executor reuses Composer's own operation code (`docker_compose_manager`,
+`version_gate`, the restart allowlist) rather than reimplementing it. One lease
+serializes everything it does: a socket request that arrives while another
+operation runs is refused ("Executor is busy with another operation.").
 
-## 3. What the executor owns
+### The trigger-watched image update
 
-The executor is the only process with Docker authority. It owns **two channels**,
-both reusing the existing proven op code (`docker_compose_manager`,
-`version_gate`, the restart allowlist) rather than reimplementing it. A single
-one-operation-in-flight lease serializes across both channels.
+DjangoLux (the inline updater, or the agent bridging a remote `dlux.image_update`)
+writes `state/image-update-request.json` on the runtime volume. The executor
+(`executor run --trigger-file … --interval 2`) runs the `composer update` pipeline
+for each new request: pull → `version_gate` downgrade-reject → recreate → health →
+post-start. The agent performs no updates; it reports status by reading the
+request's ack and `deploy-status.json`.
 
-### A. Trigger-watched image update (relocated, not new)
+### Socket operations
 
-Image updates are already file-triggered: DLUX — the inline updater, or the agent
-bridging a remote `dlux.image_update` — writes `image-update-request.json`, and a
-resident watcher shells the `composer update` pipeline (pull → `version_gate`
-downgrade-reject → recreate → health → post-start). Today that watcher runs
-inside the agent (`WatchRuntime`, honoring `DOCKER_HOST`). This work **moves the
-watcher's Docker-executing loop into the executor**; the trigger contract with
-DLUX is unchanged, only the process holding the socket changes. The agent no
-longer performs updates — it reports status by reading `deploy-status.json`, as it
-already does.
+Every request is a JSON object of at most 64 KiB with exactly `protocol_version`
+(which must be `1`), a UUID `operation_id`, `op` and an object `payload`; each
+operation refuses payload fields it does not list
+([`executor_protocol.py`](../composer/executor_protocol.py), handlers in
+[`executor_ops.py`](../composer/executor_ops.py)).
 
-### B. Typed socket for control-plane-initiated ops
+| `op` | Payload | Executor-side checks | Sent for |
+| --- | --- | --- | --- |
+| `restart` | `service` (empty: the allowlist) | not a protected service; on `COMPOSER_AGENT_RESTART_SERVICES`; an empty service needs a non-empty allowlist | `composer.restart`, the Operations card |
+| `start`, `stop` | `service` | not in `PROTECTED_LIFECYCLE_SERVICES`; on the allowlist; the container's state allows it | the Operations card |
+| `recreate` | `service` | not protected; on the allowlist; the deployment's secrets readable; app data ready ([app permissions](app-permissions.md#before-every-start-of-the-app)) | the Operations card |
+| `recovery_deploy` | `force` (strict boolean), `reason` (non-empty) | runs `composer update` (with `--force` when set) on the deployment's own Compose files; the request names no image or file | `composer.recovery_deploy` |
+| `dlux_package_apply` | `version`, `filename`, `sha256` | the filename must be a `django_lux-…whl` name (so it can never carry a path separator); the digest SHA-256 hex; the staged bytes must hash to it; the manifest inside the wheel must name that version and permit inline install | the agent's package trigger |
+| `dlux_package_rollback` | none | restores the previous release already on the volume | the agent's package trigger |
+| `deployment_check` | `dev` (strict boolean), `file` (a bare `*.yml`/`*.yaml` name in the project) | check and repair preview only; returns redacted, bounded findings | the Operations card's `check` |
+| `check_fix` | `compose_digest` | the files must still hash to the digest the preview returned | the Operations card's `check-fix-apply` |
+| `agent_update` | `token` | starts a detached helper that replaces the resident pair | the Operations card's `agent-update` |
 
-Only operations the agent initiates from a remote command need the socket:
+Protected services: `PROTECTED_RESTART_SERVICES` (`service_selection.py`) covers the
+databases, Redis, backups, `pgadmin`, `dlux-updater`, the Composer services and
+`docker-socket-proxy`; `PROTECTED_LIFECYCLE_SERVICES` adds `web`, `worker`, `celery`, the beat
+services and the proxies, so start/stop can never take down the path the panel needs
+to start them again.
 
-| Socket request | Validated fields | Executor-side re-validation |
-|:--|:--|:--|
-| `restart` | `operation_id`, `service?` | Reject `PROTECTED_RESTART_SERVICES`; require membership in `COMPOSER_AGENT_RESTART_SERVICES`; empty service ⇒ the configured allowlist only. |
-| `recovery_deploy` | `operation_id`, `reason` (non-empty) | Recreate only from the known-good active state; never an arbitrary image/compose. |
-| `dlux_package_apply` | `operation_id`, `version`, `filename`, `sha256` | Filename must match the wheel shape (so it can never carry a path separator); digest must be SHA-256 hex; the staged bytes must hash to it, and the manifest inside the wheel must name that version and permit inline install. |
-| `dlux_package_rollback` | `operation_id` | Restores the previous release already on the volume; takes no payload. |
+### Inline DjangoLux packages: fetched by the agent, swapped by the executor
 
-Each request carries `protocol_version`; the executor rejects an unknown version
-(the fail-safe handshake) and runs one operation at a time.
+An inline release swap needs two capabilities this split deliberately keeps apart:
+**egress** to fetch and verify the wheel, and **Docker authority** to restart and
+health-gate the services running it. The executor has the second and none of the
+first. So the halves each do what they can:
 
-### C. Inline DjangoLux package updates: fetched by the agent, swapped by the executor
-
-An inline release swap needs two capabilities this split deliberately keeps
-apart: **egress** to fetch and verify the wheel, and **Docker authority** to
-restart and health-gate the services running it. The executor has the second and,
-sitting alone on the `internal: true` docker_proxy network, can never have the
-first — giving it egress would put the host-root-equivalent process on a routed
-network, which is the whole thing this design removes.
-
-So the halves each do what they can:
-
-1. The agent owns `package-update-request.json` (the executor's loop ignores it).
-2. On a request the agent resolves the release, verifies PyPI's Trusted Publisher
-   attestation and the SHA-256, and writes the wheel to `downloads/` on the
-   shared runtime volume.
-3. It sends `dlux_package_apply` with the version, filename and digest.
-4. The executor re-hashes the staged bytes, re-reads the manifest inside the
-   wheel, unpacks, activates, restarts, health-gates, and rolls back if the
-   deployment does not come back healthy — without one outbound connection.
-   It holds `state/package-operation.lock` (an `flock` on the runtime volume)
-   throughout, the same lock an operator's `dlux update` or `dlux rollback`
-   takes, so a second operation from either side is refused with nothing
-   changed instead of racing the first. A release that was rolled back stays
-   quarantined in `failed/<version>/`: the agent never offers it as the newest
-   release, and the executor refuses it until an operator retries it with
-   `dlux update --version V --retry-quarantined`.
+1. the agent owns `package-update-request.json` (the executor's loop ignores it);
+2. on a request the agent resolves the release, verifies PyPI's Trusted Publisher
+   attestation and the SHA-256, and writes the wheel to `downloads/` on the shared
+   runtime volume;
+3. it sends `dlux_package_apply` with the version, filename and digest;
+4. the executor re-hashes the staged bytes, re-reads the manifest inside the wheel,
+   unpacks, activates, restarts, health-gates, and rolls back if the deployment does
+   not come back healthy, without one outbound connection.
 
 The digest travels over the socket rather than in a file beside the wheel because
 `worker` and `celery` mount that volume read-write too: a record kept next to the
 bytes is a record a planted wheel's author could write. Bytes may come from the
 volume; what they must hash to may not.
 
-The agent still holds no Docker authority — it stages a file and asks. Exit 3
-("rolled back and still unhealthy") crosses back unchanged, so a caller that
-retries on failure does not retry a deployment that needs a human.
+The agent still holds no Docker authority: it stages a file and asks. Exit 3
+("rolled back and still unhealthy") crosses back unchanged, so a caller that retries
+on failure does not retry a deployment that needs a human. The lock, quarantine and
+backup rules are the same as for an operator's `dlux update`
+([inline DjangoLux updates](updates.md#inline-djangolux-updates)).
 
 ### Not executor operations
 
 - **`dlux.backup.create`** runs a DjangoLux management command inside the DLUX
   container (no Docker authority); the agent bridges it to DLUX unchanged.
 - **`agent.rotate_credentials`** is agent-local (credential store, no Docker).
-- **Fetching a DjangoLux release** needs the network the executor does not have;
-  the agent stages the verified wheel and the executor swaps it (see C).
-- **Reads** — availability via `docker image inspect`, `ps`/`inspect` for health —
-  stay with the agent through the **read-only** `docker-socket-proxy`.
+- **Fetching a DjangoLux release** needs the network the executor does not have; the
+  agent stages the verified wheel and the executor swaps it.
+- **Reads** (availability via `docker image inspect`, `ps`/`inspect` for health) stay
+  with the agent through the read-only proxy.
 
-### Hard rejections (return typed error, never execute)
+### Hard rejections
 
-- Arbitrary Docker requests, raw `compose` args, shell strings, container
-  definitions, mounts, services, images, volumes, networks.
-- Any `exec` (the only exec paths — backups — are DLUX-side, not in the executor).
-- Any image without verified release metadata or an immutable digest (image-update
-  path, enforced by `version_gate`).
-- Any service outside the configured scope/allowlist.
+- Arbitrary Docker requests, raw `compose` arguments, shell strings, container
+  definitions, mounts, images, volumes, networks.
+- Any `exec`: the only exec paths (backups) are DjangoLux-side, not in the executor.
+- Any service outside the allowlist, or a protected one.
+- Unknown operations, payload fields or protocol versions.
 
----
+## The private socket
 
-## 4. Private Unix socket protocol
+- **Transport:** a Unix domain socket, `COMPOSER_EXECUTOR_SOCKET` (default
+  `/run/composer-exec/composer-exec.sock`), on the dedicated `composer_exec_sock`
+  volume mounted into the agent and the executor only. Never TCP, never the runtime
+  volume. The agent uses executor mode whenever that variable is set.
+- **Authorization:** the socket is mode `0660` and binding refuses a symlinked path.
+  Setting `COMPOSER_EXECUTOR_PEER_UID` adds an `SO_PEERCRED` check of the connecting
+  uid where the platform reports it.
+- **Framing:** a 4-byte big-endian length prefix and a JSON body, requests and results
+  each capped at 64 KiB. One request per connection; the executor closes after the
+  result. At most four connections are handled at once.
+- **Versioning:** every request carries `protocol_version`; the executor rejects an
+  unknown or mismatched version with a typed error instead of guessing. A transient
+  agent/executor skew (mid-update, say) therefore fails safe: the agent reports the
+  mismatch rather than handing an operation to an executor that might interpret it
+  differently.
+- **Liveness:** the agent treats an unavailable socket as "executor down" and reports
+  it. There is no direct Docker path for it to fall back to. The client waits up to
+  30 minutes for a result (`COMPOSER_EXECUTOR_TIMEOUT`).
 
-- **Transport:** a Unix domain socket on a dedicated shared volume
-  (`composer_exec_sock`), mounted into agent and executor only. Never TCP, never
-  the runtime bridge dir.
-- **Authorization:** filesystem permissions (`0770`, dedicated uid/gid shared by
-  the two roles) **plus** `SO_PEERCRED` peer-uid check in the executor. Optional
-  shared secret handed to both roles via the same mechanism as existing agent
-  env, as belt-and-suspenders.
-- **Framing:** length-prefixed JSON request → JSON result, both bounded (reuse
-  the existing 64 KiB command limit). One request per connection; the executor
-  closes after the terminal result.
-- **Versioning:** every request carries a `protocol_version`; the executor
-  rejects an unknown or mismatched version with a typed error instead of
-  guessing. A transient agent/executor skew (e.g. mid-update) therefore fails
-  safe — the agent surfaces "executor version mismatch" rather than handing an
-  operation to an executor that might interpret it differently.
-- **Liveness:** the agent treats socket-unavailable as "executor down" and
-  surfaces it as a health/agent-status condition — it must never fall back to a
-  direct Docker path (there is none).
+## The resident pair updates together
 
----
+Composer has two Docker-authority paths, and the split keeps them apart:
 
-## 5. Bridge-file and queue hardening
+- **Operator / deployer path:** `start.sh` → `docker run debeski/composer …` with the
+  host socket. Operator-invoked, transient, not network-facing; it legitimately holds
+  full Docker access. `update`, `agent update`, `agent restart` and `agent off` run
+  here.
+- **Resident path:** the long-lived pair. Only the network-facing half is
+  de-privileged.
 
-Applies to the shared runtime bridge the agent and executor use, and is part of
-this release even where it's not executor-specific:
+No resident service recreates itself through its own authority: `agent update` is
+performed by the transient deployer (or, from the Operations card, by a detached
+helper the executor starts), so the executor is never asked to replace itself.
+`agent update`, `agent restart` and `agent off` act on `composer-agent` and
+`composer-executor` together: they run the same image, which is pulled once, so
+they can never drift to different versions. With the socket's `protocol_version`
+check, a partly applied update fails safe instead of running a new agent against an
+old executor.
 
-- Symlink-safe writes: private unique temp file in the same dir, `O_NOFOLLOW`
-  reads, atomic `rename` replacement.
-- Group write on runtime files is the contract, not a defect: files are 0664 in
-  0775 directories, because a non-root app (uid 10001, group 0) and the agent
-  (uid 0 without capabilities) reach each other's entries only through group 0.
-  World-writable inputs are rejected; group-writable ones are not.
-- Reject following symlinks on read.
-- Size and count caps on every file consumed.
-- Bounded command, event, result, snapshot, and artifact queues (drop-oldest or
-  reject-new with a typed error; never unbounded growth).
+## Bridge files and queues
 
----
+The runtime volume is shared by the app services, the agent and the executor:
 
-## 6. DjangoLux (scaffold) side changes
-
-The `docker-socket-proxy` service, the `docker_proxy` network, and the agent's
-Docker wiring are generated by dlux and asserted by its stack contract, so this
-release is a coordinated **composer + dlux-scaffold** change.
-
-- [`compose.yml.tmpl`](../../pkg-django-lux/dlux/scaffold_templates/project/compose.yml.tmpl):
-  - Add the `composer-executor` service (same image, `executor` command, holds
-    the real `docker.sock` rw, not network-facing).
-  - Keep `composer-agent`'s `DOCKER_HOST` pointing at the (now read-only) proxy
-    for its reads; add `COMPOSER_EXECUTOR_SOCKET` and the shared
-    `composer_exec_sock` volume so it can send typed writes to the executor.
-  - Flip the proxy env to `POST=0, EXEC=0` (and drop `VOLUMES`/`NETWORKS`; keep
-    GET for containers/images/events).
-  - Add the `composer_exec_sock` volume, mounted into agent + executor only.
-- [`stack_contract.json`](../../pkg-django-lux/dlux/stack_contract.json): add
-  `composer-executor` (networks, restart class, read/write volume split so the
-  executor — not the agent — is the docker-authority holder); adjust
-  `docker-socket-proxy` to read-only.
-- [`test_scaffold.py`](../../pkg-django-lux/dlux/tests/test_scaffold.py) network
-  topology tests: assert the agent has no docker path, the executor is the only
-  service on the docker-authority path, and the proxy publishes no write grant.
-- Docs: security/DSRP, inline-updater deployment architecture, reference stack
-  table.
-
-## 7. Composer install/migrate path
-
-- [`agent_installer.py`](../composer/agent_installer.py): emit the executor
-  service + read-only proxy + socket volume; keep the guarded, diff-printed
-  migration UX. Add `composer-executor` to the exclusion/self-management sets
-  alongside `composer-agent`, `docker-socket-proxy`.
-- Migration for live deployments (decrees, dhub, sales-crm, …): an
-  `executor enable` one-cycle forwarder that prints the migration diff from
-  "broad-proxy agent" to "executor + read-only proxy", mirroring how
-  `agent enable` migrated `composer-updater` → `composer-agent`. Carry forward
-  the existing caveat: a stale pre-migration proxy/agent must be reconciled
-  before the first post-migration update.
-- **`executor enable` MUST be wired into `composer check --fix`**, exactly like
-  `agent enable` is today. `check` already detects the legacy-agent topology
-  (`_check_topology`) and hints at the fix; `_maybe_fix` gains an "agent present,
-  no executor" condition that — after the standard consequences/confirm prompt —
-  runs the `executor enable` migration. So an operator never has to know the
-  command name: `composer check --fix` both diagnoses and hardens, and
-  `composer executor enable --apply` remains the direct path. This is a
-  non-optional acceptance criterion for the slice.
-
-### Self-update and version consistency (the resident pair)
-
-Composer already separates two Docker-authority paths, and the split preserves
-that separation rather than adding a new self-recreation problem:
-
-- **Operator / deployer path** — `start.sh` → `docker run debeski/composer …`
-  with the host socket. Operator-invoked, transient, not network-facing;
-  legitimately holds full Docker access. This is how `update`, `agent update`,
-  `agent restart`, and `agent off` already run.
-- **Resident / agent path** — the long-lived, network-facing agent that processes
-  remote Control-Plane commands. This is the only path being de-privileged.
-
-Consequences to design in:
-
-- **No resident service recreates itself.** `agent update` is an operator action
-  performed by the transient deployer, which recreates the resident services — so
-  the executor holding the socket is never asked to replace itself, and no
-  network-facing component needs Docker authority to self-update.
-- **`agent update` must target the resident *pair*.** Today `AGENT_SERVICE` is a
-  single `composer-agent` ([launcher.py](../composer/launcher.py)); with the
-  split, `agent update`, `agent restart`, `agent off`, and `agent check` must act
-  on `composer-agent` **and** `composer-executor` together — pull the shared image
-  once and recreate both, so they can never drift to different versions.
-- **`agent check`** checks one image for the pair (both are `debeski/composer`), so
-  a single availability check still covers both.
-
-Together with the socket `protocol_version` handshake (§4), a partially-applied
-update fails safe instead of running a new agent against an old executor.
-
----
-
-## 8. Rollout and canary
-
-Own release train, deployed before any remote-settings work:
-
-- Composer `v1.3.0` (executor role + agent client + installer/migration).
-- DjangoLux scaffold `v1.6.0` (executor service, read-only proxy, contract, tests).
-
-Deploy order — **Composer first.** A freshly-generated project references the
-`executor` command; if the dlux scaffold shipped first, that project would pull a
-`composer:latest` without the executor and fail to start. So:
-
-1. **Composer `v1.3.0` published first** — `debeski/composer:latest` now has the
-   `executor run` role, so both new stacks and `executor enable` migrations resolve.
-2. DjangoLux scaffold `v1.6.0` published — new generations get the hardened stack.
-3. Existing deployments migrate via `composer check --fix` / `executor enable`
-   (diff-reviewed), then a normal update recreates the agent + executor.
-4. Non-production canary: run image update, `restart`, and `recovery_deploy`
-   end-to-end through the executor; confirm a raw Docker mutation from the agent
-   fails (its proxy is read-only).
-5. Low-risk production canary, then fleet-wide.
-
-Rollback: revert Composer `v1.3.0` (executor withdrawn, agent returns to the prior
-proxy model) independently of dlux; no feature depends on this, so rollback is
-clean.
-
----
-
-## 9. Test plan
-
-Executor:
-
-- Rejects every non-typed request: raw docker/compose args, shell, container
-  defs, mounts, arbitrary images/volumes/networks, non-backup exec.
-- `version_gate` downgrade rejection; scope/exclusion enforcement.
-- Restart allowlist + protected-service rejection.
-- `recovery_deploy` requires a reason and uses only known-good state.
-- Requires verified release metadata or immutable digest.
-- Single in-flight lease; second concurrent request rejected.
-
-Socket & bridge:
-
-- Peer-uid rejection; wrong-perms socket rejection.
-- Symlink/traversal/oversized/queue-exhaustion inputs rejected.
-- Length-prefix bounds; malformed frames rejected.
-
-Agent:
-
-- Its `DOCKER_HOST` proxy is read-only: a mutating Docker call (create/recreate/
-  exec) from the agent is rejected by the proxy; only reads succeed.
-- Holds no real Docker socket; all writes go through the executor.
-- Executor-down surfaces as a health condition, never a direct-Docker fallback.
-
-dlux scaffold:
-
-- Topology tests: agent off the docker-authority path; executor is the only
-  writer; proxy publishes no write grant.
-- Generated stack matches `stack_contract.json`.
-
-End-to-end:
-
-- Old-agent → migrate → executor path for update/restart/recovery/backup.
-- Composer/executor restart mid-operation; durable replay is a no-op.
-- Live `image_update` + rollback with the executor in place.
-
----
-
-## 10. Non-goals
-
-- No remote-settings, snapshot-v2, alerts, or profiles work (separate plan).
-- No change to the Control-Plane protocol beyond what the split requires.
-- No new remote capability — the executor only relocates existing authority.
+- group write on runtime files is the contract, not a defect: files are `0664` in
+  `0775` directories, because a non-root app (uid 10001, group 0) and the agent
+  (uid 0 without capabilities) reach each other's entries only through group 0
+  ([app data permissions](app-permissions.md#composers-own-writes));
+- documents are written to a temporary file in the same directory, flushed and
+  renamed over the target, so a reader never sees half a file;
+- the package-operation lock opens with `O_NOFOLLOW`, refusing a planted symlink;
+- inputs the agent consumes are bounded where it parses them: control-plane commands
+  (64 KiB), relay requests (64 KiB each, at most 64 pending,
+  [egress relay](relay.md#what-the-agent-enforces-on-every-call)), downloaded indexes
+  and wheels, and Operations results (200 findings, 2,000 characters each, 20,000 per
+  diff);
+- the control-plane outbox keeps only the newest pending snapshot; commands and
+  events replay in order from SQLite.

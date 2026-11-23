@@ -20,8 +20,9 @@ Add two repository secrets (Settings → Secrets and variables → Actions):
 | `DOCKERHUB_USERNAME` | Docker Hub namespace that owns the image (`debeski`). |
 | `DOCKERHUB_TOKEN` | Docker Hub **access token** with read/write on `debeski/composer` (Docker Hub → Account Settings → Personal access tokens). |
 
-> The wrapper scripts (`start.sh`, `start.ps1`) pull `debeski/composer:latest`,
-> so the image must stay on Docker Hub under that name for `update self` to work.
+> The wrapper scripts (`start.sh`, `start.ps1`) pull `debeski/composer:latest`
+> (`:beta` on the beta channel), so the image must stay on Docker Hub under that
+> name for `update self` to work.
 
 CI and release actions stay pinned to full commit SHAs. Grouped action updates
 are validated together with the release candidate before publication; the
@@ -39,7 +40,8 @@ changelog records which versions each release moves to.
    new sha256s in `wrappers-history.json` — the test suite prints them on
    failure — and re-copy both files into `dlux/scaffold_templates/project/` in
    the django-lux repo, updating the expected version in its scaffold test.
-   Without the bump, deployments cannot tell a stale wrapper from an edited one.
+   Without the bump, deployments cannot tell a stale wrapper from an edited one
+   ([wrapper versioning](deploying.md#wrapper-versioning)).
 4. Commit both on `main`.
 5. Tag and push:
 
@@ -51,6 +53,8 @@ The `Release` workflow then:
 
 - classifies the tag (`composer/release_tag.py`), verifying the tag equals the manifest's `version` and
   that `CHANGELOG.md` has a matching section,
+- runs the unit tests, then builds an amd64 image and runs `scripts/smoke-test.sh`
+  on it,
 - builds `linux/amd64` + `linux/arm64` with Buildx,
 - pushes `debeski/composer:vX.Y.Z` plus the moving alias the tag earns,
 - publishes the GitHub Release with the real `prerelease`/`make_latest` flags,
@@ -84,13 +88,14 @@ Check a tag before pushing it:
 python -m composer.release_tag v1.4.0b1
 ```
 
-### A new minor or major must be a beta first
+### Every stable release is a beta first
 
-The classifier refuses a stable `vX.Y.0` tag unless a beta or release candidate
-of that exact version is in the tagged commit's history **and** Docker Hub
-serves its image. `v1.4.0` cannot publish until `v1.4.0b1` (or `rc1`) has, and
-a beta tag whose build never pushed does not count. Patch releases (`v1.4.1`)
-are not gated. A registry that cannot be reached refuses the tag.
+The classifier refuses a stable tag unless a beta or release candidate of that
+exact version is in the tagged commit's history **and** Docker Hub serves its
+image (`requires_beta_first()`, `validate_beta_first()`). `v1.4.0` cannot publish
+until `v1.4.0b1` (or `rc1`) has, and a beta tag whose build never pushed does not
+count. Patch releases are gated the same way: `v1.4.1` needs a published
+`v1.4.1bN`. A registry that cannot be reached refuses the tag.
 
 This proves a beta was *published*, not that it passed acceptance.
 
@@ -104,8 +109,9 @@ refuse the exact Composer the pair was tested against — which may not exist ye
 ## CI
 
 `.github/workflows/ci.yml` runs on every push/PR to `main`: byte-compiles the
-`composer` package, smoke-tests the CLI, and builds the Docker image (no push) to
-catch `Dockerfile` breakage before a release.
+`composer` package, runs the unit tests (`python -m unittest discover -s tests`),
+smoke-tests the CLI, builds the Docker image (no push) to catch `Dockerfile`
+breakage before a release, and runs `scripts/smoke-test.sh` against that image.
 
 ## Versioning note
 

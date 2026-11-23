@@ -1,0 +1,193 @@
+# Deploying
+
+How `./start.sh` brings a stack up: the wrappers, secrets, post-start tasks, the
+status Composer publishes while it works, and how a run behaves. The commands and
+their flags are in the [commands reference](commands.md); updates are in
+[updates and channels](updates.md).
+
+## Wrappers
+
+Put `start.sh` or `start.ps1` in your project root. The DLUX scaffold writes them
+once; Composer owns them from then on and `check --fix` keeps them current.
+
+Every line in them is Composer's own invocation contract: the self image, `-i`/`-t`,
+the `--env-file` secrets handoff, the `update self` route and the deployer refresh
+before `update`. Composer is the only component still running in a project after
+it is created: the DLUX scaffold writes the wrappers once and then refuses to
+overwrite them. DLUX's `scaffold_templates/project/` copies are mirrors of the files
+here, not the source. The wrappers also read the persisted `.composer-channel` file
+before any Composer code runs (see [channels](updates.md#channels)).
+
+### Wrapper versioning
+
+Both carry a marker (line 2 of `start.sh`, after the shebang; line 1 of
+`start.ps1`):
+
+```bash
+# composer-wrapper: 6
+```
+
+It is a plain integer, bumped only when the wrapper bytes change, deliberately
+**not** Composer's release version. Composer ships far more often than the wrapper
+does, and a marker that tracked it would report every project stale after every
+release until nobody read the warning.
+
+`composer check` compares the project's wrappers against the copies baked into
+`/app/wrappers/` in the image it is running, so verification needs no registry and
+works air-gapped. `wrappers-history.json` records the sha256 of every published
+version, which is what separates *old but pristine* from *edited locally*:
+
+| Reported | Meaning |
+| --- | --- |
+| `is at wrapper version N` | matches the image byte for byte |
+| `is wrapper version N, this composer ships M` | stale; `check --fix` updates it |
+| `predates wrapper versioning` | older than the marker itself; `check --fix` updates it |
+| `contents do not match what that version shipped` | local edits: diff before replacing |
+| `newer than the M this composer ships` | the **image** is behind; run `update self`, not `--fix` |
+
+`check --fix` archives the current file under `.xclude/composer-check/<stamp>/` and
+then swaps it via `os.replace`, so a `start.sh` that is executing the very check
+that replaces it keeps reading the file it was launched from.
+
+```bash
+./start.sh check          # report drift
+./start.sh check --fix    # update, archiving the old copy first
+```
+
+Publishing a new wrapper version is a release step: see
+[releasing](RELEASING.md#cutting-a-release).
+
+## Secrets
+
+Composer resolves secrets automatically. It looks for a plaintext env file
+(`.env`, `secrets/.env`, then `.secrets/.env`) and uses the first one that supplies
+every variable the compose file requires.
+
+### The resident pair keeps the values
+
+A resident `composer-agent` must retain the same values for later image-update
+runs. The `start.sh`/`start.ps1` wrappers pass the selected file to the one-shot
+Composer container with Docker's `--env-file`; when Composer creates or recreates
+`composer-agent`, its private mode-`0600` runtime override forwards those values
+and a key manifest only to that service. The agent and its update children then use
+the inherited environment instead of reopening the host bind-mounted file. Host
+mode-`0600` secrets therefore need no ACL or capability exception.
+
+### When the executor cannot read the file
+
+The terminal launcher and the deployment executor can map to different host UIDs,
+especially with Docker user-namespace remapping. A readable file in your shell
+therefore does not establish that the executor can read it. Operations deployment
+checks run in the executor's identity, so `./start.sh check` verifies executor
+access too, and a readable host-side file cannot conceal a resident-only permission
+failure. The network-facing agent does not need secrets access.
+
+An unreadable file prevents the executor from validating deployment configuration
+and can block recreates/updates that need those values. The finding identifies the
+affected host UID and prints specific `sudo setfacl` commands for the Linux VM:
+
+1. run those commands in the VM project directory. sudo asks for the VM account
+   password locally, never in DjangoLux;
+2. install the host's `acl` package if needed;
+3. rerun `./start.sh check`.
+
+Keep the file restricted; do not make it world-readable or give the network-facing
+agent access to silence a warning.
+
+### First deploy without importing `config.json`
+
+`./start.sh --skip-config` leaves DjangoLux's initial setup wizard available even
+when the image contains `config.json`: see
+[manual first-deploy setup](first-deploy.md).
+
+## Post-start tasks
+
+A service opts into a post-start task with an `org.dlux.post-start` label naming
+the command:
+
+```yaml
+  web:
+    labels:
+      org.dlux.post-start: "python -m dlux.updater.supervisor --no-watch -- python manage.py migrator"
+```
+
+Composer runs it once, after the stack is healthy, appending whichever flags the
+run was given. A label is used rather than Compose's native `post_start` hook
+because Compose runs that hook itself, on container start, without Composer's
+flags, which meant two migrators running at the same time.
+
+- Deployments still carrying a native `post_start` block keep working (Composer
+  execs it and says so); `composer check --fix` folds it into the label.
+- Existing DLUX updater stacks missing both declarations use a narrowly gated
+  compatibility migrator instead of silently doing nothing, and `check --fix`
+  installs the missing label.
+- Post-start execution is non-interactive (`compose exec -T`), and a failed or
+  unhealthy hook fails the Composer run rather than ending with a false
+  "Environment ready."
+
+### The migrator contract
+
+When the command is DjangoLux's `migrator`, `-a APP`, `-mm`, and `-nm` are
+forwarded and mean:
+
+| flags | makemigrations | migrate | collectstatic |
+| --- | --- | --- | --- |
+| *(none)* | only apps with no `migrations/0001_*.py` | yes | yes |
+| `-mm` | **all** target apps, forced | yes | yes |
+| `-nm` | no | no | **yes** |
+
+`-mm` and `-nm` are mutually exclusive. `-a APP` scopes which apps are considered;
+without it the migrator auto-discovers local apps. `-mm` writes migrations into the
+container filesystem, so they are lost on recreate unless the app source is
+bind-mounted: it is a development affordance. `composer migrate` runs the same
+migrator on demand ([commands](commands.md#migrate)).
+
+## Deploy status
+
+Pass `--status-file PATH` (or set `COMPOSER_STATUS_FILE`) and Composer writes an
+atomic JSON document as it works, so another process (a Django admin panel, a
+dashboard) can watch a deploy:
+
+```json
+{ "status": "migrating", "updated_at": "2026-07-04T08:31:38+00:00",
+  "composer_version": "1.3.1", "compose_files": ["compose.yml"],
+  "target_images": ["debeski/app:latest"], "target_version": "1.2.10",
+  "active_version": "1.2.9" }
+```
+
+States: `starting` → `pulling` → `recreating` → `migrating` → `ready`, or `failed`
+(with an `error`). `pull` reports `starting` → `pulling` → `pulled`. The restart flow
+reports `restarting`/`ready`/`failed`. Nothing is written unless configured.
+
+### Console log
+
+With `--status-file` (or `--log-file PATH`), each update run also writes a clean,
+ANSI-free console log (`deploy-log.txt` beside the status file, fresh per run).
+Together with the deploy status, a proxy can render a live progress page and console
+while the app is being recreated and unreachable.
+
+## How a run behaves
+
+- **Version**: every service gets `COMPOSER_VERSION`.
+- **Runtime override**: the generated Compose override is a private system-temp
+  file, not a project-root file, so Composer supports host-owned and read-only
+  project mounts without extra Linux capabilities.
+- **Service exclusions**: `COMPOSER_EXCLUDE_SERVICES` is a comma/space-separated
+  service list omitted from generated runtime overrides, bulk pulls, bulk `up -d`,
+  health checks, and diagnostics. Explicit `update SERVICE`, `pull SERVICE`, and
+  `-u SERVICE` still target the named service.
+- **Progress**: progress stays on one status line. Image pulls (`update self`,
+  `update`/`-u`, and any `up` that has to fetch an image) draw an aggregated bar,
+  `web ████████░░░░ 62% · 2/4 layers (2 cached) · 144MB/240MB`, built from the
+  per-layer phases Docker reports. It names every image still in flight and drops
+  each one as Compose reports it pulled, because Compose interleaves layers without
+  saying which service they belong to; `(n cached)` counts the layers already on the
+  host, so a full re-download is visible as `0 cached`. Progress only moves forward
+  and reaches 100% when the pull actually reports it. Non-pull output keeps the plain
+  status line, and a detached run logs coarse summaries instead of redrawing.
+- **Service circles**: ⚪ not seen · 🔵 updating · 🟡 starting · 🟢 healthy ·
+  🔴 failed. A service stops showing 🟢 the moment its pull/recreate/restart starts
+  (the health it last reported belongs to the container being replaced) and health
+  monitoring resolves it back.
+- **Closing the terminal** does not stop a deploy, and destructive flags ask first:
+  see [commands](commands.md#closing-the-terminal).
