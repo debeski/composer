@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -30,8 +31,11 @@ class VersionGateMixin:
 
     The gate is opt-in and generic: with no active-version source configured it
     is disabled and always passes. Once configured it fails closed: a target
-    without a readable version label is refused too, since it may be a
-    downgrade. ``--force`` is the deliberate override for both refusals.
+    without a readable version label, or an active version it cannot establish,
+    is refused too, since either may hide a downgrade. With no active-version
+    file the active version is the running app image's label (what DjangoLux
+    runs then); only a stack with no app container at all passes without one.
+    ``--force`` is the deliberate override for every refusal.
     """
 
     def gate_enabled(self) -> bool:
@@ -75,6 +79,35 @@ class VersionGateMixin:
             value = value[part]
         version = str(value).strip()
         return version or None
+
+    def active_version_file_present(self) -> bool:
+        path = getattr(self, "active_version_file", None)
+        return bool(path) and os.path.lexists(path)
+
+    def running_image_version(self) -> Optional[str]:
+        """The version label of the image the app container runs right now.
+
+        DjangoLux reads a missing ``active.json`` as "running the release baked
+        into the current image", so that label is the active version then. The
+        gate runs after the pull and before the recreate, and a container keeps
+        the image id it was created from, so a tag the pull just moved does not
+        change the answer. None when no container exists yet.
+        """
+        service = getattr(self, "runtime_gate_service", None) or DEFAULT_RUNTIME_GATE_SERVICE
+        ok, out, _ = self.run_docker_compose(["ps", "--all", "-q", service], timeout=15)
+        containers = [line.strip() for line in (out or "").splitlines() if line.strip()] if ok else []
+        # A failed `ps` is not "nothing deployed": only a clean, empty answer is.
+        self._gate_no_app_container = ok and not containers
+        if not containers:
+            return None
+        ok, out, _ = self.run_command(
+            ["docker", "inspect", "--format", "{{.Image}}", containers[0]], timeout=15
+        )
+        image_id = (out or "").strip() if ok else ""
+        return self.image_label_version(image_id) if image_id else None
+
+    def _has_app_container(self) -> bool:
+        return not getattr(self, "_gate_no_app_container", False)
 
     def compose_config_images(self) -> List[str]:
         """Resolved image refs for the services in scope for this update."""
@@ -162,6 +195,10 @@ class VersionGateMixin:
             return True, ""
 
         active_raw = self.read_active_version()
+        active_from = "file"
+        if active_raw is None and not self.active_version_file_present():
+            active_raw = self.running_image_version()
+            active_from = "running image"
         self.gate_active_version = active_raw
         active = self.parse_version(active_raw)
 
@@ -197,9 +234,25 @@ class VersionGateMixin:
         self.gate_target_version = lowest[1]
 
         if active is None:
-            return True, (
-                "Version gate: could not read an active version to compare against; "
-                "proceeding without a version check."
+            if active_from == "running image" and active_raw is None and not self._has_app_container():
+                return True, (
+                    "Version gate: nothing is deployed yet (no active.json and no app "
+                    "container), so there is no version to downgrade."
+                )
+            if getattr(self, "force", False):
+                return True, (
+                    "Version gate: could not read the active version, but --force was "
+                    "given — proceeding without a version check."
+                )
+            where = (
+                f"{getattr(self, 'active_version_file', '')} is unreadable"
+                if active_from == "file"
+                else "there is no active.json and the running app image has no readable version label"
+            )
+            return False, (
+                f"Version gate: {where}, so Composer cannot tell whether "
+                f"{lowest[1]} ('{lowest[2]}') is a downgrade.\n"
+                f"   Re-run with --force to update without the version check."
             )
 
         if self._version_lt(lowest[0], active):
@@ -220,9 +273,10 @@ class VersionGateMixin:
                     f"release — proceeding."
                     + (f"\n   {detail}" if detail else "")
                 )
+            of = " (from the running app image)" if active_from == "running image" else ""
             message = (
                 f"Version gate: target image '{lowest[2]}' is version {lowest[1]}, "
-                f"OLDER than the active deployment version {active_raw}. Recreating "
+                f"OLDER than the active deployment version {active_raw}{of}. Recreating "
                 f"onto it risks running old code against a forward-migrated schema.\n"
                 f"   Re-run with --force to override."
             )
