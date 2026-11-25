@@ -212,15 +212,20 @@ pre-`up` refusal is the only defence there.
 ### Health check
 
 After `up`, every monitored service must reach healthy (running, and `healthy` when
-it has a healthcheck) and then **stay** healthy for a settle window, 20 s by default
-(`COMPOSER_HEALTH_SETTLE_SECONDS`, `0` turns the window off). The run fails, naming
-the service and its last log lines, when:
+it has a healthcheck) and its newest container must have been up for the settle
+window, 10 s by default (`COMPOSER_HEALTH_SETTLE_SECONDS`, `0` turns the window off).
+The window is measured from each container's own Docker `StartedAt`, so a container
+that has already been up that long when the last service turns healthy (usually
+`web`, after its migrations) adds no wait, and one that just started is watched
+until it reaches the window. When the start time cannot be read, or lies ahead of
+Composer's clock, the window runs from the first poll that found the service
+healthy. The run fails, naming the service and its last log lines, when:
 
 - a container restarts at any point from the first health poll on (a higher
   `RestartCount`, a new start time, or a poll that finds it `restarting`): a
   crash-looping service without a healthcheck reads as running between crashes, so
   one healthy poll is not proof;
-- a service that was healthy leaves that state before the window ends;
+- a service that was healthy leaves that state before every service has passed;
 - not every service is healthy within 180 s of the last state change.
 
 `restart` and inline DjangoLux updates (`dlux update`, `dlux rollback`) use the same check.

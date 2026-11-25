@@ -144,6 +144,68 @@ class HealthSettleWindowTests(HealthHarness, unittest.TestCase):
             self.assertTrue(self.launcher.monitor_health()[0])
         self.assertLess(self.clock.now - started, 1)
 
+    def _iso(self, seconds_ago):
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.clock.now - seconds_ago, timezone.utc)
+        return stamp.strftime("%Y-%m-%dT%H:%M:%S.%f") + "123Z"
+
+    def test_containers_up_longer_than_the_window_add_no_wait(self):
+        # The usual case: web turns healthy last, after migrations, and every
+        # container has long been up by then.
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, [f"aaa 0 {self._iso(45)}\nccc 0 {self._iso(60)}\n"])
+        started = self.clock.now
+        ok, detail = self.launcher.monitor_health()
+        self.assertTrue(ok, detail)
+        self.assertLess(self.clock.now - started, 1)
+
+    def test_a_container_that_just_started_waits_until_it_reaches_the_window(self):
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, [f"aaa 0 {self._iso(60)}\nccc 0 {self._iso(3)}\n"])
+        started = self.clock.now
+        ok, detail = self.launcher.monitor_health()
+        self.assertTrue(ok, detail)
+        self.assertGreaterEqual(self.clock.now - started, 17)
+        self.assertLess(self.clock.now - started, 18)
+        self.assertIn("All services healthy; watching celery until up 20s", self.statuses)
+
+    def test_a_container_that_restarts_inside_the_window_fails(self):
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        first, again = self._iso(2), self._iso(0)
+        self.script(polls, [
+            f"aaa 0 {self._iso(60)}\nccc 0 {first}\n",
+            f"aaa 0 {self._iso(60)}\nccc 0 {first}\n",
+            f"aaa 0 {self._iso(60)}\nccc 1 {again}\n",
+        ])
+        ok, detail = self.launcher.monitor_health()
+        self.assertFalse(ok)
+        self.assertIn("celery restarted once", detail)
+        self.assertIn("No module named 'celery'", detail)
+
+    def test_a_start_time_ahead_of_our_clock_is_measured_from_the_first_healthy_poll(self):
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, [f"aaa 0 {self._iso(-300)}\nccc 0 {self._iso(60)}\n"])
+        started = self.clock.now
+        self.assertTrue(self.launcher.monitor_health()[0])
+        self.assertGreaterEqual(self.clock.now - started, 20)
+        self.assertLess(self.clock.now - started, 21)
+
+    def test_the_default_window_is_ten_seconds(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(health_monitor.SETTLE_ENV, None)
+            self.assertEqual(health_monitor.settle_seconds(), 10.0)
+        with patch.dict(os.environ, {health_monitor.SETTLE_ENV: "nonsense"}):
+            self.assertEqual(health_monitor.settle_seconds(), 10.0)
+        with patch.dict(os.environ, {health_monitor.SETTLE_ENV: "45"}):
+            self.assertEqual(health_monitor.settle_seconds(), 45.0)
+
+    def test_docker_start_times_parse_with_nanoseconds(self):
+        self.assertEqual(health_monitor.started_epoch("1970-01-01T00:16:40.123456789Z"), 1000.123456)
+        self.assertEqual(health_monitor.started_epoch("1970-01-01T02:16:40+02:00"), 1000.0)
+        self.assertIsNone(health_monitor.started_epoch("0001-01-01T00:00:00Z"))
+        self.assertIsNone(health_monitor.started_epoch("t0"))
+
     def test_restart_markers_map_containers_back_to_services(self):
         self.launcher.service_container_ids = {"web": ["aaa"], "celery": ["ccc"]}
         self.launcher.run_command = lambda argv, timeout=None, env=None: (
