@@ -188,12 +188,19 @@ then reads wrongly. The guard is always on; it does not need the opt-in
   either side does not label is not compared; an image with neither label is refused
   when the recorded release had them, since nothing shows it is not older.
 - **What it is compared with**: the labels of the app containers that exist now
-  (they ran the migrator, even if they then failed their health check), and
-  `.xclude/composer-deploy/deployed.json`, which Composer raises after every `up` so
-  the floor survives a `down`. When the file cannot be written (the deploying user,
-  for an agent-driven deploy the resident pair, has no write access to the deploy
-  root's `.xclude/`), the run says so as a [deploy-status](#deploy-status) warning:
-  the guard then relies on container labels alone, which a `down` removes.
+  (they ran the migrator, even if they then failed their health check), and the
+  deploy record, which Composer raises after every `up` so the floor survives a
+  `down`. The record is kept twice, and the newer copy counts:
+  - `.xclude/composer-deploy/deployed.json` in the deploy root;
+  - `state/composer-deployed.json` on the DjangoLux runtime volume, written in a
+    throwaway Composer container (`--pull never`, `--network none`), so a deploy
+    root Composer cannot write still keeps a record. `down -v` removes it, together
+    with the database it protects.
+
+  When neither copy can be written, the run says so as a
+  [deploy-status](#deploy-status) warning: the guard then relies on container labels
+  alone, which a `down` removes. When only the deploy-root copy fails, the console
+  log notes it.
 - **Refused**: the run stops before anything is recreated and names each older
   version. To go back on purpose, restore a database backup taken before the newer
   release, then deploy with `--force`; a forced deploy becomes the new record.
@@ -236,6 +243,15 @@ healthy. The run fails, naming the service and its last log lines, when:
   one healthy poll is not proof;
 - a service that was healthy leaves that state before every service has passed;
 - not every service is healthy within 180 s of the last state change.
+
+The failure also names the likely cause when the service's last log lines or exit
+code show one: a Python module missing from the image (a service left over from an
+older release, such as `celery` after Decrees 2.2), another CPU architecture, a
+missing command, a port already in use, an unreachable database or Redis, a schema
+that does not match the code, incomplete settings, a permission problem, or exit 137
+(out of memory). It ends with the next steps: `./start.sh logs SERVICE`, and adding
+`COMPOSER_EXCLUDE_SERVICES=SERVICE` to the secrets file to deploy without it while it
+is fixed. A failed `up` and a failed `restart` carry the same diagnosis.
 
 `restart` and inline DjangoLux updates (`dlux update`, `dlux rollback`) use the same check.
 
