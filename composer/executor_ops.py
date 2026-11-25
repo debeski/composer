@@ -252,7 +252,8 @@ def _run_agent_update(operation_id: str, payload: Dict) -> Tuple[int, str]:
     Returns as soon as the helper is running: this process is one of the two
     containers it is about to recreate, so waiting for it would mean waiting to
     be killed. `--volumes-from` gives the helper this container's mounts (the
-    project and the runtime volume) without widening anything.
+    project and the runtime volume); the project is then mounted read-write over
+    it, as for `check --fix`, so the pin can be written.
     """
     import socket
 
@@ -261,6 +262,9 @@ def _run_agent_update(operation_id: str, payload: Dict) -> Tuple[int, str]:
     ok, out, err = _capture([
         "docker", "run", "-d", "--rm",
         "--volumes-from", socket.gethostname(),
+        # Over the inherited read-only project mount: `agent update` writes the
+        # verified pin into .composer-image and the generated block.
+        "-v", f"{os.getcwd()}:{os.getcwd()}:rw",
         "-v", "/var/run/docker.sock:/var/run/docker.sock",
         "-w", os.getcwd(),
         "-e", f"OPS_TOKEN={payload['token']}",

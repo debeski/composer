@@ -6,8 +6,16 @@ name: Release
 # Pipeline:
 #   classify       -> parse the tag; decide channel/aliases once, for every job
 #   build-push     -> multi-arch (amd64+arm64) build, push debeski/composer:<ver>
-#                     plus the moving alias the tag is entitled to
-#   github-release -> create the GitHub Release from the matching CHANGELOG section
+#                     only (immutable), and hand its index digest on
+#   sign           -> write composer-image.json (version, tag, digest) and sign
+#                     it keylessly with Sigstore as this workflow on this tag
+#   github-release -> create the GitHub Release from the matching CHANGELOG
+#                     section, with the statement and its bundle attached
+#   aliases        -> only now move :latest / :beta onto that digest
+#
+# Deployments pin Composer to a digest that this workflow signed
+# (composer/image_pin.py, docs/updates.md#the-composer-pin). The moving aliases go
+# last, so a channel tag never points at a release whose statement is missing.
 #
 # The tag chooses the channel. `v1.4.0b1` pushes :v1.4.0b1 and :beta and marks
 # the GitHub release a prerelease that is NOT "latest"; `v1.4.0` pushes :v1.4.0
@@ -38,6 +46,7 @@ jobs:
       prerelease: ${{ steps.tag.outputs.prerelease }}
       make_latest: ${{ steps.tag.outputs.make_latest }}
       advance_beta: ${{ steps.tag.outputs.advance_beta }}
+      tag: ${{ github.ref_name }}
     steps:
       # Full history with tags: the beta-first gate asks which prerelease tags
       # of this version are reachable from the commit being released.
@@ -87,6 +96,8 @@ jobs:
   build-push:
     needs: classify
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       # Tags and full history: the unit tests shell out to the real
       # `composer.release_tag`, whose beta-first gate reads this repository's
@@ -132,27 +143,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # The immutable version tag is always pushed. The moving aliases are
-      # computed, never hardcoded: a prerelease takes :beta and must not touch
-      # :latest, and a stable takes :latest plus :beta when it is newer than
-      # whatever :beta already holds.
-      - name: Resolve the image tags this release publishes
-        id: tags
-        run: |
-          {
-            echo 'list<<EOF'
-            echo "${{ env.IMAGE }}:${{ github.ref_name }}"
-            if [ "${{ needs.classify.outputs.prerelease }}" = "true" ]; then
-              echo "${{ env.IMAGE }}:beta"
-            else
-              echo "${{ env.IMAGE }}:latest"
-              if [ "${{ needs.classify.outputs.advance_beta }}" = "true" ]; then
-                echo "${{ env.IMAGE }}:beta"
-              fi
-            fi
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
-
       # The manifest travels as a label so DjangoLux can show what a Composer
       # update brings without pulling the image: base64 of compact JSON, the
       # same encoding as a project's org.dlux.project.release-manifest.
@@ -161,13 +151,16 @@ jobs:
         run: |
           python3 -c 'import base64, json; m = json.load(open("release-manifest.json")); print("label=base64:" + base64.urlsafe_b64encode(json.dumps(m, separators=(",", ":"), ensure_ascii=True).encode()).decode())' >> "$GITHUB_OUTPUT"
 
+      # Only the immutable version tag here. The moving aliases follow in the
+      # `aliases` job, after the signed statement is on the GitHub Release.
       - name: Build and push (amd64 + arm64)
+        id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.tags.outputs.list }}
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
           build-args: |
             COMPOSER_RELEASE_MANIFEST=${{ steps.manifest.outputs.label }}
           labels: |
@@ -175,13 +168,81 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  github-release:
+  # The statement names exactly what build-push pushed; the bundle is Sigstore's
+  # keyless signature over it, whose certificate names this workflow on this
+  # tag. Deployments verify both before they pin (composer/image_pin.py).
+  sign:
     needs: [classify, build-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # GitHub OIDC token for Sigstore's keyless signing
+    steps:
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install Sigstore
+        run: python -m pip install "sigstore==4.6.0"
+
+      - name: Write the digest statement
+        env:
+          VERSION: ${{ needs.classify.outputs.version }}
+          TAG: ${{ needs.classify.outputs.tag }}
+          DIGEST: ${{ needs.build-push.outputs.digest }}
+          PRERELEASE: ${{ needs.classify.outputs.prerelease }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+          digest = os.environ["DIGEST"]
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+              sys.exit(f"build-push produced no index digest ({digest!r}).")
+          statement = {
+              "schema": 1,
+              "image": "debeski/composer",
+              "version": os.environ["VERSION"],
+              "tag": os.environ["TAG"],
+              "digest": digest,
+              "prerelease": os.environ["PRERELEASE"] == "true",
+          }
+          with open("composer-image.json", "w", encoding="utf-8") as handle:
+              json.dump(statement, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+          cat composer-image.json
+
+      - name: Sign the statement
+        run: python -m sigstore sign --bundle composer-image.json.sigstore.json composer-image.json
+
+      # Exactly what a deployment runs, so a statement that would be refused in
+      # the field is never published.
+      - name: Verify the signature as a deployment will
+        run: |
+          python -m sigstore verify identity \
+            --bundle composer-image.json.sigstore.json \
+            --cert-identity "https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            composer-image.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: composer-image-statement
+          path: |
+            composer-image.json
+            composer-image.json.sigstore.json
+          if-no-files-found: error
+
+  github-release:
+    needs: [classify, build-push, sign]
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the GitHub Release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: composer-image-statement
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -210,3 +271,38 @@ jobs:
           body_path: RELEASE_NOTES.md
           prerelease: ${{ needs.classify.outputs.prerelease }}
           make_latest: ${{ needs.classify.outputs.make_latest }}
+          fail_on_unmatched_files: true
+          files: |
+            composer-image.json
+            composer-image.json.sigstore.json
+
+  # The moving aliases, computed, never hardcoded: a prerelease takes :beta and
+  # must not touch :latest, and a stable takes :latest plus :beta when it is
+  # newer than whatever :beta already holds. They point at the signed digest,
+  # by digest, so what the aliases serve is exactly what the statement names.
+  aliases:
+    needs: [classify, build-push, github-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Move the channel aliases onto the signed digest
+        env:
+          SOURCE: ${{ env.IMAGE }}:${{ github.ref_name }}@${{ needs.build-push.outputs.digest }}
+        run: |
+          tags=()
+          if [ "${{ needs.classify.outputs.prerelease }}" = "true" ]; then
+            tags+=(-t "${{ env.IMAGE }}:beta")
+          else
+            tags+=(-t "${{ env.IMAGE }}:latest")
+            if [ "${{ needs.classify.outputs.advance_beta }}" = "true" ]; then
+              tags+=(-t "${{ env.IMAGE }}:beta")
+            fi
+          fi
+          docker buildx imagetools create "${tags[@]}" "${SOURCE}"

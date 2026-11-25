@@ -1585,7 +1585,7 @@ def run_enable_executor(args) -> int:
 #: and rewriting the whole block would drag unrelated drift (networks, the web
 #: image, the version label) into an operation the operator asked nothing of.
 _COMPOSER_IMAGE_LINE = re.compile(
-    r"^(?P<indent>\s*)image:\s*debeski/composer:(?P<tag>[A-Za-z0-9._-]+)\s*$",
+    r"^(?P<indent>\s*)image:\s*(?P<ref>debeski/composer:[A-Za-z0-9._-]+(?:@sha256:[0-9a-f]{64})?)\s*$",
     re.MULTILINE,
 )
 
@@ -1595,15 +1595,12 @@ CHANNEL_SWITCH_SERVICES = ("composer-agent", "composer-executor")
 
 
 def composer_images_in_block(contents: str) -> list:
-    """The `debeski/composer:<tag>` images the generated block declares."""
+    """The `debeski/composer:<tag>[@sha256:…]` images the generated block declares."""
     if COMPOSER_AGENT_START not in contents or COMPOSER_AGENT_END not in contents:
         return []
     start = contents.index(COMPOSER_AGENT_START)
     end = contents.index(COMPOSER_AGENT_END, start)
-    return [
-        f"debeski/composer:{match.group('tag')}"
-        for match in _COMPOSER_IMAGE_LINE.finditer(contents[start:end])
-    ]
+    return [match.group("ref") for match in _COMPOSER_IMAGE_LINE.finditer(contents[start:end])]
 
 
 def retag_composer_image(contents: str, image: str) -> str:
@@ -1634,6 +1631,7 @@ def switch_composer_channel(
     allow_unverified_dlux: bool = False,
     include_diff: bool = False,
     command_runner=subprocess.run,
+    pin=None,
 ) -> Dict[str, Any]:
     """The one channel-switch operation. Flags, repair and self-update use this.
 
@@ -1650,7 +1648,9 @@ def switch_composer_channel(
     from . import channel_config
 
     channel = channel_config.normalize_channel(channel)
-    image = channel_config.image_for_channel(channel)
+    # A verified pin (``image_pin.resolve``) replaces the moving tag; the lock is
+    # written with the channel so the wrapper follows the same image.
+    image = pin.ref if pin is not None else channel_config.image_for_channel(channel)
     result = _apply_stack_migration(
         project_dir,
         compose_file=compose_file,
@@ -1669,6 +1669,64 @@ def switch_composer_channel(
     if not apply:
         return result
     # After the Compose write, so a validation failure above has already raised.
+    if pin is not None:
+        from . import image_pin
+
+        result["lock_file"] = str(image_pin.write_lock(pin, project_dir))
     path = channel_config.write_channel(channel, project_dir)
     result["channel_file"] = str(path)
+    return result
+
+
+def pin_composer_image(
+    project_dir: str = ".",
+    *,
+    pin,
+    compose_file: str = "",
+    apply: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    """Point the resident pair at ``pin`` and record it in ``.composer-image``.
+
+    The one place a pin is applied: `update self`, `agent update` and
+    `check --fix` all come here. The Compose edit goes first and validates, and
+    the lock follows it, so the wrapper never runs an image the stack refused. A
+    project without a generated block (a deploying machine, a legacy updater
+    stack) only gets the lock. It is a retag inside the block, never a topology
+    change, so the DjangoLux bridge readiness gate does not apply.
+    """
+    from . import image_pin
+
+    try:
+        project_root, _selected, compose_path = _selected_compose_path(project_dir, compose_file)
+    except AgentInstallError:
+        project_root, declared = Path(project_dir).resolve(), []
+    else:
+        declared = composer_images_in_block(compose_path.read_text(encoding="utf-8"))
+    if declared:
+        result = _apply_stack_migration(
+            project_dir,
+            compose_file=compose_file,
+            transform=lambda contents, _slug: retag_composer_image(contents, pin.ref),
+            redeploy_command=(
+                "docker compose up -d --force-recreate " + " ".join(CHANNEL_SWITCH_SERVICES)
+            ),
+            apply=apply,
+            allow_unverified_dlux=True,
+            include_diff=include_diff,
+            command_runner=command_runner,
+        )
+    else:
+        result = {"applied": False, "files": [], "command": "", "backup_root": "", "warnings": []}
+    current = image_pin.read_lock(project_root)
+    lock_changed = current is None or current.ref != pin.ref
+    result["image"] = pin.ref
+    result["lock_file"] = ""
+    result["lock_changed"] = lock_changed
+    if not apply:
+        return result
+    if lock_changed:
+        result["lock_file"] = str(image_pin.write_lock(pin, project_root))
+    result["applied"] = True
     return result

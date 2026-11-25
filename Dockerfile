@@ -37,9 +37,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `cryptography` is what the egress relay's sealed secrets use (composer/relay.py).
 # It arrives today as a dependency of pypi-attestations, but this image relies on
 # it directly, so it is named here rather than left to a transitive install.
+# `sigstore` verifies the signed digest statement every Composer update pins
+# (composer/image_pin.py). It also arrives through pypi-attestations, in the
+# same range that package requires, and is named for the same reason.
 # pip goes afterwards: Composer never calls it, and image scanners flag the
 # packages it vendors.
-RUN pip install --no-cache-dir "pypi-attestations>=0.0.29" "packaging>=23.2" "cryptography>=42" && \
+RUN pip install --no-cache-dir "pypi-attestations>=0.0.29" "sigstore>=4.6,<5" "packaging>=23.2" "cryptography>=42" && \
     python -m pip uninstall --yes pip
 
 COPY composer /app/composer
@@ -51,6 +54,9 @@ LABEL org.dlux.composer.release-manifest="${COMPOSER_RELEASE_MANIFEST}"
 # Reference wrappers for `composer check`: a deployment compares its start.sh /
 # start.ps1 against the composer it is actually running, with no registry call.
 COPY start.sh start.ps1 wrappers-history.json /app/wrappers/
+# Tells a wrapper this image understands `update self --pin` (.composer-image),
+# read with `docker image inspect` before anything from the image runs.
+LABEL org.dlux.composer.image-pin="1"
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

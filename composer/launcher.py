@@ -164,6 +164,8 @@ class DockerComposeLauncher(
         self.pull_only_mode = False
         self.pull_service = None
         self.up_service = None
+        # `agent update` pins the channel's signed release before it pulls.
+        self.pin_resident: Optional[Dict[str, bool]] = None
         self.restart_mode = False
         self.restart_service = None
         self.restart_services: List[str] = []
@@ -296,11 +298,26 @@ class DockerComposeLauncher(
         sys.exit(code)
 
     def handle_update_self(self, argv):
+        from . import image_pin
+        from .agent_installer import AgentInstallError
         from .channel_config import resolve_self_image
 
-        parse_update_self_args(argv)
-        image = resolve_self_image()
+        args = parse_update_self_args(argv)
         print(f"Current Composer version: {self.composer_version}")
+        if not os.environ.get("COMPOSER_SELF_IMAGE", "").strip():
+            try:
+                resolution, outcome = image_pin.update_pin(
+                    ".",
+                    allow_downgrade=args.allow_downgrade,
+                    allow_unverified=args.allow_unverified_composer,
+                )
+            except (image_pin.PinError, AgentInstallError) as exc:
+                print(f"✖ Composer was not updated: {exc}", file=sys.stderr)
+                sys.exit(1)
+            self.report_pin(resolution, outcome)
+        if args.pin:
+            return
+        image = resolve_self_image()
         print(f"Pulling {image}...")
         self.pull_progress.reset()
         self.last_progress_text = ""
@@ -324,6 +341,37 @@ class DockerComposeLauncher(
             sys.exit(1)
         print(f"Installed Composer version: {out.strip()}")
         print("The updated deployer runs from the next command.")
+
+    @staticmethod
+    def report_pin(resolution, outcome) -> None:
+        pin = resolution.pin
+        if resolution.note:
+            print(("⚠ " if not pin.verified else "") + resolution.note)
+        if resolution.changed:
+            source = "signed release" if pin.verified else "UNVERIFIED registry digest"
+            print(f"🔒 Composer pinned to {pin.ref} ({source}).")
+        if outcome.get("files"):
+            print(f"   The resident pair now runs it from its next recreate ({', '.join(outcome['files'])}).")
+
+    def pin_resident_pair(self) -> Tuple[bool, str]:
+        """`agent update`: move the lock and the block to the channel's signed release."""
+        from . import image_pin
+        from .agent_installer import AgentInstallError
+
+        options = self.pin_resident or {}
+        if os.environ.get("COMPOSER_SELF_IMAGE", "").strip():
+            return True, ""
+        try:
+            resolution, outcome = image_pin.update_pin(
+                ".",
+                compose_file=self.compose_file or "",
+                allow_downgrade=options.get("allow_downgrade", False),
+                allow_unverified=options.get("allow_unverified", False),
+            )
+        except (image_pin.PinError, AgentInstallError) as exc:
+            return False, f"The resident Composer pair was not updated: {exc}"
+        self.report_pin(resolution, outcome)
+        return True, ""
 
     def configure_update(self, argv):
         """Configure `composer update [opts] [service...]` for the update pipeline."""
@@ -407,6 +455,10 @@ class DockerComposeLauncher(
     def configure_agent_update(self, argv):
         args = parse_agent_update_args(argv)
         self.configure_update(self._agent_target_argv(args, status_file=True))
+        self.pin_resident = {
+            "allow_downgrade": args.allow_downgrade,
+            "allow_unverified": args.allow_unverified_composer,
+        }
         # This run replaces the resident pair, never the application service, so
         # there is nothing to migrate or collect — suppress the hook itself
         # rather than asking the migrator to skip part of its work.
@@ -820,6 +872,13 @@ class DockerComposeLauncher(
                 self.mark_services_updating(self.pull_service)
                 self.write_status("pulling")
                 self.render()
+                if self.pin_resident is not None:
+                    ok, detail = self.pin_resident_pair()
+                    if not ok:
+                        self.sections["pull"] = ERROR
+                        self.write_status("failed", error=detail)
+                        self.render(detail)
+                        sys.exit(1)
                 ok, out, err = self.pull_images()
                 if not ok:
                     self.sections["pull"] = ERROR

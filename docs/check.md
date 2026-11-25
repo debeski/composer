@@ -157,11 +157,20 @@ FAIL, the fix, and what `--fix` does.
 
 #### `composer-channel`
 
-- **Checks:** that the resident pair runs the image of Composer's channel.
-- **OK** it does, or no Composer image is declared in the generated block (a
-  `COMPOSER_SELF_IMAGE` pin is noted). **WARN** the pair runs another image.
-- **Fix:** `composer check --beta` or `--stable` to move both halves together.
-- **`--fix`:** nothing; it preserves the channel. See [channels](updates.md#channels).
+- **Checks:** that the resident pair runs the image in `.composer-image`, or, before
+  the first pin, the tag of Composer's channel ([the Composer pin](updates.md#the-composer-pin)).
+- **OK** the pair runs the pinned digest; or there is no pin yet and the pair runs the
+  channel tag ("not pinned yet": the next Composer update pins it); or no Composer
+  image is declared in the generated block. A `COMPOSER_SELF_IMAGE` pin is noted.
+- **WARN** the pair runs another image than the pin, or than the channel tag when
+  there is no pin; or the pin is a beta while the channel is stable.
+- **Fix:** `composer check --fix` for a pair that does not follow the pin; `composer
+  check --stable` for a beta pin on the stable channel; `--beta` or `--stable` to move
+  both halves to a channel.
+- **`--fix`:** pins the generated block's `debeski/composer` lines to the existing
+  `.composer-image` (validated, original kept under `.xclude/composer-check/`). It
+  never resolves a new pin, so `check` stays offline. It preserves the channel. See
+  [channels](updates.md#channels).
 
 ### Stack
 
@@ -332,7 +341,9 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 
 - **Checks:** that the agent's watched image can be read from its registry, the way
   the agent reads it. No finding without `composer-agent` or an image.
-- **OK** readable; unreachable from here (not checked); a local build. **WARN** a
+- **OK** readable; unreachable from here (not checked); a local build. A readable
+  tag that now names another image than the last deploy recorded
+  ([what was deployed](deploying.md#downgrade-guard)) is noted. **WARN** a
   login is needed; the secrets file has a login the pair does not receive; no such
   tag; an untrusted certificate. **FAIL** the login is refused.
 - **`--fix`:** passes the login keys to `composer-agent` and `composer-executor`

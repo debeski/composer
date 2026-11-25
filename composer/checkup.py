@@ -1106,6 +1106,20 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "SMTP_RELAY_TLS_VERIFY=False) in the secrets file.",
         )
 
+    @staticmethod
+    def _tag_moved_note(image: str, digest: str) -> str:
+        """Say so when the tag no longer names the image the last deploy recorded."""
+        from .downgrade_guard import read_deployed_image
+
+        deployed = read_deployed_image()
+        recorded = deployed.get("repo_digest", "")
+        if deployed.get("image") != image or "@" not in recorded or recorded.split("@", 1)[1] == digest:
+            return ""
+        return (
+            f" The tag now names another image than the one deployed here ({recorded}); "
+            "'./start.sh update' would deploy it."
+        )
+
     def _check_registry_login(self) -> Optional[Dict[str, Any]]:
         """Can the resident pair read WEB_IMAGE's registry, with the login when it needs one?
 
@@ -1160,7 +1174,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         digest, reason = registry.tag_digest(image, token=token, credentials=login, timeout=10)
         if digest:
             how = "with the registry login" if login else ("with COMPOSER_REGISTRY_TOKEN" if token else "without a login")
-            return _result(OK, name, f"{host} answers for {image} {how}.")
+            return _result(OK, name, f"{host} answers for {image} {how}.{self._tag_moved_note(image, digest)}")
         setting = (
             "Put a read-only login in the secrets file: COMPOSER_REGISTRY_USERNAME and COMPOSER_REGISTRY_PASSWORD "
             "(for GitLab, a deploy token with read_registry only), then run './start.sh' so composer-agent and "
@@ -1363,17 +1377,23 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         return ""
 
     def _check_composer_channel(self) -> Dict[str, Any]:
-        """Does the wrapper's channel agree with what the stack actually runs?
+        """Does the wrapper's channel and digest lock agree with what the stack runs?
 
-        These are two different files, changed by two different operations, and
-        an operator debugging a Composer beta needs to know when only one of them
-        moved — a deployer on :beta talking to an agent on :latest is a
-        configuration nobody chose and nothing else reports.
+        Three files, changed by different operations: ``.composer-channel``
+        (the operator's choice), ``.composer-image`` (the digest the last
+        verified update pinned) and the generated block. A deployer on one image
+        talking to an agent on another is a configuration nobody chose and
+        nothing else reports.
+
+        A project with no lock that runs its channel's tag is not a finding: a
+        freshly scaffolded stack looks exactly like that, and the next Composer
+        update pins it. Pinning needs the network, which `check` never uses.
         """
         from . import channel_config
         from .agent_installer import composer_images_in_block
 
         state = channel_config.describe(".")
+        lock = state["lock"]
         note = f"Composer channel: {state['channel']} ({state['image']})"
         if state["pinned"]:
             note += " — COMPOSER_SELF_IMAGE pin overrides the channel"
@@ -1381,18 +1401,71 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             declared = set(composer_images_in_block(self._compose_contents()))
         except Exception:
             declared = set()
+        if lock is not None and lock.prerelease and state["channel"] == channel_config.STABLE:
+            return _result(
+                WARN,
+                "composer-channel",
+                f"{note}, but the pinned Composer {lock.version} is a beta.",
+                fix="Run 'composer check --stable' to pin the stable channel's release.",
+            )
         if not declared:
             return _result(OK, "composer-channel", note)
-        expected = state["channel_image"]
-        drifted = sorted(image for image in declared if image != expected)
+        if lock is None:
+            expected = state["channel_image"]
+            drifted = sorted(image for image in declared if image != expected)
+            if drifted:
+                return _result(
+                    WARN,
+                    "composer-channel",
+                    f"{note}, but the resident pair runs {', '.join(drifted)}.",
+                    fix=f"Run 'composer check --{state['channel']}' to move both together.",
+                )
+            return _result(
+                OK,
+                "composer-channel",
+                f"{note}; resident pair agrees. Not pinned yet: the next Composer update pins a signed digest.",
+            )
+        drifted = sorted(image for image in declared if image != lock.ref)
         if drifted:
             return _result(
                 WARN,
                 "composer-channel",
                 f"{note}, but the resident pair runs {', '.join(drifted)}.",
-                fix=f"Run 'composer check --{state['channel']}' to move both together.",
+                fix="Run 'composer check --fix' to pin the resident pair to .composer-image.",
             )
-        return _result(OK, "composer-channel", f"{note}; resident pair agrees.")
+        return _result(OK, "composer-channel", f"{note}; resident pair pinned to Composer {lock.short}.")
+
+    def _fix_composer_pin(self, args) -> List[Dict[str, Any]]:
+        """Pin the resident pair to the existing lock. Offline: never resolves a new one."""
+        from .agent_installer import AgentInstallError, pin_composer_image
+        from .image_pin import read_lock
+
+        lock = read_lock(".")
+        if lock is None or os.environ.get("COMPOSER_SELF_IMAGE", "").strip():
+            return []
+        try:
+            preview = pin_composer_image(".", pin=lock, compose_file=args.file or "", apply=False)
+        except AgentInstallError as exc:
+            return [_result(FAIL, "fix:composer-pin", str(exc))]
+        if not preview.get("files"):
+            return []
+        if not confirm(
+            f"Pin the resident Composer pair to {lock.ref}",
+            [
+                "The generated block's debeski/composer lines are rewritten; the original is kept under .xclude/.",
+                "composer-agent and composer-executor run that image from their next recreate.",
+            ],
+            assume_yes=args.yes,
+        ):
+            return [_result(WARN, "fix:composer-pin", "Pinning the resident pair declined.")]
+        try:
+            outcome = pin_composer_image(".", pin=lock, compose_file=args.file or "", apply=True)
+        except AgentInstallError as exc:
+            return [_result(FAIL, "fix:composer-pin", str(exc))]
+        detail = f"Resident pair pinned to Composer {lock.short}."
+        if outcome.get("command"):
+            detail += f" Recreate it with: {outcome['command']}"
+        return [_result(OK, "fix:composer-pin", detail)]
 
     def _compose_contents(self) -> str:
         for candidate in (self.compose_file, "compose.yml", "docker-compose.yml"):
@@ -1405,13 +1478,33 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
 
     def _switch_channel(self, args, channel: str) -> List[Dict[str, Any]]:
         """Apply a requested channel change, or explain why it did not happen."""
+        from . import image_pin
         from .agent_installer import AgentInstallError, switch_composer_channel
         from .channel_config import image_for_channel
 
         image = image_for_channel(channel)
+        # A switch is the operator moving channels on purpose, so it may go to an
+        # older release (beta -> stable). It is still a verified one.
+        try:
+            resolution = image_pin.resolve(
+                channel,
+                current=image_pin.read_lock("."),
+                allow_downgrade=True,
+                allow_unverified=bool(getattr(args, "allow_unverified_composer", False))
+                or image_pin.allow_unverified_from_env(),
+            )
+        except image_pin.PinError as exc:
+            return [_result(
+                FAIL,
+                "composer-channel-switch",
+                f"The {channel} channel's Composer release could not be pinned: {exc} The project is unchanged.",
+                fix="Retry when GitHub is reachable, or pass --allow-unverified-composer to pin the registry digest.",
+            )]
+        pin = resolution.pin
+        image = pin.ref
         try:
             preview = switch_composer_channel(
-                ".", channel=channel, compose_file=args.file or "", apply=False,
+                ".", channel=channel, compose_file=args.file or "", apply=False, pin=pin,
             )
         except AgentInstallError as exc:
             return [_result(FAIL, "composer-channel-switch", str(exc))]
@@ -1428,7 +1521,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
 
         try:
             outcome = switch_composer_channel(
-                ".", channel=channel, compose_file=args.file or "", apply=True,
+                ".", channel=channel, compose_file=args.file or "", apply=True, pin=pin,
             )
         except AgentInstallError as exc:
             return [_result(FAIL, "composer-channel-switch", str(exc))]
@@ -1442,6 +1535,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         detail = f"Composer channel set to {channel} ({image})."
         if not preview.get("files"):
             detail += " The resident pair already ran that image."
+        if resolution.note and not pin.verified:
+            return [_result(WARN, "composer-channel-switch", f"{detail} {resolution.note}")]
         return [_result(OK, "composer-channel-switch", detail)]
 
     def collect_checkup(self, args) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -1536,6 +1631,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 results.append(self._run_deep(args.deep_service, args.deep_command))
 
         fixed = switched + (self._maybe_fix(args, results) if args.fix else [])
+        if args.fix:
+            # After the other repairs: hardening re-renders the block on its tag.
+            pinned = self._fix_composer_pin(args)
+            if pinned:
+                fixed.extend(pinned)
+                index = next((i for i, r in enumerate(results) if r["name"] == "composer-channel"), None)
+                if index is not None:
+                    results[index] = self._check_composer_channel()
         if args.fix and any(entry["level"] == OK and entry["name"].startswith("fix:") for entry in fixed):
             # The fixes may have added or removed services.
             self.discover_services(silent=True)

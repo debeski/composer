@@ -86,7 +86,8 @@ the update:
 
 The resident services have three host-side lifecycle commands, run by the deployer:
 
-- `composer agent update` pulls and recreates;
+- `composer agent update` pins the channel's signed release
+  ([the Composer pin](updates.md#the-composer-pin)), pulls and recreates;
 - `composer agent restart` restarts and health-checks;
 - `composer agent off` stops.
 
@@ -96,7 +97,9 @@ defines `composer-executor`, all three target the `composer-agent` +
 to different versions. Legacy stacks resolve to just `composer-agent`. The dedicated
 commands ignore the resident services' normal self-exclusion only for those explicit
 targets. `agent update` does not run application version gates or post-start hooks.
-DjangoLux's Operations card offers the same update as `agent-update`.
+DjangoLux's Operations card offers the same update as `agent-update`; the executor
+runs it in a helper container from its own image, with the project mounted
+read-write over the inherited read-only mount so the pin can be written.
 
 Adding or hardening the pair on an existing stack (`agent enable`,
 `executor enable`, `check --fix`): [topology migrations](stack-migrations.md#topology-migrations).
