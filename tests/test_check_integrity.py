@@ -614,5 +614,61 @@ class SteppingStoneTests(_Project):
         self.assertIn("put the project image on 1.15.3 or later", advice)
 
 
+# --- the Operations preview shows every repair a panel apply makes -----------------
+
+
+class OperationsPreviewTests(_Project):
+    """A panel apply runs `check --fix`, so its preview must list the stamp repair and the celery removal."""
+
+    def repairs(self, services, celery_reason=""):
+        from composer import ops
+
+        launcher = SimpleNamespace(
+            services=services,
+            active_compose_files=["compose.yml"],
+            _maintenance_compose_files=lambda: ["compose.yml"],
+            _celery_unusable=lambda: celery_reason,
+            _worker_fix_plan=lambda *_args: ("", ""),
+        )
+        quiet = {name: [] for name in ("_maintenance_repair", "_front_proxy_repair", "_relay_env_repair", "_worker_repair")}
+        previous = os.getcwd()
+        os.chdir(self.root)
+        try:
+            with patch.object(ops, "_PREVIEWABLE", ()), \
+                    patch.multiple(ops, **{name: (lambda _launcher, value=value: value) for name, value in quiet.items()}):
+                repairs, _digest = ops._dry_run_repairs(launcher, SimpleNamespace(file=None))
+        finally:
+            os.chdir(previous)
+        return {repair["name"]: repair for repair in repairs}
+
+    def test_a_half_restamped_stack_previews_the_stamp_repair(self):
+        self.schema_5_project(header=5, env="3")
+
+        repair = self.repairs(["web", "worker"])["stack-schema"]
+
+        self.assertEqual(repair["files"], ["compose.yml"])
+        self.assertIn('-  DLUX_STACK_SCHEMA: "3"', repair["diff"])
+        self.assertIn('+  DLUX_STACK_SCHEMA: "5"', repair["diff"])
+
+    def test_a_consistent_stack_previews_no_stamp_repair(self):
+        self.schema_5_project(header=5)
+
+        self.assertNotIn("stack-schema", self.repairs(["web", "worker"]))
+
+    def test_celery_without_celery_in_its_image_previews_its_removal(self):
+        self.schema_5_project(header=5)
+
+        repair = self.repairs(["web", "worker", "celery"], "The project image has no Celery, so celery cannot start.")["celery"]
+
+        self.assertIn("compose.yml", repair["files"])
+        self.assertIn("-  celery:", repair["diff"])
+        self.assertIn("no Celery", repair["note"])
+
+    def test_a_usable_celery_previews_nothing(self):
+        self.schema_5_project(header=5)
+
+        self.assertNotIn("celery", self.repairs(["web", "worker", "celery"], ""))
+
+
 if __name__ == "__main__":
     unittest.main()

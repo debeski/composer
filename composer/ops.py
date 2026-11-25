@@ -206,6 +206,8 @@ def _dry_run_repairs(launcher, args):
     repairs.extend(_front_proxy_repair(launcher))
     repairs.extend(_relay_env_repair(launcher))
     repairs.extend(_worker_repair(launcher))
+    repairs.extend(_celery_repair(launcher))
+    repairs.extend(_stamp_repair(launcher))
     return repairs, compose_digest(launcher)
 
 
@@ -295,6 +297,62 @@ def _worker_repair(launcher):
         "files": outcome["files"],
         "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
         "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
+    }]
+
+
+def _celery_repair(launcher):
+    """The `celery` removal, which `check --fix` runs after the worker step.
+
+    Shown under the same condition as `check --fix`: the stack has or is getting
+    `worker`, and celery's image cannot run Celery.
+    """
+    from . import worker_migration
+
+    services = set(getattr(launcher, "services", None) or [])
+    if "celery" not in services or not hasattr(launcher, "_celery_unusable"):
+        return []
+    try:
+        if "worker" not in services:
+            needed, _blocked = launcher._worker_fix_plan(False, "")
+            if needed != "add":
+                return []
+        reason = launcher._celery_unusable()
+        if not reason:
+            return []
+        outcome = worker_migration.celery_removal_preview(".", launcher._maintenance_compose_files())
+    except Exception as exc:
+        return [{"name": "celery", "files": [], "diff": "",
+                 "note": redact_text(str(exc))[:MAX_MESSAGE_CHARS]}]
+    if not outcome["files"]:
+        return []
+    return [{
+        "name": "celery",
+        "files": outcome["files"],
+        "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
+        "note": redact_text(f"{reason} The Compose files are archived before celery is removed.")[:MAX_MESSAGE_CHARS],
+    }]
+
+
+def _stamp_repair(launcher):
+    """The stack schema stamp repair, which `check --fix` runs after every other step."""
+    from . import stack_layout
+    from .stack_cleanup import StackCleanupError
+
+    try:
+        outcome = stack_layout.preview(".", launcher._maintenance_compose_files())
+    except (OSError, ValueError, StackCleanupError) as exc:
+        return [{"name": "stack-schema", "files": [], "diff": "",
+                 "note": redact_text(f"Cannot plan the stack schema stamp repair: {exc}")[:MAX_MESSAGE_CHARS]}]
+    notes = " ".join(outcome["notes"])
+    if not outcome["files"]:
+        return [{"name": "stack-schema", "files": [], "diff": "",
+                 "note": redact_text(notes)[:MAX_MESSAGE_CHARS]}] if notes else []
+    note = f"Restamps to stack schema {outcome['schema']}, after the other repairs. {notes}".strip()
+    return [{
+        "name": "stack-schema",
+        "files": outcome["files"],
+        "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
+        "note": redact_text(note)[:MAX_MESSAGE_CHARS],
     }]
 
 

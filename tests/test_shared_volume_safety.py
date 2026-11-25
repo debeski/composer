@@ -59,6 +59,24 @@ class PlantedSymlinkTests(_Tmp):
         watcher._write_availability_payload(str(target), {"available": False})
         self.assertNotClobbered(target)
 
+    def test_dlux_package_availability(self):
+        from composer import dlux_package_cli
+
+        target = self.root / ".package-available.json"
+        self.plant(target)
+        dlux_package_cli.write_availability(None, {"available": False}, path=target)
+        self.assertNotClobbered(target)
+
+    def test_dlux_package_status_is_replaced_not_followed(self):
+        from types import SimpleNamespace
+
+        from composer import dlux_package_cli
+
+        target = self.root / "deploy-status.json"
+        target.symlink_to(self.victim)
+        dlux_package_cli._publish(str(target), SimpleNamespace(as_dict=lambda: {"status": "completed"}))
+        self.assertNotClobbered(target)
+
     def test_watcher_ack(self):
         target = self.root / "image-update-request.json.ack"
         self.plant(target)

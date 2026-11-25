@@ -14,12 +14,12 @@ loop this design removes.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from typing import Tuple
 from pathlib import Path
 
+from . import safe_files
 from .dlux_package_update import apply_package_update, rollback_package_update
 from .dlux_runtime import DluxRuntime
 from .service_selection import parse_service_list
@@ -145,10 +145,8 @@ def write_availability(runtime, payload, path=None) -> Path:
     """Publish availability where DjangoLux reads it, atomically."""
     target = Path(path) if path else (runtime.state_dir / AVAILABILITY_FILENAME)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.tmp")
-    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, target)
-    return target
+    # The state directory is a shared volume: never follow a planted temp-file symlink.
+    return safe_files.atomic_write_json(target, payload)
 
 
 def release_display(manifest) -> dict:
@@ -389,7 +387,8 @@ def _publish(path, result) -> None:
     target = Path(path)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(result.as_dict(), sort_keys=True) + "\n", encoding="utf-8")
+        # deploy-status.json lives on the shared runtime volume: replace, never follow.
+        safe_files.atomic_write_json(target, result.as_dict())
     except OSError:
         pass
 
