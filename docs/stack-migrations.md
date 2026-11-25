@@ -79,10 +79,16 @@ The `task-worker` finding is a FAIL when the running DjangoLux is 1.16 or later 
 the stack has no `worker`.
 
 `composer check --fix` adds the service once the stack's DjangoLux has
-`dlux_worker`: the running release (the active inline release, or the image's), or
-with `-d` the `django-lux` version `requirements.txt`/`pyproject.toml` pins, since a
-development stack builds from the source. On an older DjangoLux it changes nothing,
-because `worker` could not start. The fix:
+`dlux_worker`, as any one of these says:
+
+- the image the Compose files name (`WEB_IMAGE`), when Docker already has it (pulled
+  or built, not yet deployed): its baked-version label, else `python -m dlux
+  --version` in a throwaway container without network. Nothing is pulled;
+- the running release (the active inline release, or the image's);
+- with `-d`, the `django-lux` version `requirements.txt`/`pyproject.toml` pins, since
+  a development stack builds from the source.
+
+On an older DjangoLux it changes nothing, because `worker` could not start. The fix:
 
 - copies `celery` to `worker` with its mounts, environment anchors, networks and
   dependencies, and gives it the command `python -m dlux.updater.supervisor --
@@ -131,8 +137,11 @@ for a project image on 1.16, so the order is:
 
 1. put the image on DjangoLux 1.16 (`./start.sh pull`, or bump the `django-lux` pin
    and rebuild);
-2. run `./start.sh check --fix`;
-3. deploy.
+2. run `./start.sh check --fix`: it adds `worker` and removes a `celery` the new image
+   cannot run, and leaves `worker` for the deploy, since the stack does not run that
+   image yet;
+3. deploy right after (`./start.sh`), which starts `worker` on the new image. Until
+   then a stack whose `celery` was removed runs no tasks.
 
 A development stack runs `./start.sh -d check --fix` after bumping the pin, then
 `./start.sh -d -b`.
@@ -161,8 +170,12 @@ on schema 3 running DjangoLux 1.15.1, with 1.16.5 the newest release:
    and deploy.
 
 When `check --fix` can reach the schema on the running DjangoLux, the advice is
-`check --fix` first. When the release index cannot be read, the message says so and
-names both routes. The `stored-files` finding and its refusal give the same advice.
+`check --fix` first. The `worker` step reads the DjangoLux of the image the stack is
+set to run, so the image comes before `check --fix`; the stored-files step changes
+what the running stack serves, so when no inline release reaches schema 4 the advice
+is to deploy the image first and run `check --fix` after it. When the release index
+cannot be read, the message says so and names both routes. The `stored-files` finding
+and its refusal give the same advice.
 
 ## Topology migrations
 

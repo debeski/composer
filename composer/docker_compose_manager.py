@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shlex
@@ -48,9 +49,38 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         for file in self.active_compose_files:
             base_args.extend(["-f", file])
 
+        if getattr(self, "_runtime_override_paused", False):
+            return base_args
+        self._refresh_stale_runtime_override()
         if self.compose_runtime_override and self.compose_runtime_override.exists():
             base_args.extend(["-f", str(self.compose_runtime_override)])
         return base_args
+
+    def _compose_files_fingerprint(self) -> Tuple[Tuple[str, str], ...]:
+        prints = []
+        for file in getattr(self, "active_compose_files", None) or []:
+            try:
+                digest = hashlib.sha256(Path(file).read_bytes()).hexdigest()
+            except OSError:
+                digest = ""
+            prints.append((str(file), digest))
+        return tuple(prints)
+
+    def _refresh_stale_runtime_override(self) -> None:
+        """Rewrite the runtime override when the Compose files changed under it.
+
+        It names every service the files defined when it was written. A repair
+        that drops one (celery, docker-socket-proxy) would leave it naming a
+        service with no image, and Compose rejects the whole project for that.
+        """
+        written = getattr(self, "_runtime_override_fingerprint", None)
+        if written is None or not self.compose_runtime_override:
+            return
+        if self._compose_files_fingerprint() == written:
+            return
+        ok, defined, _detail = self._defined_services()
+        if ok:
+            self.sync_runtime_compose_override(self._select_services(defined))
 
     def build_compose_env(self) -> Dict[str, str]:
         env = os.environ.copy()
@@ -243,8 +273,10 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
 
         return "\n\n".join(section for section in sections if section.strip())
 
-    def sync_runtime_compose_override(self) -> bool:
-        if not self.services:
+    def sync_runtime_compose_override(self, services: Optional[List[str]] = None) -> bool:
+        """Write the runtime override for ``services`` (default: ``self.services``)."""
+        services = list(self.services if services is None else services)
+        if not services:
             self.remove_runtime_compose_override()
             return True
 
@@ -269,7 +301,7 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             "COMPOSER_WATCH_SELF_SERVICE", DEFAULT_RESIDENT_SERVICE
         ).strip()
         secret_keys = self.resident_secret_keys()
-        for service in self.services:
+        for service in services:
             service_env = [
                 f"      COMPOSER_VERSION: {json.dumps(self.composer_version)}",
             ]
@@ -303,6 +335,7 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             self.last_runtime_diagnostic = f"Failed to write Composer runtime override: {exc}"
             return False
 
+        self._runtime_override_fingerprint = self._compose_files_fingerprint()
         return True
 
     def remove_runtime_compose_override(self):
@@ -362,19 +395,39 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             return None
         return parsed if isinstance(parsed, dict) else None
 
-    def discover_services(self, silent: bool = False) -> bool:
-        ok, out, err = self.run_docker_compose(["config", "--services"], timeout=10)
+    def _defined_services(self) -> Tuple[bool, List[str], str]:
+        """``(ok, services, failure detail)`` the Compose files define.
+
+        Read without the runtime override: it only adds environment to services,
+        so it never defines one, and a stale one would make Compose reject the
+        project.
+        """
+        self._runtime_override_paused = True
+        try:
+            ok, out, err = self.run_docker_compose(["config", "--services"], timeout=10)
+        finally:
+            self._runtime_override_paused = False
         if not ok:
-            if not silent:
-                self.last_runtime_diagnostic = self.build_failure_detail(out, err)
-            return False
-        discovered = [s for s in out.splitlines() if s]
-        excluded = set(getattr(self, "exclude_services", []) or [])
+            return False, [], self.build_failure_detail(out, err)
+        return True, [s for s in out.splitlines() if s], ""
+
+    def _select_services(self, defined: List[str], exclude: bool = True) -> List[str]:
+        """The defined services Composer watches: ``monitored_services`` minus ``exclude_services``."""
+        excluded = set(getattr(self, "exclude_services", []) or []) if exclude else set()
         monitored = set(getattr(self, "monitored_services", []) or [])
         if monitored:
-            discovered = [service for service in discovered if service in monitored]
-        self.services = [s for s in discovered if s not in excluded]
-        if excluded and discovered and not self.services:
+            defined = [service for service in defined if service in monitored]
+        return [s for s in defined if s not in excluded]
+
+    def discover_services(self, silent: bool = False) -> bool:
+        ok, discovered, detail = self._defined_services()
+        if not ok:
+            if not silent:
+                self.last_runtime_diagnostic = detail
+            return False
+        self.services = self._select_services(discovered)
+        excluded = set(getattr(self, "exclude_services", []) or [])
+        if excluded and not self.services and self._select_services(discovered, exclude=False):
             self.last_runtime_diagnostic = (
                 "No compose services remain after COMPOSER_EXCLUDE_SERVICES="
                 + ",".join(sorted(excluded))

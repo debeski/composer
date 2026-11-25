@@ -2,6 +2,7 @@
 import base64
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -408,6 +409,7 @@ class DowngradeGuardTests(unittest.TestCase):
         self.launcher.compose_config_json = lambda: CONFIG
         self.image = {"debeski/decrees:v2.1.26": OLD}
         self.containers = {"w1": NEW, "k1": NEW}
+        self.started = {}
         self.pulled = []
 
         def run_command(argv, timeout=None, env=None):
@@ -415,7 +417,11 @@ class DowngradeGuardTests(unittest.TestCase):
                 labels = self.image.get(argv[3])
                 return (labels is not None), json.dumps(labels), ""
             if argv[:3] == ["docker", "container", "inspect"]:
-                return True, json.dumps(self.containers[argv[3]]), ""
+                fields = {
+                    "{{json .State.StartedAt}}": json.dumps(self.started.get(argv[3], "2026-11-25T22:12:30.05Z")),
+                    "{{json .Config.Labels}}": json.dumps(self.containers[argv[3]]),
+                }
+                return True, " ".join(fields[field] for field in re.findall(r"\{\{[^}]*\}\}", argv[-1])), ""
             return False, "", "unexpected"
 
         def run_docker_compose(args, timeout=None):
@@ -448,6 +454,13 @@ class DowngradeGuardTests(unittest.TestCase):
         self.assertIn("DjangoLux 1.15.1 is older than 1.16.3", message)
         self.assertIn("--force", message)
         self.assertIn("Migrations do not run backwards", message)
+
+    def test_a_container_that_never_started_does_not_count(self):
+        """S4 (1.11.0b1 live proof): a raw `docker compose create` ran no migrator."""
+        self.image["debeski/decrees:v2.1.26"] = NEW
+        self.containers = {"w1": NEW, "w2": NEWER}
+        self.started = {"w2": "0001-01-01T00:00:00Z"}
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
 
     def test_the_record_still_refuses_after_down_removed_the_containers(self):
         downgrade_guard.write_record(downgrade_guard.label_versions(NEW), "debeski/decrees:v2.2.1", replace=False)
@@ -536,6 +549,88 @@ class DowngradeGuardTests(unittest.TestCase):
         status, error = self.launcher.statuses[-1]
         self.assertEqual(status, "failed")
         self.assertIn("Refusing to deploy debeski/decrees:v2.1.26", error)
+
+
+class DatabaseRecordTests(unittest.TestCase):
+    """S5 (1.11.0b1 live proof): the deploy record describes one database.
+
+    After `docker compose down -v` the old record refused an older image on fresh
+    volumes, saying the database had been migrated by the newer release.
+    """
+
+    CONFIG = {
+        "name": "stack",
+        "services": {
+            "web": {"image": "debeski/decrees:v2.1.26"},
+            "db": {"image": "postgres:17", "volumes": [
+                {"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]},
+        },
+        "volumes": {"postgres_data": {"name": "stack_postgres_data"}},
+    }
+    MIGRATED = {"volume": "stack_postgres_data", "created_at": "2026-11-25T22:12:30Z"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web", "db"]
+        self.launcher.compose_config_json = lambda: self.CONFIG
+        self.launcher.get_compose_ps_entries = lambda include_all=False: (True, [], "")
+        self.volume = (True, json.dumps(self.MIGRATED["created_at"]), "")
+        self.inspected = []
+
+        def run_command(argv, timeout=None, env=None):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return True, json.dumps(OLD), ""
+            if argv[:3] == ["docker", "volume", "inspect"]:
+                self.inspected.append(argv[3])
+                return self.volume
+            return False, "", "unexpected"
+
+        self.launcher.run_command = run_command
+        downgrade_guard.write_record(
+            downgrade_guard.label_versions(NEW), "debeski/decrees:v2.2.1", replace=False, database=self.MIGRATED
+        )
+
+    def test_the_record_names_the_database_it_describes(self):
+        self.assertEqual(downgrade_guard.read_record_database(), self.MIGRATED)
+
+    def test_the_same_database_is_still_protected(self):
+        ok, message = self.launcher.downgrade_guard()
+        self.assertFalse(ok)
+        self.assertIn("The database was migrated by the newer release", message)
+        self.assertIn("stack_postgres_data", self.inspected)
+
+    def test_a_record_of_a_removed_database_does_not_refuse_and_is_replaced(self):
+        self.volume = (False, "", "Error response from daemon: get stack_postgres_data: no such volume")
+        with patch("builtins.print") as printed:
+            self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+        note = " ".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn("stack_postgres_data created 2026-11-25T22:12:30Z no longer exists", note)
+        self.assertNotIn("migrated by the newer release", note)
+
+        self.volume = (True, json.dumps("2026-11-26T09:00:00Z"), "")
+        self.launcher.record_deployed_release()
+        self.assertEqual(downgrade_guard.read_record(), {"app": "2.1.26", "dlux": "1.15.1"})
+        self.assertEqual(downgrade_guard.read_record_database()["created_at"], "2026-11-26T09:00:00Z")
+
+    def test_a_recreated_volume_of_the_same_name_is_another_database(self):
+        self.volume = (True, json.dumps("2026-11-26T09:00:00Z"), "")
+        with patch("builtins.print"):
+            self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def test_a_database_docker_cannot_describe_keeps_the_record(self):
+        self.volume = (False, "", "Cannot connect to the Docker daemon")
+        self.assertFalse(self.launcher.downgrade_guard()[0])
+
+    def test_a_record_without_the_database_keeps_refusing(self):
+        downgrade_guard.write_record(downgrade_guard.label_versions(NEW), "x", replace=True)
+        self.volume = (False, "", "no such volume")
+        self.assertEqual(downgrade_guard.read_record_database(), {})
+        self.assertFalse(self.launcher.downgrade_guard()[0])
 
 
 class RuntimeFloorTests(unittest.TestCase):
@@ -646,6 +741,19 @@ class RuntimeFloorTests(unittest.TestCase):
         written = root / "state" / "composer-deployed.json"
         self.assertEqual(written.stat().st_mode & 0o777, 0o664)
         self.assertEqual(self._script({"source": "image"})["record"], {"app": "2.2.1", "dlux": "1.16.3"})
+
+    def test_the_volume_record_keeps_its_database(self):
+        import subprocess
+        import sys
+
+        root = Path(self.tmp.name) / "runtime"
+        database = {"volume": "stack_postgres_data", "created_at": "2026-11-25T22:12:30Z"}
+        payload = downgrade_guard.record_payload({"app": "2.2.1", "dlux": "1.16.3"}, "x", database=database)
+        subprocess.run(
+            [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_WRITE_SCRIPT, str(root), json.dumps(payload)],
+            check=True,
+        )
+        self.assertEqual(self._script({"source": "image"})["record_database"], database)
 
     def test_an_image_below_the_active_release_floor_is_refused(self):
         ok, message = self.launcher.downgrade_guard()

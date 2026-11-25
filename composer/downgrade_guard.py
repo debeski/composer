@@ -10,12 +10,17 @@ database.
 The guard runs before every ``up`` and compares the target app image with the
 newest release this deployment has run:
 
-- the images of the app containers that exist now, which are what last ran the
-  migrator (even when they failed their health check afterwards);
+- the images of the app containers that have started, which are what last ran
+  the migrator (even when they failed their health check afterwards); one that
+  was only created ran nothing;
 - the record Composer keeps after each ``up``, which survives a ``down`` that
   removed those containers. It is written twice: to ``RECORD`` in the deploy
   root, and to ``RUNTIME_RECORD`` on the DjangoLux runtime volume, so a deploy
   root Composer cannot write still keeps one. The newer of the two counts.
+  Each names the stack's Postgres data volume and its creation time; a record
+  whose volume is gone or was recreated (``down -v``, a restore onto a new
+  volume) describes another database, so it does not refuse, and the next ``up``
+  replaces it. A record without that field counts as before.
 
 Versions come from image labels DjangoLux project images already carry: the
 baked DjangoLux version (``org.<project>.dlux_baked_version``) and the app
@@ -52,6 +57,10 @@ DIMENSIONS = (("app", "app"), ("dlux", "DjangoLux"))
 IDENTITY_KEYS = ("image", "repo_digest", "image_id")
 RUNTIME_ROOT = "/opt/dlux-runtime"
 RUNTIME_RECORD = "state/composer-deployed.json"
+#: Where the database the record describes lives: ``{"volume", "created_at"}``.
+DATABASE_KEY = "database"
+#: Mount targets of a Postgres data directory (the official image's PGDATA, and its parent from 18).
+POSTGRES_DATA_TARGETS = ("/var/lib/postgresql/data", "/var/lib/postgresql")
 
 # Runs in a throwaway Composer container. Prints {"active", "floor"} for the
 # active volume release (none while the image release is in force) and
@@ -64,6 +73,8 @@ try:
     record = json.loads((root / "state" / "composer-deployed.json").read_text(encoding="utf-8"))
     if isinstance(record, dict):
         out["record"] = {key: str(record[key]) for key in ("app", "dlux") if record.get(key)}
+        if isinstance(record.get("database"), dict):
+            out["record_database"] = {key: str(value) for key, value in record["database"].items()}
 except Exception:
     pass
 try:
@@ -93,6 +104,8 @@ os.replace(temporary, path)
 """
 
 _GO_NO_VALUE = "<no value>"
+#: Docker's ``State.StartedAt`` of a container that never started (Go's zero time).
+NEVER_STARTED = "0001-01-01"
 
 
 def label_versions(labels: Optional[Mapping[str, str]]) -> Dict[str, str]:
@@ -154,6 +167,50 @@ def read_record(root: Path = Path(".")) -> Dict[str, str]:
     return {key: str(payload[key]) for key, _ in DIMENSIONS if payload.get(key)}
 
 
+def record_database(payload) -> Dict[str, str]:
+    """``{"volume", "created_at"}`` a record names for its database, or {} (an older record)."""
+    value = payload.get(DATABASE_KEY) if isinstance(payload, dict) else None
+    if not isinstance(value, dict) or not (value.get("volume") and value.get("created_at")):
+        return {}
+    return {"volume": str(value["volume"]), "created_at": str(value["created_at"])}
+
+
+def read_record_database(root: Path = Path(".")) -> Dict[str, str]:
+    try:
+        payload = json.loads((Path(root) / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return record_database(payload)
+
+
+def database_volume(config: Mapping) -> str:
+    """Docker's name for the named volume holding the stack's Postgres data, or ""."""
+    from .dlux_runtime_access import find_runtime_volume, qualified_volume_name
+
+    for target in POSTGRES_DATA_TARGETS:
+        short_name = find_runtime_volume(dict(config), target)
+        if short_name:
+            return qualified_volume_name(dict(config), short_name)
+    return ""
+
+
+def stale_database(recorded: Mapping[str, str], current: Optional[Mapping[str, str]]) -> str:
+    """Why a record describes another database than the stack has now, or "".
+
+    ``current`` is None when the stack's database cannot be identified (no named
+    Postgres volume, Docker did not answer): the record then counts, as one
+    without a database field does.
+    """
+    if not recorded or current is None:
+        return ""
+    where = f"the database volume {recorded['volume']} created {recorded['created_at']}"
+    if not current:
+        return f"{where} no longer exists"
+    if dict(current) == dict(recorded):
+        return ""
+    return f"it names {where}, and this stack's is {current['volume']} created {current['created_at']}"
+
+
 def read_deployed_image(root: Path = Path(".")) -> Dict[str, str]:
     """``image``, ``repo_digest`` and ``image_id`` of the last deploy, where recorded."""
     try:
@@ -191,13 +248,14 @@ def repo_digest_for(image: str, repo_digests) -> str:
 
 def write_record(
     target: Mapping[str, str], image: str, *, replace: bool, root: Path = Path("."),
-    identity: Optional[Mapping[str, str]] = None,
+    identity: Optional[Mapping[str, str]] = None, database: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
     """Remember the newest release deployed here; ``replace`` after a forced deploy.
 
     ``identity`` is what was actually deployed (``repo_digest``, ``image_id``):
     an exact rollback target and audit trail even after the tag moves. It records,
     it does not protect: whoever pushes the tag chooses what the next pull gets.
+    ``database`` is the Postgres volume that release migrated.
 
     Returns why the record could not be written, or None.
     """
@@ -205,7 +263,7 @@ def write_record(
     values = dict(target) if replace else newest(read_record(root), target)
     if not values and not replace and not identity:
         return None
-    payload = record_payload(values, image, identity)
+    payload = record_payload(values, image, identity, database)
     path = Path(root) / RECORD
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,10 +277,14 @@ def write_record(
 
 def record_payload(
     values: Mapping[str, str], image: str, identity: Optional[Mapping[str, str]] = None,
-) -> Dict[str, str]:
-    payload = {key: values[key] for key, _ in DIMENSIONS if key in values}
+    database: Optional[Mapping[str, str]] = None,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {key: values[key] for key, _ in DIMENSIONS if key in values}
     payload["image"] = image
     payload.update({key: str(value) for key, value in (identity or {}).items() if key in IDENTITY_KEYS and value})
+    database = record_database({DATABASE_KEY: dict(database or {})})
+    if database:
+        payload[DATABASE_KEY] = database
     payload["recorded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return payload
 
@@ -323,7 +385,11 @@ class DowngradeGuardMixin:
         return {key: value for key, value in identity.items() if value}
 
     def deployed_app_versions(self, services: List[str]) -> Dict[str, str]:
-        """Newest versions labelled on the existing containers of ``services``."""
+        """Newest versions labelled on the containers of ``services`` that have run.
+
+        A container that was created but never started (a raw ``docker compose
+        create``) ran no migrator, so it says nothing about the database.
+        """
         ok, entries, _ = self.get_compose_ps_entries(include_all=True)
         if not ok:
             return {}
@@ -335,14 +401,18 @@ class DowngradeGuardMixin:
         found: Dict[str, str] = {}
         for container_id in ids:
             ok, out, _ = self.run_command(
-                ["docker", "container", "inspect", container_id, "--format", "{{json .Config.Labels}}"],
+                ["docker", "container", "inspect", container_id, "--format",
+                 "{{json .State.StartedAt}} {{json .Config.Labels}}"],
                 timeout=15,
             )
             if not ok:
                 continue
+            started, _, labels = (out or "").strip().partition(" ")
             try:
-                labels = json.loads((out or "").strip() or "null")
+                started, labels = json.loads(started or "null"), json.loads(labels or "null")
             except ValueError:
+                continue
+            if not str(started or "").strip() or str(started).startswith(NEVER_STARTED):
                 continue
             if isinstance(labels, dict):
                 found = newest(found, label_versions(labels))
@@ -357,6 +427,25 @@ class DowngradeGuardMixin:
         if labels is None:
             return None
         return label_versions(labels)
+
+    def database_identity(self) -> Optional[Dict[str, str]]:
+        """``{"volume", "created_at"}`` of the stack's Postgres data volume.
+
+        {} when that volume does not exist (yet), None when it cannot be said.
+        """
+        volume = database_volume(self.compose_config_json() or {})
+        if not volume:
+            return None
+        ok, out, err = self.run_command(
+            ["docker", "volume", "inspect", volume, "--format", "{{json .CreatedAt}}"], timeout=20
+        )
+        if not ok:
+            return {} if "no such volume" in f"{out}\n{err}".lower() else None
+        try:
+            created = json.loads((out or "").strip() or "null")
+        except ValueError:
+            return None
+        return {"volume": volume, "created_at": str(created)} if created else None
 
     def runtime_volume(self) -> str:
         """The stack's existing DjangoLux runtime volume, or "" (never created here)."""
@@ -405,6 +494,7 @@ class DowngradeGuardMixin:
         record = payload.get("record")
         if isinstance(record, dict):
             state["record"] = {key: str(record[key]) for key, _ in DIMENSIONS if record.get(key)}
+            state["record_database"] = record_database({DATABASE_KEY: payload.get("record_database")})
         return state
 
     def write_runtime_record(self, volume: str, payload: Mapping[str, str]) -> Optional[str]:
@@ -430,7 +520,22 @@ class DowngradeGuardMixin:
             return True, ""
         self.guard_volume = self.runtime_volume()
         runtime = self.runtime_state(self.guard_volume)
-        self.guard_records = newest(read_record(), runtime.get("record") or {})
+        database = self.database_identity()
+        records = []
+        for where, recorded, recorded_database in (
+            (str(RECORD), read_record(), read_record_database()),
+            ("its copy on the DjangoLux runtime volume", runtime.get("record") or {},
+             runtime.get("record_database") or {}),
+        ):
+            why = stale_database(recorded_database, database) if recorded else ""
+            if why:
+                self.note_operator(
+                    f"The deploy record {where} is not compared: {why}, so the release it names did not "
+                    "migrate this database. This deploy's `up` replaces it."
+                )
+                continue
+            records.append(recorded)
+        self.guard_records = newest(*records)
         self.guard_target = (image, target)
         floor = newest(self.guard_records, self.deployed_app_versions(services))
         runtime_reason = below_runtime_floor(target, runtime) if target.get("dlux") else None
@@ -455,10 +560,11 @@ class DowngradeGuardMixin:
             values = newest(getattr(self, "guard_records", None) or {}, values)
         if not values and not force and not identity:
             return
-        reason = write_record(values, image, replace=True, identity=identity)
+        database = self.database_identity()
+        reason = write_record(values, image, replace=True, identity=identity, database=database)
         volume = getattr(self, "guard_volume", "") or ""
         runtime_reason = (
-            self.write_runtime_record(volume, record_payload(values, image, identity)) if volume else None
+            self.write_runtime_record(volume, record_payload(values, image, identity, database)) if volume else None
         )
         if reason and (runtime_reason or not volume):
             self.warn_operator(record_warning(reason, runtime_reason or ""))
@@ -466,6 +572,11 @@ class DowngradeGuardMixin:
             self.append_console(
                 f"Downgrade record kept on the runtime volume only: {RECORD} ({reason})."
             )
+
+    def note_operator(self, message: str) -> None:
+        """A note for the terminal and the console log; not a deploy warning."""
+        print(f"\nℹ {message}", flush=True)
+        self.append_console(message)
 
     def warn_operator(self, message: str) -> None:
         """A warning the operator must see: terminal, console log and deploy status."""

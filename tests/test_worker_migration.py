@@ -518,16 +518,17 @@ class CheckFixTests(unittest.TestCase):
     def tearDown(self):
         os.chdir(self.cwd)
 
-    def _fix(self, running, *, dev=False, services=None, init=(None, "5.6.1")):
+    def _fix(self, running, *, dev=False, services=None, init=(None, "5.6.1"), docker=None):
         launcher = DockerComposeLauncher()
         launcher.services = list(services or self.SERVICES)
         launcher.dev_mode = dev
         launcher.active_compose_files = ["compose.yml"] + (["compose.dev.yml"] if dev else [])
         compose = _FakeCompose()
+        answer = docker or (lambda argv, **_kw: (True, init[1], ""))
         with (
             patch.object(launcher, "_running_dlux_version", return_value=running),
             patch.object(launcher, "_dlux_runtime_version", return_value=init[0]),
-            patch.object(launcher, "run_command", return_value=(True, init[1], "")),
+            patch.object(launcher, "run_command", side_effect=answer),
             patch.object(launcher, "build_compose_env", return_value={}),
             patch("composer.worker_migration.subprocess.run", compose),
             patch("composer.worker_migration.shutil.which", return_value="/usr/bin/docker"),
@@ -580,6 +581,40 @@ class CheckFixTests(unittest.TestCase):
         self._fix(None)
         self.assertNotIn("worker", self._services())
 
+    def test_a_pulled_image_on_dlux_1_16_gets_its_worker_before_the_deploy(self):
+        """S2 (1.11.0b1 live proof): the advised order is pull, check --fix, deploy.
+
+        The stack still runs DjangoLux 1.15.5; WEB_IMAGE names Decrees 2.2.1
+        (DjangoLux 1.16.3), which Docker already has.
+        """
+        reads = []
+
+        def docker(argv, **_kw):
+            reads.append(list(argv))
+            if argv[:2] == ["docker", "compose"] and argv[-3:] == ["config", "--format", "json"]:
+                return True, json.dumps({"services": {"web": {"image": "debeski/decrees:v2.2.1"}}}), ""
+            if argv[:4] == ["docker", "image", "inspect", "debeski/decrees:v2.2.1"]:
+                return True, json.dumps({"org.decrees.dlux_baked_version": "1.16.3"}), ""
+            return True, "5.6.1", ""
+
+        fixes, _launcher = self._fix((1, 15, 5), docker=docker)
+
+        added = [entry for entry in fixes if entry["name"] == "fix:task-worker"]
+        self.assertEqual(added[0]["level"], OK, fixes)
+        self.assertIn("worker", self._services())
+        self.assertFalse([argv for argv in reads if "pull" in argv], "the image is never pulled to read it")
+
+    def test_an_image_docker_does_not_have_leaves_the_running_release_to_decide(self):
+        def docker(argv, **_kw):
+            if argv[:2] == ["docker", "compose"] and argv[-3:] == ["config", "--format", "json"]:
+                return True, json.dumps({"services": {"web": {"image": "debeski/decrees:v2.2.1"}}}), ""
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return False, "", "No such image"
+            return True, "5.6.1", ""
+
+        self._fix((1, 15, 5), docker=docker)
+        self.assertNotIn("worker", self._services())
+
     def test_development_follows_the_required_dlux(self):
         """`-d` builds from the source, so the requirement decides."""
         Path("requirements.txt").write_text("django-lux[ocr]==1.16.0b1\n", encoding="utf-8")
@@ -601,12 +636,25 @@ class CheckFixTests(unittest.TestCase):
 
 
 class TaskWorkerCheckTests(unittest.TestCase):
-    def _check(self, services, running):
+    def _check(self, services, running, labels=None):
         launcher = DockerComposeLauncher()
         launcher.services = list(services)
         launcher.dev_mode = False
-        with patch.object(launcher, "_running_dlux_version", return_value=running):
+        config = {"services": {"web": {"image": "debeski/decrees:v2.2.1"}}}
+        with (
+            patch.object(launcher, "_running_dlux_version", return_value=running),
+            patch.object(launcher, "compose_config_json", return_value=config),
+            patch.object(launcher, "image_labels", return_value=labels),
+            patch.object(launcher, "run_command", return_value=(False, "", "")),
+        ):
             return launcher._check_task_worker()
+
+    def test_a_pulled_image_on_1_16_is_named_with_the_step_before_its_deploy(self):
+        result = self._check(["web", "celery"], (1, 15, 5), labels={"org.decrees.dlux_baked_version": "1.16.3"})
+        self.assertEqual(result["level"], OK)
+        self.assertIn("debeski/decrees:v2.2.1", result["message"])
+        self.assertIn("DjangoLux 1.16.3", result["message"])
+        self.assertIn("before deploying it", result["message"])
 
     def test_a_schema_5_stack_is_fine(self):
         self.assertEqual(self._check(["web", "worker"], (1, 16, 0))["level"], OK)

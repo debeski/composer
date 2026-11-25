@@ -95,8 +95,8 @@ operator confirmed.
 
 Before its first write, a confirmed `--fix` reads the resolved Compose model
 (`docker compose config`, with the deployment's secrets, as a deploy reads it) and
-the stack's containers. After the repairs it reads the model again and compares the
-two one service at a time, key order aside:
+the stack's containers. After the repairs it reads the model again, from the files as
+the repairs left them, and compares the two one service at a time, key order aside:
 
 - **Dropped services are stopped and removed.** A repair that drops a service
   (`dlux-updater` retired into init containers, `composer-updater` and
@@ -117,7 +117,9 @@ two one service at a time, key order aside:
   repairs add is left for `./start.sh -d -b`, which builds it first.
 - **Never another image on the side.** A service whose image reference is unchanged
   but now names another image than its container runs (pulled or built, not
-  deployed) is not recreated: `./start.sh` deploys it on purpose.
+  deployed) is not recreated: `./start.sh` deploys it on purpose. A service the
+  repairs add is compared through a running service on the same reference: `worker`
+  added for a pulled image the stack does not run yet is left for that deploy.
 - **The resident pair goes last.** From a terminal, `composer-executor` and then
   `composer-agent` are recreated after the application services are healthy. An
   Operations panel apply runs inside the pair, so it never recreates it: the apply
@@ -498,9 +500,10 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 
 - **Checks:** that a DjangoLux 1.16+ stack has the `worker` service. No finding
   without `worker` or `celery`.
-- **OK** `worker` present, or not needed yet (the reason is given). **FAIL** DjangoLux
-  1.16+ and no `worker`: its tasks are queued and never run, so scheduled backups and
-  jobs stop.
+- **OK** `worker` present, or not needed yet (the reason is given), or the image the
+  stack is set to run is on DjangoLux 1.16+ and present here: run `--fix` before
+  deploying it. **FAIL** DjangoLux 1.16+ running and no `worker`: its tasks are
+  queued and never run, so scheduled backups and jobs stop.
 - **`--fix`:** adds `worker` (stack schema 5), after the other migrations. Details:
   [schema 4 to 5](stack-migrations.md#schema-4-to-5-worker).
 

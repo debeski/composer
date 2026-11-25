@@ -575,6 +575,16 @@ class SteppingStoneTests(_Project):
         self.assertIn("'./start.sh check --fix' (stack schema 4)", advice)
         self.assertIn("project image on DjangoLux 1.16.0 or later", advice)
 
+    def test_the_image_step_puts_check_fix_where_its_gate_reads_the_image(self):
+        """S2: worker is added on the pulled image's DjangoLux; stored files wait for the running one."""
+        worker_only = dlux_upgrade_path.update_way_out(
+            refused="1.16.5", needed=5, stamp=3, running="1.15.1", stone="1.15.5"
+        )
+        self.assertIn("rebuild), run './start.sh check --fix' (stack schema 5), then deploy;", worker_only)
+        both = dlux_upgrade_path.update_way_out(refused="1.16.5", needed=5, stamp=3, running="1.14.0", stone=None)
+        self.assertIn("rebuild), deploy it, then run './start.sh check --fix' (stack schema 5);", both)
+        self.assertIn("DjangoLux 1.16.5 then comes with the image", both)
+
     def test_check_fix_first_only_when_it_can_get_there(self):
         advice = dlux_upgrade_path.update_way_out(refused="1.16.0", needed=4, stamp=3, running="1.15.5", stone=None)
         self.assertTrue(advice.startswith("Run './start.sh check --fix' first"))

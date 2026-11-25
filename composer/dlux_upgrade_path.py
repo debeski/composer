@@ -39,6 +39,11 @@ SCHEMA_STEP_FLOORS: Dict[int, Tuple[int, int, int]] = {
     4: tuple(media_migration.MEDIA_ACCESS_FLOOR),
     5: tuple(worker_migration.WORKER_FLOOR),
 }
+#: The steps ``check --fix`` takes on the DjangoLux of the image the Compose files
+#: name once Docker has it (``worker``, which the deploy then starts). The others
+#: change what the running stack serves at once, so they wait for the running
+#: DjangoLux: that image is deployed first.
+IMAGE_GATED_STEPS = frozenset({5})
 MAX_PROBES = 6
 
 # The refusal dlux_release_source.normalize_manifest words; tests pin the two together.
@@ -196,13 +201,18 @@ def stepping_stone(
         probe.close()
 
 
-def _image_step(reach: int, needed: int, then: str) -> str:
+def _image_step(reach: int, needed: int, refused: str) -> str:
     floor = image_floor(reach, needed)
     where = f"DjangoLux {_text(floor)} or later" if floor else "a newer DjangoLux"
-    return (
+    image = (
         f"put the project image on {where} ('./start.sh pull' for a published image, or bump the "
-        f"django-lux pin and rebuild), run './start.sh check --fix' (stack schema {needed}){then}"
+        "django-lux pin and rebuild)"
     )
+    comes = f"DjangoLux {refused} then comes with the image or installs with './start.sh dlux update'."
+    steps = [schema for schema in SCHEMA_STEP_FLOORS if reach < schema <= needed]
+    if all(schema in IMAGE_GATED_STEPS for schema in steps):
+        return f"{image}, run './start.sh check --fix' (stack schema {needed}), then deploy; {comes}"
+    return f"{image}, deploy it, then run './start.sh check --fix' (stack schema {needed}); {comes}"
 
 
 def update_way_out(*, refused: str, needed: int, stamp: Optional[int], running, stone: Optional[str],
@@ -214,7 +224,6 @@ def update_way_out(*, refused: str, needed: int, stamp: Optional[int], running, 
             f"Run './start.sh check --fix' first (it brings this stack to schema {needed}), then "
             "'./start.sh dlux update' again."
         )
-    then = f", then deploy; DjangoLux {refused} then comes with the image or installs with './start.sh dlux update'."
     if stone:
         after = reachable_schema(stamp, stone)
         first = (
@@ -223,11 +232,11 @@ def update_way_out(*, refused: str, needed: int, stamp: Optional[int], running, 
         )
         if after >= needed:
             return first + ", then './start.sh dlux update' again."
-        return first + ". After that, " + _image_step(after, needed, then)
+        return first + ". After that, " + _image_step(after, needed, refused)
     lead = "No release newer than the running one installs inline on this stack" if not index_error else (
         f"Composer could not read the release index ({index_error}) to name a release this stack takes inline"
     )
-    return f"{lead}: " + _image_step(now, needed, then)
+    return f"{lead}: " + _image_step(now, needed, refused)
 
 
 def media_way_out(*, running, stamp: Optional[int], stone: Optional[str], index_error: str = "") -> str:
