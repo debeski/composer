@@ -17,6 +17,13 @@ walk everything. The mounts come from the merged compose config: every bind
 directory and named volume a service on the app image mounts, so a project's own
 mounts are included. Missing named volumes are left for Docker to create.
 
+The app image is the one `web` (or else `worker`) runs, and the app services are
+every service running that image. In development mode (`-d`) the dev compose file
+resets `image:` and builds instead. There a built service's image is the name
+Compose gives what it builds, `<project>-<service>` (`eservices-web`), and the app
+services are every service built from the same `build:` section as `web`, so
+`worker` and `celery` count too.
+
 ## What `check --fix` grants
 
 `check --fix` grants what is missing:
@@ -53,7 +60,9 @@ Composer reads the app image's `Config.User`:
 
 - an app image that is not on the host yet is pulled first, through the same
   compose environment as `up` (and built first for a service with a `build`
-  section, as `up --build` would), so the uid comes from the image about to run;
+  section, as `up --build` would), so the uid comes from the image about to run.
+  This holds in development mode too: the stack's own build is built and read, and
+  a `USER 10001:0` dev image gets its data granted before `up`, as in production;
 - for a non-root uid it scans and, when something is missing, grants access first;
 - when the image cannot be read or the grant fails, it reports `failed` and
   recreates nothing, so the running stack keeps serving;

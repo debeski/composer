@@ -289,5 +289,8 @@ back after its successor migrated the database would itself be a downgrade.
   🔴 failed. A service stops showing 🟢 the moment its pull/recreate/restart starts
   (the health it last reported belongs to the container being replaced) and health
   monitoring resolves it back.
+- **App data**: before `up`, a non-root app image gets access to its data, in
+  development mode (`-d`, where `web` and `worker` are built) as in production; see
+  [app data permissions](app-permissions.md#before-every-start-of-the-app).
 - **Closing the terminal** does not stop a deploy, and destructive flags ask first:
   see [commands](commands.md#closing-the-terminal).
