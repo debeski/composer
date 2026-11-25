@@ -159,6 +159,11 @@ States: `starting` → `pulling` → `recreating` → `migrating` → `ready`, o
 (with an `error`). `pull` reports `starting` → `pulling` → `pulled`. The restart flow
 reports `restarting`/`ready`/`failed`. Nothing is written unless configured.
 
+A run that succeeds but needs the operator's attention lists it in `warnings` (an
+array of strings, present only when there is one), in every status written after it
+arose. Each warning is also printed in the terminal, again after "Environment
+ready", and written to the console log as a `WARNING:` line.
+
 ### Console log
 
 With `--status-file` (or `--log-file PATH`), each update run also writes a clean,
@@ -185,7 +190,10 @@ then reads wrongly. The guard is always on; it does not need the opt-in
 - **What it is compared with**: the labels of the app containers that exist now
   (they ran the migrator, even if they then failed their health check), and
   `.xclude/composer-deploy/deployed.json`, which Composer raises after every `up` so
-  the floor survives a `down`.
+  the floor survives a `down`. When the file cannot be written (the deploying user,
+  for an agent-driven deploy the resident pair, has no write access to the deploy
+  root's `.xclude/`), the run says so as a [deploy-status](#deploy-status) warning:
+  the guard then relies on container labels alone, which a `down` removes.
 - **Refused**: the run stops before anything is recreated and names each older
   version. To go back on purpose, restore a database backup taken before the newer
   release, then deploy with `--force`; a forced deploy becomes the new record.

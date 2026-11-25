@@ -922,6 +922,8 @@ class DockerComposeLauncher(
                 self.render()
 
             print("\n🎉 Environment ready")
+            for warning in getattr(self, "deploy_warnings", None) or []:
+                print(f"⚠ {warning}")
 
         except KeyboardInterrupt:
             self.handle_interrupt()

@@ -368,6 +368,39 @@ class DowngradeGuardTests(unittest.TestCase):
         downgrade_guard.write_record({"app": "2.1.0", "dlux": "1.17.0"}, "y", replace=False)
         self.assertEqual(downgrade_guard.read_record(), {"app": "2.2.1", "dlux": "1.17.0"})
 
+    def test_a_record_that_cannot_be_written_is_not_silent(self):
+        # The deploy root's .xclude/ is not writable (here: a file where the
+        # directory should be). The operator must hear it in the terminal, the
+        # console log the live page shows, and the deploy status Operations reads.
+        Path(".xclude").mkdir()
+        Path(".xclude/composer-deploy").write_text("not a directory")
+        self.image["debeski/decrees:v2.1.26"] = NEWER
+        self.launcher.status_file = str(Path(self.tmp.name) / "deploy-status.json")
+        self.launcher.log_file = str(Path(self.tmp.name) / "deploy-log.txt")
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+        with patch("builtins.print") as printed:
+            self.launcher.record_deployed_release()
+        self.launcher.write_status("ready")
+
+        shown = " ".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn(".xclude/composer-deploy/deployed.json", shown)
+        self.assertIn("relies on the app containers' image labels alone", shown)
+        log = Path(self.launcher.log_file).read_text()
+        self.assertIn("WARNING: Could not write .xclude/composer-deploy/deployed.json", log)
+        status = json.loads(Path(self.launcher.status_file).read_text())
+        self.assertEqual(status["status"], "ready")
+        self.assertEqual(len(status["warnings"]), 1)
+        self.assertIn("downgrade guard now relies", status["warnings"][0])
+
+    def test_a_written_record_adds_no_warning(self):
+        self.image["debeski/decrees:v2.1.26"] = NEWER
+        self.launcher.downgrade_guard()
+        with patch("builtins.print") as printed:
+            self.launcher.record_deployed_release()
+        printed.assert_not_called()
+        self.assertFalse(getattr(self.launcher, "deploy_warnings", None))
+
     def test_an_unlabelled_image_over_a_labelled_release_is_refused(self):
         self.image["debeski/decrees:v2.1.26"] = {}
         ok, message = self.launcher.downgrade_guard()

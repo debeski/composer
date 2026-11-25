@@ -103,11 +103,16 @@ def read_record(root: Path = Path(".")) -> Dict[str, str]:
     return {key: str(payload[key]) for key, _ in DIMENSIONS if payload.get(key)}
 
 
-def write_record(target: Mapping[str, str], image: str, *, replace: bool, root: Path = Path(".")) -> None:
-    """Remember the newest release deployed here; ``replace`` after a forced deploy."""
+def write_record(
+    target: Mapping[str, str], image: str, *, replace: bool, root: Path = Path(".")
+) -> Optional[str]:
+    """Remember the newest release deployed here; ``replace`` after a forced deploy.
+
+    Returns why the record could not be written, or None.
+    """
     values = dict(target) if replace else newest(read_record(root), target)
     if not values and not replace:
-        return
+        return None
     payload = {key: values[key] for key, _ in DIMENSIONS if key in values}
     payload["image"] = image
     payload["recorded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -117,8 +122,18 @@ def write_record(target: Mapping[str, str], image: str, *, replace: bool, root: 
         temporary = path.with_name(f".{path.name}.tmp")
         temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, path)
-    except OSError:
-        pass
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return None
+
+
+def record_warning(reason: str) -> str:
+    return (
+        f"Could not write {RECORD} ({reason}). The downgrade guard now relies on the "
+        "app containers' image labels alone, and a `down` removes those, so an older "
+        "image deployed after it would not be refused. Give the deploying user write "
+        "access to the deploy root's .xclude/ directory."
+    )
 
 
 def refusal(image: str, found: List[Tuple[str, str, str]], unlabeled: bool) -> str:
@@ -239,4 +254,17 @@ class DowngradeGuardMixin:
         if not target:
             return
         image, values = target
-        write_record(values, image, replace=bool(getattr(self, "force", False)))
+        reason = write_record(values, image, replace=bool(getattr(self, "force", False)))
+        if reason:
+            self.warn_operator(record_warning(reason))
+
+    def warn_operator(self, message: str) -> None:
+        """A warning the operator must see: terminal, console log and deploy status."""
+        warnings = getattr(self, "deploy_warnings", None)
+        if warnings is None:
+            warnings = self.deploy_warnings = []
+        if message in warnings:
+            return
+        warnings.append(message)
+        print(f"\n⚠ {message}", flush=True)
+        self.append_console(f"WARNING: {message}")

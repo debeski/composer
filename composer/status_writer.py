@@ -65,6 +65,9 @@ class StatusWriterMixin:
             payload["active_version"] = active_version
         if error:
             payload["error"] = redact_text(error)[:2000]
+        warnings = getattr(self, "deploy_warnings", None)
+        if warnings:
+            payload["warnings"] = [redact_text(text)[:1000] for text in warnings]
         if extra:
             payload.update(extra)
 
