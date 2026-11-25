@@ -60,18 +60,72 @@ compares the app image's own version labels with what the deployment last ran.
 Composer has two halves that update separately: the deployer the wrappers run, and
 the resident `composer-agent` + `composer-executor` pair inside the stack.
 
-- `composer update self` pulls the deployer used by `start.sh`
-  (`debeski/composer:latest`, or `:beta` on the beta channel) and leaves the stack
-  alone. `self update` remains a deprecated alias. Set `COMPOSER_SELF_IMAGE` only
-  when using a compatible Composer image mirror.
-- `composer agent update` pulls the pair's image once and recreates both, without
-  touching the application ([the resident pair](resident-pair.md#lifecycle-commands)).
+- `composer update self` pins the deployer used by `start.sh` to the channel's
+  newest signed release ([the Composer pin](#the-composer-pin)), pulls it, and
+  leaves the stack alone. `self update` remains a deprecated alias. Set
+  `COMPOSER_SELF_IMAGE` only when using a compatible Composer image mirror.
+- `composer agent update` pins the same release, pulls the pair's image once and
+  recreates both, without touching the application
+  ([the resident pair](resident-pair.md#lifecycle-commands)).
 - Plain `./start.sh update` does both: the deployer first, then the stack and the
   pair.
 
 `composer check` reports drift between the deployer, the wrappers and the pair
 ([`versions`](check.md#versions), [`composer-channel`](check.md#composer-channel),
 [wrappers](check.md#wrapperstartsh-wrapperstartps1)).
+
+### The Composer pin
+
+Both halves run `debeski/composer:vX.Y.Z@sha256:…`, never a moving tag, once a
+deployment has been updated. The digest comes from the release itself, not from the
+registry, so whoever can push to Docker Hub cannot change what a deployment runs.
+
+1. Composer reads the version label of the channel tag (`:latest`, or the newer of
+   `:beta` and `:latest` on the beta channel). That label only chooses which release
+   to look up. The stable channel refuses a prerelease.
+2. It downloads `composer-image.json` and `composer-image.json.sigstore.json` from
+   that version's GitHub Release
+   (`https://github.com/debeski/composer/releases/download/vX.Y.Z/…`). Redirects are
+   followed only to GitHub's asset hosts.
+3. It verifies the Sigstore bundle against the identity
+   `https://github.com/debeski/composer/.github/workflows/release.yml@refs/tags/vX.Y.Z`
+   (issuer `https://token.actions.githubusercontent.com`). Verification runs online
+   first, so Sigstore key rotations arrive, then offline against the trust root
+   shipped with Composer, so a Sigstore outage alone does not block an update. The
+   statement must name that exact version, tag, `debeski/composer` and a sha256
+   digest.
+4. It writes the result to `.composer-image` beside `.composer-channel`, and
+   rewrites the generated block's `debeski/composer` lines to the same reference.
+   The Compose edit is validated first and the original is kept under
+   `.xclude/composer-check/`.
+5. The wrapper then pulls that digest. A pull by digest is checked against the
+   content, so the registry cannot substitute another image.
+
+**Never backwards.** A channel tag that advertises a version older than the pin is
+refused: a registry can point a tag at a genuine old release, and following it would
+be a downgrade. Pass `--allow-downgrade` to `update self` or `agent update` to move
+back on purpose. A channel switch (`check --stable` / `--beta`) may move back,
+because the operator chose it. A version the deployment already runs keeps its
+current pin.
+
+**Fail closed.** An update that cannot be verified changes nothing, and the current
+pin keeps running. When GitHub or Sigstore cannot be reached (an air-gapped host, an
+outage), `--allow-unverified-composer` on `update self`, `agent update` or
+`check --beta|--stable` pins the registry's digest for that release's own
+`:vX.Y.Z` tag instead. The wrapper forwards `COMPOSER_ALLOW_UNVERIFIED_COMPOSER=1`
+as the same switch. The output says `UNVERIFIED`. No flag accepts a signature,
+identity or statement that fails to match. A mirror is pinned with an explicit
+`COMPOSER_SELF_IMAGE=…@sha256:…`, which is never resolved over.
+
+**First pin.** A deployment with no `.composer-image` runs its channel tag. The
+first `update self`, `./start.sh update`, `agent update` or channel switch trusts
+that tag once, to start the deployer that does the verifying, and pins from then on. A deployer image without the
+`org.dlux.composer.image-pin` label cannot pin. The wrapper then keeps the tag and
+says so. `check` reports the unpinned state as OK, and `check --fix` only pins the
+block to a lock that already exists. It never goes to the network.
+
+Wrapper 7 is the first that reads `.composer-image`. An older wrapper keeps pulling
+the channel tag for the deployer, and `check --fix` replaces it.
 
 ## Inline DjangoLux updates
 
@@ -305,16 +359,19 @@ never opted in is never handed a beta because a file was missing.
 
 `composer check --beta` / `--stable` switch **Composer's own** channel. One operation
 moves both halves together: the persisted `.composer-channel` file that the wrappers
-read before any Composer code runs, and the image the resident
-`composer-agent`/`composer-executor` pair run inside the stack, because a deployer on
-`:beta` talking to an agent on `:latest` is a configuration nobody chose. The retag is
-scoped to `debeski/composer:*` images inside the generated block, so the third-party
-socket proxy and anything outside the markers are untouched.
+read before any Composer code runs, the `.composer-image` pin, and the image the
+resident `composer-agent`/`composer-executor` pair run inside the stack, because a
+deployer on `:beta` talking to an agent on `:latest` is a configuration nobody chose.
+The new channel's release is resolved and verified first
+([the Composer pin](#the-composer-pin)); a switch that cannot be verified changes
+nothing. The retag is scoped to `debeski/composer` images inside the generated block,
+so the third-party socket proxy and anything outside the markers are untouched.
 
 Both flags are confirmation-gated (`-y` honoured), mutually exclusive, and dry-run
-first: the channel file is written only after the Compose edit validates. Plain
-`composer check` reports drift between the two halves without changing anything, and
-`check --fix` preserves the channel. An explicit `COMPOSER_SELF_IMAGE` pin always wins
-over the channel: an operator who pinned an image asked for that image.
+first: the pin and the channel file are written only after the Compose edit
+validates. Plain `composer check` reports drift between the halves without changing
+anything, and `check --fix` preserves the channel and pins the block to the existing
+lock. An explicit `COMPOSER_SELF_IMAGE` pin always wins over both: an operator who
+pinned an image asked for that image.
 
 How Composer's own releases reach each channel: [releasing](RELEASING.md#channels-stable-and-beta).

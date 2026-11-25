@@ -72,9 +72,49 @@ The `Release` workflow then:
 - runs the unit tests, then builds an amd64 image and runs `scripts/smoke-test.sh`
   on it,
 - builds `linux/amd64` + `linux/arm64` with Buildx,
-- pushes `debeski/composer:vX.Y.Z` plus the moving alias the tag earns,
+- pushes `debeski/composer:vX.Y.Z` only,
+- writes `composer-image.json` (`schema`, `image`, `version`, `tag`, the pushed index
+  `digest`, `prerelease`), signs it keylessly with Sigstore as this workflow on this
+  tag (`sign` job, the only one with `id-token: write`), and verifies the signature
+  exactly as a deployment will,
 - publishes the GitHub Release with the real `prerelease`/`make_latest` flags,
-  using the matching `CHANGELOG.md` section.
+  using the matching `CHANGELOG.md` section, with `composer-image.json` and
+  `composer-image.json.sigstore.json` attached,
+- only then moves the alias the tag earns (`aliases` job) onto that digest with
+  `docker buildx imagetools create`.
+
+Deployments pin Composer to the signed digest and refuse a release without one
+([the Composer pin](updates.md#the-composer-pin)), so the statement and its bundle are
+part of the release, not decoration. The aliases move last so that a channel tag
+never advertises a release whose statement is not published yet.
+
+### When a release job fails
+
+Each job can be re-run on its own from the workflow run (**Re-run failed jobs**); the
+tag, the pushed `:vX.Y.Z` and its digest stay the same.
+
+- **`sign` failed:** nothing is published beyond `:vX.Y.Z`. Re-run it. If it keeps
+  failing (Sigstore down), wait: without the statement no deployment will take the
+  release, and the aliases have not moved.
+- **`github-release` failed:** re-run it. It downloads the signed files from the
+  `sign` job's artifact; never recreate them by hand, since a statement signed
+  anywhere else does not carry this workflow's identity and every deployment refuses
+  it. A release that already exists is updated and gets the two assets attached.
+- **`aliases` failed:** re-run it. Until it succeeds the channels still serve the
+  previous release, which is safe.
+- **Before calling a release done,** check that both assets are on it:
+
+  ```bash
+  gh release view vX.Y.Z -R debeski/composer --json assets --jq '.assets[].name'
+  ```
+
+  and that the aliases name the statement's digest:
+
+  ```bash
+  docker buildx imagetools inspect debeski/composer:beta --format '{{json .Manifest.Digest}}'
+  ```
+
+A tag whose `build-push` failed before anything was pushed is re-cut as before.
 
 ## Channels: stable and beta
 

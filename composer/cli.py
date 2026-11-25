@@ -250,11 +250,36 @@ def parse_pull_args(argv):
     return parser.parse_args(argv)
 
 
+def _add_pin_options(parser):
+    parser.add_argument(
+        "--allow-unverified-composer",
+        action="store_true",
+        help=(
+            "When GitHub or Sigstore cannot be reached, pin the registry's digest for the "
+            "release's own tag instead of refusing (never overrides a signature that fails)"
+        ),
+    )
+
+
 def parse_update_self_args(argv):
     parser = argparse.ArgumentParser(
         prog="composer update self",
-        description="Pull the latest Composer deployer image.",
+        description=(
+            "Pin the Composer deployer to the channel's newest signed release "
+            "(.composer-image), then pull it."
+        ),
     )
+    parser.add_argument(
+        "--pin",
+        action="store_true",
+        help="Resolve, verify and write the pin only; the wrapper pulls it",
+    )
+    parser.add_argument(
+        "--allow-downgrade",
+        action="store_true",
+        help="Accept a release older than the current pin",
+    )
+    _add_pin_options(parser)
     return parser.parse_args(argv)
 
 
@@ -321,6 +346,7 @@ def parse_check_args(argv):
         action="store_true",
         help="Return this project to the stable Composer channel (debeski/composer:latest)",
     )
+    _add_pin_options(parser)
     parser.add_argument("--json", action="store_true", help="Emit results as JSON")
     return parser.parse_args(argv)
 
@@ -363,8 +389,15 @@ def parse_agent_check_args(argv):
     return parser.parse_args(argv)
 
 
-def _parse_agent_service_args(argv, prog, description, *, status_file=False):
+def _parse_agent_service_args(argv, prog, description, *, status_file=False, pin=False):
     parser = argparse.ArgumentParser(prog=prog, description=description)
+    if pin:
+        parser.add_argument(
+            "--allow-downgrade",
+            action="store_true",
+            help="Accept a release older than the current pin",
+        )
+        _add_pin_options(parser)
     parser.add_argument("-f", "--file", help="Specify an alternate compose file")
     parser.add_argument(
         "-d",
@@ -385,9 +418,11 @@ def parse_agent_update_args(argv):
     return _parse_agent_service_args(
         argv,
         "composer agent update",
-        "Pull and recreate only this stack's resident pair (composer-agent, plus "
-        "composer-executor when defined).",
+        "Pin the channel's newest signed Composer release, then pull and recreate "
+        "only this stack's resident pair (composer-agent, plus composer-executor "
+        "when defined).",
         status_file=True,
+        pin=True,
     )
 
 

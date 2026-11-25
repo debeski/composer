@@ -46,6 +46,8 @@ MANIFEST_LABEL = "org.dlux.project.release-manifest"
 OCI_VERSION_LABEL = "org.opencontainers.image.version"
 BAKED_LABEL_SUFFIX = ".dlux_baked_version"
 DIMENSIONS = (("app", "app"), ("dlux", "DjangoLux"))
+#: What was deployed, beside which release it was (``write_record``).
+IDENTITY_KEYS = ("image", "repo_digest", "image_id")
 RUNTIME_ROOT = "/opt/dlux-runtime"
 
 # Runs in a throwaway Composer container: prints {"active": ..., "floor": ...}
@@ -130,18 +132,60 @@ def read_record(root: Path = Path(".")) -> Dict[str, str]:
     return {key: str(payload[key]) for key, _ in DIMENSIONS if payload.get(key)}
 
 
+def read_deployed_image(root: Path = Path(".")) -> Dict[str, str]:
+    """``image``, ``repo_digest`` and ``image_id`` of the last deploy, where recorded."""
+    try:
+        payload = json.loads((Path(root) / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {key: str(payload[key]) for key in IDENTITY_KEYS if payload.get(key)}
+
+
+def repo_digest_for(image: str, repo_digests) -> str:
+    """The ``repo@sha256:…`` entry of ``RepoDigests`` that belongs to ``image``'s repository.
+
+    Docker records Hub images as ``docker.io/[library/]name``; a local build has
+    none. An entry for another repository is never taken, so the rollback target
+    is the repository the stack names, or nothing.
+    """
+    def canonical(repository: str) -> str:
+        for prefix in ("docker.io/library/", "docker.io/", "index.docker.io/"):
+            if repository.startswith(prefix):
+                repository = repository[len(prefix):]
+                break
+        return repository[len("library/"):] if repository.startswith("library/") else repository
+
+    name = str(image or "").split("@", 1)[0]
+    last = name.rsplit("/", 1)[-1]
+    repository = name.rsplit(":", 1)[0] if ":" in last else name
+    for entry in repo_digests or []:
+        entry = str(entry)
+        if "@sha256:" in entry and canonical(entry.split("@", 1)[0]) == canonical(repository):
+            return entry
+    return ""
+
+
 def write_record(
-    target: Mapping[str, str], image: str, *, replace: bool, root: Path = Path(".")
+    target: Mapping[str, str], image: str, *, replace: bool, root: Path = Path("."),
+    identity: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
     """Remember the newest release deployed here; ``replace`` after a forced deploy.
 
+    ``identity`` is what was actually deployed (``repo_digest``, ``image_id``):
+    an exact rollback target and audit trail even after the tag moves. It records,
+    it does not protect: whoever pushes the tag chooses what the next pull gets.
+
     Returns why the record could not be written, or None.
     """
+    identity = {key: str(value) for key, value in (identity or {}).items() if key in IDENTITY_KEYS and value}
     values = dict(target) if replace else newest(read_record(root), target)
-    if not values and not replace:
+    if not values and not replace and not identity:
         return None
     payload = {key: values[key] for key, _ in DIMENSIONS if key in values}
     payload["image"] = image
+    payload.update(identity)
     payload["recorded_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     path = Path(root) / RECORD
     try:
@@ -228,6 +272,23 @@ class DowngradeGuardMixin:
         except ValueError:
             return {}
         return labels if isinstance(labels, dict) else {}
+
+    def deployed_image_identity(self, image: str) -> Dict[str, str]:
+        """``repo_digest`` and ``image_id`` of the local ``image`` that ``up`` just used."""
+        ok, out, _ = self.run_command(
+            ["docker", "image", "inspect", image, "--format", "{{json .Id}} {{json .RepoDigests}}"],
+            timeout=15,
+        )
+        if not ok:
+            return {}
+        try:
+            image_id, _, digests = (out or "").strip().partition(" ")
+            image_id, digests = json.loads(image_id or "null"), json.loads(digests or "null")
+        except ValueError:
+            return {}
+        identity = {"image_id": str(image_id or "")}
+        identity["repo_digest"] = repo_digest_for(image, digests if isinstance(digests, list) else [])
+        return {key: value for key, value in identity.items() if value}
 
     def deployed_app_versions(self, services: List[str]) -> Dict[str, str]:
         """Newest versions labelled on the existing containers of ``services``."""
@@ -326,7 +387,8 @@ class DowngradeGuardMixin:
         if not target:
             return
         image, values = target
-        reason = write_record(values, image, replace=bool(getattr(self, "force", False)))
+        reason = write_record(values, image, replace=bool(getattr(self, "force", False)),
+                              identity=self.deployed_image_identity(image))
         if reason:
             self.warn_operator(record_warning(reason))
 

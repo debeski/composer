@@ -24,7 +24,7 @@ Both carry a marker (line 2 of `start.sh`, after the shebang; line 1 of
 `start.ps1`):
 
 ```bash
-# composer-wrapper: 6
+# composer-wrapper: 7
 ```
 
 It is a plain integer, bumped only when the wrapper bytes change, deliberately
@@ -199,6 +199,15 @@ then reads wrongly. The guard is always on; it does not need the opt-in
   release, then deploy with `--force`; a forced deploy becomes the new record.
 - **Not compared**: `-d` and `-b` runs (local builds carry no labels) and scoped
   runs that do not touch the app services.
+- **What was deployed**: the record also names the image `up` used, by tag
+  (`image`), by repository digest (`repo_digest`, the pulled image's `RepoDigests`
+  entry for that repository; empty for a local build) and by `image_id`. That is the
+  exact rollback target even after the tag has moved (`WEB_IMAGE=<repo_digest>`),
+  and `check`'s [`registry-login`](check.md#registry-login) finding notes when the
+  tag now names another image. It is a record, not a protection: an update still
+  pulls whatever the tag names, and labels can be set by anyone who can push it.
+  Composer's own images are pinned to signed digests instead
+  ([the Composer pin](updates.md#the-composer-pin)).
 
 The baked DjangoLux version is also checked against the image floor of the release
 the runtime volume has active: `requires.baked_image` (legacy `image_baseline`) in

@@ -110,7 +110,7 @@ and `--since`/`--until` bound the window. `composer logs` is an alias.
 
 ### `check`
 
-`composer check [--fix] [-y] [--deep] [--deep-service S] [--deep-command CMD] [--json] [--beta|--stable] [-f FILE] [-d]`
+`composer check [--fix] [-y] [--deep] [--deep-service S] [--deep-command CMD] [--json] [--beta|--stable] [--allow-unverified-composer] [-f FILE] [-d]`
 
 Diagnoses the outside of a stack, and with `--fix` repairs it. Reference, with every
 finding: [`composer check`](check.md).
@@ -126,8 +126,8 @@ Undoes a group-access grant `check --fix` made on app data, from the
 
 | Command | Does |
 | --- | --- |
-| `composer update self` | pulls the deployer image (`:latest`, or `:beta` on the beta channel) and leaves the stack alone; `self update` is a deprecated alias ([Composer itself](updates.md#composer-itself)) |
-| `composer agent update` | pulls the resident pair's image and recreates `composer-agent` and `composer-executor` |
+| `composer update self [--pin] [--allow-downgrade] [--allow-unverified-composer]` | pins the deployer to the channel's newest signed release (`.composer-image`), pulls it and leaves the stack alone; `--pin` only writes the pin, which the wrapper then pulls; `self update` is a deprecated alias ([the Composer pin](updates.md#the-composer-pin)) |
+| `composer agent update [--allow-downgrade] [--allow-unverified-composer]` | pins the same release, pulls the resident pair's image and recreates `composer-agent` and `composer-executor` |
 | `composer agent restart` | restarts the pair and waits for health |
 | `composer agent off` | stops the pair |
 | `composer agent enable [--apply]` | migrates a legacy or agent-only stack to the hardened pair; dry run by default ([topology migrations](stack-migrations.md#topology-migrations)) |

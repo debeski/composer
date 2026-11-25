@@ -208,6 +208,7 @@ def _dry_run_repairs(launcher, args):
     repairs.extend(_worker_repair(launcher))
     repairs.extend(_celery_repair(launcher))
     repairs.extend(_stamp_repair(launcher))
+    repairs.extend(_composer_pin_repair(launcher))
     return repairs, compose_digest(launcher)
 
 
@@ -356,6 +357,31 @@ def _stamp_repair(launcher):
     }]
 
 
+def _composer_pin_repair(launcher):
+    """`check --fix` pins the resident pair to an existing .composer-image (offline)."""
+    from . import agent_installer, image_pin
+
+    lock = image_pin.read_lock(".")
+    if lock is None or os.environ.get("COMPOSER_SELF_IMAGE", "").strip():
+        return []
+    try:
+        outcome = agent_installer.pin_composer_image(
+            ".", pin=lock, compose_file=getattr(launcher, "compose_file", None) or "",
+            apply=False, include_diff=True,
+        )
+    except Exception as exc:
+        return [{"name": "composer-pin", "files": [], "diff": "",
+                 "note": redact_text(str(exc))[:MAX_MESSAGE_CHARS]}]
+    if not outcome.get("files"):
+        return []
+    return [{
+        "name": "composer-pin",
+        "files": [str(f) for f in outcome["files"]],
+        "diff": redact_text(str(outcome.get("diff") or ""))[:MAX_DIFF_CHARS],
+        "note": f"Pin the resident pair to {lock.ref}.",
+    }]
+
+
 def _apply_fixes(runtime, request) -> dict:
     """Run `check --fix` for real, but only against the files the preview saw."""
     from .launcher import DockerComposeLauncher
@@ -420,14 +446,22 @@ def _resident_update_status(runtime=None) -> dict:
     which the card shows as "could not check" — not as an update, and not as
     being on the latest.
     """
-    from . import channel_config, registry
+    from . import channel_config, image_pin, registry
     from .version import read_composer_version
     from .versions import try_parse
 
     current = read_composer_version()
-    image = channel_config.resolve_self_image()
-    channel = channel_config.read_channel()
-    published = registry.remote_image_version(image) or ""
+    state = channel_config.describe()
+    image = state["image"]
+    channel = state["channel"]
+    # The pin's own tag always carries the running version, so ask the channel.
+    if state["pinned"]:
+        published = registry.remote_image_version(image) or ""
+    else:
+        try:
+            published = image_pin.channel_version(channel, strict=False)
+        except image_pin.PinError:
+            published = ""
     known = bool(published)
     here, there = try_parse(current), try_parse(published)
     available = bool(known and here and there and there > here)
