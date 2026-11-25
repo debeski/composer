@@ -141,12 +141,28 @@ registry, so whoever can push to Docker Hub cannot change what a deployment runs
 5. The wrapper then pulls that digest. A pull by digest is checked against the
    content, so the registry cannot substitute another image.
 
-**Never backwards.** A channel tag that advertises a version older than the pin is
-refused: a registry can point a tag at a genuine old release, and following it would
-be a downgrade. Pass `--allow-downgrade` to `update self` or `agent update` to move
-back on purpose. A channel switch (`check --stable` / `--beta`) may move back,
-because the operator chose it. A version the deployment already runs keeps its
-current pin.
+**Only when there is something to update.** The channel's version is compared with
+the pin, or, before the first pin, with the Composer doing the update:
+
+| The channel advertises | What happens |
+| --- | --- |
+| a newer release | It is verified and pinned. If it cannot be verified, the update is refused and the current pin keeps running. |
+| the pinned release | Nothing changes. |
+| the running release, with no pin yet | It is pinned if it verifies. If GitHub or Sigstore cannot be reached, or the statement is not published yet, nothing changes and the run says why. A statement that fails verification is refused. |
+| an older release | Nothing changes: a channel tag never moves a pin backwards. The run says the channel is older. |
+| nothing readable (registry unreachable) | Nothing changes, and the run says so. |
+
+None of the "nothing changes" outcomes is an error. `agent update` then pulls and
+recreates the pair on the image the block already names, and the wrapper keeps the
+deployer it has. That is also why a release candidate's own smoke test, which runs
+a Composer newer than any published release, needs no statement and no network
+beyond the channel's version label.
+
+A registry can point a tag at a genuine old release; following it would be a
+downgrade. Pass `--allow-downgrade` to `update self` or `agent update` to move back on
+purpose. A channel switch (`check --stable` / `--beta`) may move back, because the
+operator chose it. Both must verify the release they move to, and fail on an
+unreadable channel.
 
 **Fail closed.** An update that cannot be verified changes nothing, and the current
 pin keeps running. When GitHub or Sigstore cannot be reached (an air-gapped host, an
@@ -157,12 +173,19 @@ as the same switch. The output says `UNVERIFIED`. No flag accepts a signature,
 identity or statement that fails to match. A mirror is pinned with an explicit
 `COMPOSER_SELF_IMAGE=…@sha256:…`, which is never resolved over.
 
-**First pin.** A deployment with no `.composer-image` runs its channel tag. The
-first `update self`, `./start.sh update`, `agent update` or channel switch trusts
-that tag once, to start the deployer that does the verifying, and pins from then on. A deployer image without the
-`org.dlux.composer.image-pin` label cannot pin. The wrapper then keeps the tag and
-says so. `check` reports the unpinned state as OK, and `check --fix` only pins the
-block to a lock that already exists. It never goes to the network.
+**Releases before signing.** Releases before 1.11.0b1 have no statement. Updating
+away from them needs nothing from them. Switching to one (for example
+`check --stable` while the stable channel's newest is 1.10.4) is refused with that
+reason, unless `--allow-unverified-composer` pins its registry digest.
+
+**First pin.** A deployment with no `.composer-image` runs its channel tag. Each
+`update self`, `./start.sh update`, `agent update` or channel switch trusts that tag
+to start the deployer that does the verifying, until one of them pins: the channel's
+release verified, either newer than that deployer or the same release. A deployer
+image without the `org.dlux.composer.image-pin` label cannot pin; the wrapper then
+keeps the tag and says so. `check` reports the unpinned state as OK, and
+`check --fix` only pins the block to a lock that already exists. It never goes to
+the network.
 
 Wrapper 7 is the first that reads `.composer-image`. An older wrapper keeps pulling
 the channel tag for the deployer, and `check --fix` replaces it.

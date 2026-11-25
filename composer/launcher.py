@@ -346,7 +346,7 @@ class DockerComposeLauncher(
     def report_pin(resolution, outcome) -> None:
         pin = resolution.pin
         if resolution.note:
-            print(("⚠ " if not pin.verified else "") + resolution.note)
+            print(("⚠ " if pin is not None and not pin.verified else "") + resolution.note)
         if resolution.changed:
             source = "signed release" if pin.verified else "UNVERIFIED registry digest"
             print(f"🔒 Composer pinned to {pin.ref} ({source}).")

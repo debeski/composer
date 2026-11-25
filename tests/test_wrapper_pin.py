@@ -38,7 +38,7 @@ case "$1" in
     case "$*" in
       *"update self --pin"*)
         if [ "${PIN_EXIT:-0}" != 0 ]; then exit "$PIN_EXIT"; fi
-        printf "%s\n" "$NEW_LOCK" > "$PROJECT_DIR/.composer-image"
+        if [ -n "$NEW_LOCK" ]; then printf "%s\n" "$NEW_LOCK" > "$PROJECT_DIR/.composer-image"; fi
         exit 0 ;;
     esac
     exit 0 ;;
@@ -118,6 +118,22 @@ class WrapperPinTests(unittest.TestCase):
         self.assertTrue(any(c.endswith("debeski/composer:latest update self --pin") for c in calls), calls)
         self.assertEqual(lock, LOCK_NEW)
         self.assertIn(f"pull {LOCK_NEW}", calls)
+
+    def test_nothing_to_pin_keeps_the_installed_deployer(self):
+        # A candidate newer than its channel, or a release not verifiable yet:
+        # `update self --pin` succeeds without writing a lock.
+        result, calls, lock = self._run("update", "self", can_pin=("debeski/composer:latest",),
+                                        new_lock="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(lock)
+        self.assertNotIn("unreadable", result.stderr)
+
+    def test_nothing_to_pin_still_updates_the_stack_on_the_installed_deployer(self):
+        result, calls, _ = self._run("update", local=("debeski/composer:latest",),
+                                     can_pin=("debeski/composer:latest",), new_lock="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("could not refresh", result.stderr)
+        self.assertTrue(self._launches(calls)[-1].endswith("debeski/composer:latest update"), calls)
 
     def test_a_deployer_from_before_pinning_stays_on_the_tag(self):
         result, calls, lock = self._run("update", "self")

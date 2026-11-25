@@ -1526,6 +1526,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             resolution = image_pin.resolve(
                 channel,
                 current=image_pin.read_lock("."),
+                running=self.composer_version,
                 allow_downgrade=True,
                 allow_unverified=bool(getattr(args, "allow_unverified_composer", False))
                 or image_pin.allow_unverified_from_env(),

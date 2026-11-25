@@ -269,10 +269,20 @@ def verified_pin(version: str, *, fetch=fetch_asset, runner=subprocess.run,
 
 @dataclass(frozen=True)
 class Resolution:
-    pin: Pin
+    """What the channel asks for. ``pin`` is None when there is none yet and none to take."""
+
+    pin: Optional[Pin]
     current: Optional[Pin]
     changed: bool
     note: str = ""
+
+
+#: The first release whose GitHub Release carries a signed digest statement.
+SIGNED_SINCE = "1.11.0b1"
+
+
+def predates_signing(version: str) -> bool:
+    return versions.parse(version) < versions.parse(SIGNED_SINCE)
 
 
 def channel_version(channel: str, *, label_reader=None, strict: bool = True) -> str:
@@ -310,44 +320,92 @@ def _unverified_pin(version: str, *, digest_reader=None) -> Pin:
     return Pin(version=version, digest=str(digest), verified=False)
 
 
+def _keep(current: Optional[Pin], note: str) -> Resolution:
+    return Resolution(pin=current, current=current, changed=False, note=note)
+
+
+def _order(version: str, baseline: Optional[str]) -> Optional[int]:
+    """-1, 0 or 1 for ``version`` against ``baseline``; None when there is no usable baseline."""
+    other = versions.try_parse(baseline)
+    if other is None:
+        return None
+    mine = versions.parse(version)
+    return (mine > other) - (mine < other)
+
+
 def resolve(
     channel: str,
     *,
     current: Optional[Pin] = None,
+    running: Optional[str] = None,
     allow_downgrade: bool = False,
     allow_unverified: bool = False,
     label_reader=None,
     pin_reader=None,
     digest_reader=None,
 ) -> Resolution:
-    """The verified pin the channel should run now, or `PinError`.
+    """The pin the channel should run now, or `PinError`.
 
-    The current pin stays when the channel offers the same version. A different
-    digest for a version we already run is never adopted silently. An older
-    version is refused unless ``allow_downgrade`` is set, which an explicit
-    channel switch passes.
+    A pin moves only when there is something to move to. The baseline is the
+    current pin, or, before the first pin, the Composer doing the update
+    (``running``):
+
+    - **Newer than the baseline:** a real update. It must verify, and it fails
+      closed. Only ``allow_unverified`` turns an unreachable GitHub or Sigstore
+      into the release tag's registry digest. A failed signature is never
+      accepted.
+    - **The baseline itself:** the current pin stays. Before the first pin, the
+      release is pinned when it verifies. If it cannot be verified yet, nothing
+      changes and the note says why; a forged statement still fails.
+    - **Older than the baseline:** nothing to update; a channel tag never moves
+      a pin backwards. ``allow_downgrade`` (an explicit switch or
+      ``--allow-downgrade``) asks for that move, and it must then verify.
+    - **An unreadable channel:** nothing changes, except for an explicit move,
+      which fails.
+
+    A release before `SIGNED_SINCE` has no statement. Pinning it needs the
+    escape, and only an explicit move can ask for an older release.
     """
-    version = channel_version(channel, label_reader=label_reader)
-    if current is not None and current.version == version:
-        return Resolution(pin=current, current=current, changed=False,
-                          note=f"Composer {current.short} is already the {channel} channel's release.")
-    if current is not None and not allow_downgrade and versions.parse(version) < versions.parse(current.version):
-        raise PinError(
-            f"The {channel} channel advertises Composer {version}, older than the pinned {current.version}. "
-            "Refusing to move backwards; a registry can only do this by pointing a tag at an old release. "
-            "Switch channels with 'composer check --stable' / '--beta', or pass --allow-downgrade."
-        )
     try:
-        pin = (pin_reader or verified_pin)(version)
+        version = channel_version(channel, label_reader=label_reader)
     except PinError as exc:
-        if not (exc.unavailable and allow_unverified):
-            raise
+        if exc.unavailable and not allow_downgrade:
+            return _keep(current, f"{exc} The Composer pin is unchanged.")
+        raise
+    if current is not None and current.version == version:
+        return _keep(current, f"Composer {current.short} is already the {channel} channel's release.")
+    order = _order(version, current.version if current is not None else running)
+    if order is not None and order < 0 and not allow_downgrade:
+        if current is not None:
+            note = (f"The {channel} channel advertises Composer {version}, older than the pinned "
+                    f"{current.version}; a channel tag never moves a pin backwards. Nothing to update.")
+        else:
+            note = (f"This Composer ({running}) is newer than the {channel} channel's newest release "
+                    f"({version}); nothing to pin.")
+        return _keep(current, note)
+    required = allow_downgrade or order is None or order > 0
+    if predates_signing(version):
+        failure = PinError(
+            f"Composer {version} predates signed releases (the first is {SIGNED_SINCE}), so it has no "
+            "digest statement to verify.",
+            unavailable=True,
+        )
+    else:
+        try:
+            pin = (pin_reader or verified_pin)(version)
+        except PinError as exc:
+            failure = exc
+        else:
+            return Resolution(pin=pin, current=current, changed=_moved(pin, current))
+    if failure.unavailable and allow_unverified:
         pin = _unverified_pin(version, digest_reader=digest_reader)
         return Resolution(pin=pin, current=current, changed=_moved(pin, current), note=(
-            f"UNVERIFIED: {exc} Pinned the registry's digest for {pin.tag} because "
+            f"UNVERIFIED: {failure} Pinned the registry's digest for {pin.tag} because "
             "--allow-unverified-composer was given."
         ))
-    return Resolution(pin=pin, current=current, changed=_moved(pin, current))
+    if required or not failure.unavailable:
+        raise failure
+    return _keep(current, f"Composer {version} could not be pinned yet: {failure} Nothing changed.")
 
 
 def _moved(pin: Pin, current: Optional[Pin]) -> bool:
@@ -362,11 +420,12 @@ def update_pin(
     allow_unverified: bool = False,
     env=None,
     resolver=None,
+    running: Optional[str] = None,
 ):
     """Resolve the channel's signed release and apply it to the lock and the block.
 
     Returns ``(resolution, outcome)``; ``outcome`` is ``pin_composer_image``'s
-    result. Raises `PinError`, or `AgentInstallError` when the Compose edit is
+    result, or empty when there is no pin to apply. Raises `PinError`, or `AgentInstallError` when the Compose edit is
     refused. An explicit ``COMPOSER_SELF_IMAGE`` is the operator's own pin, so
     nothing is resolved over it.
     """
@@ -375,12 +434,19 @@ def update_pin(
     env = os.environ if env is None else env
     if str(env.get("COMPOSER_SELF_IMAGE") or "").strip():
         raise PinError("COMPOSER_SELF_IMAGE pins the Composer image explicitly; unset it to follow the channel.")
+    if running is None:
+        from .version import read_composer_version
+
+        running = read_composer_version()
     channel = channel_config.read_channel(project_dir)
     resolution = (resolver or resolve)(
         channel,
         current=read_lock(project_dir),
+        running=running,
         allow_downgrade=allow_downgrade,
         allow_unverified=allow_unverified or allow_unverified_from_env(env),
     )
+    if resolution.pin is None:
+        return resolution, {"applied": False, "files": [], "command": "", "lock_changed": False}
     outcome = pin_composer_image(project_dir, pin=resolution.pin, compose_file=compose_file, apply=True)
     return resolution, outcome

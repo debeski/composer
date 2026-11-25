@@ -7,6 +7,7 @@ is accepted, when a pin may move, and what the wrapper and the block run.
 
 import functools
 import io
+import shutil
 import json
 import os
 import subprocess
@@ -219,15 +220,16 @@ class ResolveTests(unittest.TestCase):
         self.assertFalse(resolution.changed)
         self.assertEqual(resolution.pin, current)
 
-    def test_a_tag_pointed_back_at_an_old_release_is_refused(self):
-        with self.assertRaises(image_pin.PinError) as caught:
-            self._resolve(label="1.10.4", current=image_pin.Pin("1.11.0", DIGEST_A))
-        self.assertIn("older than the pinned 1.11.0", str(caught.exception))
+    def test_a_tag_pointed_back_at_an_old_release_never_moves_the_pin(self):
+        current = image_pin.Pin("1.11.1", DIGEST_B)
+        resolution = self._resolve(current=current, pin_reader=lambda v: self.fail("fetched"))
+        self.assertFalse(resolution.changed)
+        self.assertEqual(resolution.pin, current)
+        self.assertIn("older than the pinned 1.11.1", resolution.note)
 
     def test_an_explicit_downgrade_is_allowed(self):
-        resolution = self._resolve(label="1.10.4", current=image_pin.Pin("1.11.0", DIGEST_A),
-                                   allow_downgrade=True)
-        self.assertEqual(resolution.pin.version, "1.10.4")
+        resolution = self._resolve(current=image_pin.Pin("1.11.1", DIGEST_B), allow_downgrade=True)
+        self.assertEqual(resolution.pin.version, "1.11.0")
 
     def test_the_escape_never_overrides_a_failed_signature(self):
         def invalid(version):
@@ -468,3 +470,135 @@ class AgentUpdatePinTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BootstrapTests(unittest.TestCase):
+    """The pin moves only when there is something to move to (1.11.0b1 smoke test).
+
+    The 1.11.0b1 candidate's own smoke test ran `agent update` while the stable
+    channel still advertised 1.10.4, which predates signed releases. Nothing was
+    newer than the Composer doing the update, yet it refused because 1.10.4 had
+    no statement. A real update still verifies, never moves back, fails closed.
+    """
+
+    def _resolve(self, label, *, current=None, running="1.11.0b1", pin_reader=None, **kwargs):
+        fetched = []
+
+        def reader(version):
+            fetched.append(version)
+            if pin_reader:
+                return pin_reader(version)
+            return image_pin.Pin(version, DIGEST_A)
+
+        resolution = image_pin.resolve("stable" if not image_pin.versions.is_prerelease(str(label))
+                                       else "beta", current=current, running=running,
+                                       label_reader=lambda ref: label, pin_reader=reader, **kwargs)
+        return resolution, fetched
+
+    def test_a_channel_older_than_the_running_composer_is_nothing_to_update(self):
+        resolution, fetched = self._resolve("1.10.4")
+        self.assertFalse(resolution.changed)
+        self.assertIsNone(resolution.pin)
+        self.assertEqual(fetched, [], "nothing to update: no statement is needed")
+        self.assertIn("newer than", resolution.note)
+
+    def test_a_channel_older_than_the_pin_is_nothing_to_update_not_an_error(self):
+        current = image_pin.Pin("1.11.0b2", DIGEST_B)
+        resolution, fetched = self._resolve("1.11.0b1", current=current, running="1.11.0b2")
+        self.assertFalse(resolution.changed)
+        self.assertEqual(resolution.pin, current)
+        self.assertEqual(fetched, [])
+        self.assertIn("never moves a pin backwards", resolution.note)
+
+    def test_an_unreadable_channel_changes_nothing_and_says_so(self):
+        resolution = image_pin.resolve("stable", running="1.11.0b1", label_reader=lambda ref: None,
+                                       pin_reader=lambda v: self.fail("fetched"))
+        self.assertFalse(resolution.changed)
+        self.assertIn("could not be read", resolution.note)
+
+    def test_an_unreadable_channel_still_fails_an_explicit_switch(self):
+        with self.assertRaises(image_pin.PinError):
+            image_pin.resolve("beta", running="1.11.0b1", allow_downgrade=True, label_reader=lambda ref: None)
+
+    def test_a_newer_release_without_a_statement_still_fails_closed(self):
+        def missing(version):
+            raise image_pin.PinError("not published", unavailable=True)
+
+        with self.assertRaises(image_pin.PinError):
+            self._resolve("1.11.1", running="1.11.0", pin_reader=missing)
+
+    def test_a_newer_release_that_fails_its_signature_still_fails(self):
+        def forged(version):
+            raise image_pin.PinError("bad signature")
+
+        with self.assertRaises(image_pin.PinError):
+            self._resolve("1.11.1", running="1.11.0", pin_reader=forged)
+
+    def test_the_running_release_is_pinned_when_it_verifies(self):
+        resolution, fetched = self._resolve("1.11.0", running="1.11.0")
+        self.assertTrue(resolution.changed)
+        self.assertEqual(resolution.pin.version, "1.11.0")
+        self.assertEqual(fetched, ["1.11.0"])
+
+    def test_the_running_release_that_cannot_be_verified_yet_changes_nothing(self):
+        def missing(version):
+            raise image_pin.PinError("GitHub could not be reached", unavailable=True)
+
+        resolution, _ = self._resolve("1.11.0", running="1.11.0", pin_reader=missing)
+        self.assertFalse(resolution.changed)
+        self.assertIsNone(resolution.pin)
+        self.assertIn("GitHub could not be reached", resolution.note)
+
+    def test_the_running_release_with_a_forged_statement_fails(self):
+        def forged(version):
+            raise image_pin.PinError("bad signature")
+
+        with self.assertRaises(image_pin.PinError):
+            self._resolve("1.11.0", running="1.11.0", pin_reader=forged)
+
+    def test_a_switch_to_a_release_before_signing_says_why(self):
+        with self.assertRaises(image_pin.PinError) as caught:
+            self._resolve("1.10.4", allow_downgrade=True, pin_reader=lambda v: self.fail("fetched"))
+        self.assertIn("predates signed releases", str(caught.exception))
+        self.assertTrue(caught.exception.unavailable, "the escape may pin its registry digest")
+
+    def test_update_pin_changes_nothing_when_there_is_nothing_to_update(self):
+        with tempfile.TemporaryDirectory() as holder:
+            project = Path(holder)
+            (project / "compose.yml").write_text(BLOCK, encoding="utf-8")
+            resolution, outcome = image_pin.update_pin(
+                str(project), env={},
+                resolver=functools.partial(image_pin.resolve, label_reader=lambda ref: "1.10.4"),
+                running="1.11.0b1",
+            )
+            self.assertIsNone(image_pin.read_lock(project))
+            self.assertEqual((project / "compose.yml").read_text(encoding="utf-8"), BLOCK)
+            self.assertEqual(outcome["files"], [])
+
+
+class AgentUpdateSmokeTests(unittest.TestCase):
+    """scripts/smoke-test.sh's `agent update` on a candidate build: read-only fixture, no statement."""
+
+    def test_a_candidate_newer_than_its_channel_updates_the_pair_without_pinning(self):
+        from composer.launcher import DockerComposeLauncher
+
+        holder = tempfile.mkdtemp()
+        previous = os.getcwd()
+        self.addCleanup(shutil.rmtree, holder, True)
+        self.addCleanup(os.chmod, holder, 0o755)
+        self.addCleanup(os.chdir, previous)
+        os.chdir(holder)
+        Path("agent-lifecycle-compose.yml").write_text(
+            "name: smoke\nservices:\n  composer-agent:\n    image: busybox:1.36\n", encoding="utf-8")
+        os.chmod(holder, 0o555)
+        launcher = DockerComposeLauncher()
+        with patch.object(launcher, "_resident_pair_scope", return_value=["composer-agent"]):
+            launcher.configure_agent_update(["-f", "agent-lifecycle-compose.yml"])
+        with patch("composer.registry.remote_image_version", return_value="1.10.4"), \
+             patch("composer.version.read_composer_version", return_value="1.11.0b1"), \
+             patch("composer.image_pin.verified_pin", side_effect=AssertionError("needs no statement")), \
+             patch.dict(os.environ, {"COMPOSER_SELF_IMAGE": ""}), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            ok, detail = launcher.pin_resident_pair()
+        self.assertTrue(ok, detail)
+        self.assertIn("nothing to pin", out.getvalue())
