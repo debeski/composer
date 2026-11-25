@@ -23,6 +23,7 @@ directory. Exit 0 means aligned.
 import argparse
 import json
 import os
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -44,18 +45,41 @@ ALLOWED_WARNINGS = {
 
 
 def generate(dlux: Path, python: str, target: Path) -> Path:
+    """A fresh project from ``dlux``'s scaffold, under a Compose name no other run uses."""
+    name = f"align{secrets.token_hex(4)}"
     env = {**os.environ, "PYTHONPATH": str(dlux)}
-    subprocess.run([python, "-m", "dlux", "startproject", "alignproj"], cwd=target, env=env,
+    subprocess.run([python, "-m", "dlux", "startproject", name], cwd=target, env=env,
                    check=True, capture_output=True, text=True)
-    return target / "alignproj"
+    return target / name
+
+
+def _project_resources(project_name: str) -> set:
+    """The Docker networks and volumes Compose labelled with ``project_name``."""
+    found = set()
+    for kind in ("network", "volume"):
+        listing = subprocess.run(
+            ["docker", kind, "ls", "--filter", f"label=com.docker.compose.project={project_name}",
+             "--format", "{{.Name}}"],
+            capture_output=True, text=True,
+        )
+        found |= {(kind, name) for name in listing.stdout.split() if name}
+    return found
 
 
 def inspect(project: Path) -> dict:
-    """This checkout's findings and planned repairs for ``project``."""
+    """This checkout's findings and planned repairs for ``project``.
+
+    ``check`` reads the image's DjangoLux with ``compose run`` and probes data
+    access with ``docker run -v``, which create the project's networks and named
+    volumes. A deployed stack already has them; this throwaway project does not,
+    so the networks and volumes this call created are removed again, and nothing
+    that existed before it is touched.
+    """
     sys.path.insert(0, str(HERE))
     from composer.launcher import DockerComposeLauncher
     from composer.ops import _dry_run_repairs
 
+    before = _project_resources(project.name)
     previous = os.getcwd()
     os.chdir(project)
     try:
@@ -69,6 +93,8 @@ def inspect(project: Path) -> dict:
         repairs, _digest = _dry_run_repairs(launcher, args)
     finally:
         os.chdir(previous)
+        for kind, name in sorted(_project_resources(project.name) - before):
+            subprocess.run(["docker", kind, "rm", name], capture_output=True, text=True)
     wrappers = [
         name for name in WRAPPERS
         if (project / name).read_bytes() != (HERE / name).read_bytes()

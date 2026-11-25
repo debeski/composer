@@ -48,6 +48,14 @@ class ScaffoldAlignmentTests(unittest.TestCase):
     def test_a_fresh_project_needs_nothing_from_check_fix(self):
         self.assertEqual(self.gate.verdict(self.gate.inspect(self.project)), [])
 
+    def test_the_gate_leaves_no_docker_networks_or_volumes_behind(self):
+        self.gate.inspect(self.project)
+        self.assertEqual(self.gate._project_resources(self.project.name), set())
+
+    def test_each_run_gets_its_own_compose_project(self):
+        self.assertTrue(self.project.name.startswith("align"))
+        self.assertIn(f"name: {self.project.name}", (self.project / "compose.yml").read_text(encoding="utf-8"))
+
     def test_a_scaffold_that_drifts_from_composer_is_caught(self):
         compose = self.project / "compose.yml"
         text = compose.read_text(encoding="utf-8")
