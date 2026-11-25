@@ -38,12 +38,28 @@ changelog records which versions each release moves to.
 3. **If `start.sh` or `start.ps1` changed in this release**, bump the
    `# composer-wrapper: N` marker in *both* (they share one version), record the
    new sha256s in `wrappers-history.json` — the test suite prints them on
-   failure — and re-copy both files into `dlux/scaffold_templates/project/` in
-   the django-lux repo, updating the expected version in its scaffold test.
+   failure — and re-copy both files into `dlux/scaffold/templates/project/` (as
+   `start.sh.tmpl` / `start.ps1.tmpl`) in the django-lux repo, updating the expected version in its scaffold test.
    Without the bump, deployments cannot tell a stale wrapper from an edited one
    ([wrapper versioning](deploying.md#wrapper-versioning)).
 4. Commit both on `main`.
-5. Tag and push:
+5. **For a release paired with DjangoLux**, check that a project generated from the
+   paired DjangoLux checkout needs nothing from `check --fix`:
+
+   ```bash
+   python scripts/scaffold_alignment.py --dlux ../../pkg-django-lux/<checkout> \
+       --dlux-python ../../pkg-django-lux/main/.venv/bin/python
+   ```
+
+   It must print `aligned`:
+   - no finding fails;
+   - the only warnings are those that need a live stack or an operator's choice;
+   - no repair plans a file change;
+   - the wrappers are byte-identical.
+
+   The unit suite runs the same gate whenever a sibling DjangoLux checkout is present
+   (`DLUX_CHECKOUT` picks it).
+6. Tag and push:
 
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
