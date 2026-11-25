@@ -37,11 +37,21 @@ It is opt-in and generic: set `COMPOSER_ACTIVE_VERSION_FILE` (a JSON file, e.g. 
 runtime `active.json`) and, if needed, `COMPOSER_ACTIVE_VERSION_KEY` (default
 `version`) and `COMPOSER_VERSION_LABEL` (the image label to compare, default
 `org.opencontainers.image.version`). With no active-version source configured the
-gate is disabled. Once configured it fails closed: when no target image carries a
-readable version in that label, Composer cannot tell whether the update is a
-downgrade, so it refuses ("no target image carries a readable '…' label"), names the
-images it checked, and asks for a labelled image. `--force` is the deliberate
-override for this refusal and for a downgrade block.
+gate is disabled. Once configured it fails closed:
+
+- when no target image carries a readable version in that label, Composer cannot
+  tell whether the update is a downgrade, so it refuses ("no target image carries a
+  readable '…' label"), names the images it checked, and asks for a labelled image;
+- when the active-version file is missing, the active version is the same label on
+  the image the app container (`web`, or `COMPOSER_RUNTIME_GATE_SERVICE`) runs now.
+  DjangoLux reads a missing `active.json` as "running the release baked into the
+  image", and the gate runs before the recreate, so the container still names the
+  old image. A stack with no app container at all has nothing to downgrade and
+  passes;
+- when the file is present but unreadable, or the running image has no readable
+  label, it refuses.
+
+`--force` is the deliberate override for each refusal and for a downgrade block.
 
 An older image can also pass when the running DjangoLux deployment confirms it will
 keep its newer runtime-volume release. Composer runs `python manage.py
