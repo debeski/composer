@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .agent_protocol import redact_text
-from . import registry_login
+from . import registry_login, safe_files
 from .registry import (
     DEFAULT_VERSION_LABEL,
     LOGIN_REQUIRED,
@@ -208,11 +208,7 @@ def availability_payload(images: List[str]) -> dict:
 
 
 def _write_availability_payload(path: str, payload: dict):
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.tmp")
-    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-    os.replace(tmp, target)
+    safe_files.atomic_write_json(path, payload, sort_keys=False)
 
 
 def write_availability(path: str, images: List[str]) -> dict:
@@ -414,10 +410,7 @@ def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = ""):
     if operation_id:
         payload["operation_id"] = operation_id
     try:
-        ack.parent.mkdir(parents=True, exist_ok=True)
-        tmp = ack.with_name(f".{ack.name}.tmp")
-        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-        os.replace(tmp, ack)
+        safe_files.atomic_write_json(ack, payload, sort_keys=False)
     except OSError:
         pass
 
@@ -459,10 +452,7 @@ def _publish_terminal_failure(
     if operation_id:
         payload["operation_id"] = operation_id
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{target.name}.tmp")
-        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-        os.replace(tmp, target)
+        safe_files.atomic_write_json(target, payload, sort_keys=False)
         return True
     except OSError:
         return False

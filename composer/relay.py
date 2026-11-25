@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlencode
 
+from . import safe_files
 from .agent_protocol import redact_text
 
 SCHEMA_VERSION = 1
@@ -513,14 +514,7 @@ class KeyStore:
             "current": self.current_id,
             "keys": [{"key_id": k, "private": _b64(v)} for k, v in self._keys.items()],
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, self.path)
+        safe_files.atomic_write_text(self.path, json.dumps(payload), mode=0o600)
 
     def public_document(self) -> Dict[str, Any]:
         from cryptography.hazmat.primitives import serialization
@@ -730,14 +724,7 @@ def _aware(value: Any) -> datetime:
 
 
 def _atomic_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with temporary.open("w", encoding="utf-8") as stream:
-        json.dump(payload, stream, sort_keys=True)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    safe_files.atomic_write_json(path, payload)
 
 
 class RelayResponder:

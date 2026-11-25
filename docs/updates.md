@@ -37,7 +37,11 @@ It is opt-in and generic: set `COMPOSER_ACTIVE_VERSION_FILE` (a JSON file, e.g. 
 runtime `active.json`) and, if needed, `COMPOSER_ACTIVE_VERSION_KEY` (default
 `version`) and `COMPOSER_VERSION_LABEL` (the image label to compare, default
 `org.opencontainers.image.version`). With no active-version source configured the
-gate is disabled. `--force` overrides a block.
+gate is disabled. Once configured it fails closed: when no target image carries a
+readable version in that label, Composer cannot tell whether the update is a
+downgrade, so it refuses ("no target image carries a readable '…' label"), names the
+images it checked, and asks for a labelled image. `--force` is the deliberate
+override for this refusal and for a downgrade block.
 
 An older image can also pass when the running DjangoLux deployment confirms it will
 keep its newer runtime-volume release. Composer runs `python manage.py
@@ -83,15 +87,38 @@ them as `quarantined`, and a check pinned to one with `--version` publishes it w
 `inline_safe: false` and a reason that says how to retry it, so DjangoLux's Updates
 card does not offer a release that already failed here.
 
+### A lagging PyPI index
+
+For several minutes after a release is published, PyPI's CDN can still serve the
+project index (`/simple/django-lux/`, and `/pypi/django-lux/json`) without it, while
+the release's own page (`/pypi/django-lux/<version>/json`) is already fresh: the CDN
+caches each URL apart, and a query string does not bypass it. So Composer reads the
+index and tops it up from release pages:
+
+- a pinned `--version` the index lacks is read from its own release page; if that is
+  not published either, Composer re-reads both after 3, 6 and 12 seconds before
+  saying "not published";
+- an unpinned check or update also reads the release pages of the likely next
+  releases: the final of a newest beta, the next patch, minor and major, and on the
+  beta channel the next beta of each. A missing page is a cheap 404; a probe that
+  fails is ignored, never an error;
+- an unpinned update that resolves below the release the last `dlux check` offered
+  reads that release's page too, and re-reads after 3, 6 and 12 seconds before
+  settling for what it found.
+
+A release page gets the same trust as the index: an approved HTTPS host, a SHA-256
+digest, and then the same attestation and digest checks on the download. A yanked
+release is ignored. Finding a release this way does not choose it: the channel and
+the quarantine still decide.
+
 ### Applying a release: `dlux update`
 
 `composer dlux update`:
 
 1. resolves the newest wheel on the deployment's DjangoLux channel (or the pinned
-   `--version`, honoured on either channel) from PyPI. An unpinned update re-reads
-   PyPI's index a few times when it resolves an older release than the last
-   `dlux check` published for the channel, because PyPI's CDN can briefly serve an
-   index without a just-published release;
+   `--version`, honoured on either channel) from PyPI. See
+   [a lagging index](#a-lagging-pypi-index) for how it copes with PyPI's CDN right
+   after a publish;
 2. verifies its Trusted Publisher attestation and SHA-256, and honours the
    manifest's `inline_safe` ([release manifests](#release-manifests));
 3. takes a backup ([below](#backups));

@@ -73,7 +73,13 @@ walk is a separate container with `--network none`; see
 
 `docker-socket-proxy` runs with `CONTAINERS`, `IMAGES`, `EVENTS`, `INFO`, `PING` and
 `VERSION` on, and `POST`, `EXEC`, `NETWORKS` and `VOLUMES` off: any write endpoint
-lets a client start a privileged container, which is root on the host. `composer
+lets a client start a privileged container, which is root on the host. With
+`POST=0` the proxy's first rule refuses every method but `GET`, before any
+`ALLOW_START`/`ALLOW_STOP`/`ALLOW_RESTARTS` switch is read, so a compromised agent
+has no write path to Docker. It can still read: `CONTAINERS=1` opens every `GET`
+under `/containers`, which includes each container's environment (`inspect`) and
+filesystem (`archive`, `export`). Treat the agent as able to read what the stack's
+containers hold. `composer
 check` reports a write-enabled proxy as a `docker-proxy` FAIL. Its image is pinned
 by version and digest (`DOCKER_SOCKET_PROXY_IMAGE` in `agent_installer.py`), because
 it mounts `docker.sock`. `composer check --fix` repins an unpinned tag and switches
@@ -174,8 +180,13 @@ backup rules are the same as for an operator's `dlux update`
   volume mounted into the agent and the executor only. Never TCP, never the runtime
   volume. The agent uses executor mode whenever that variable is set.
 - **Authorization:** the socket is mode `0660` and binding refuses a symlinked path.
-  Setting `COMPOSER_EXECUTOR_PEER_UID` adds an `SO_PEERCRED` check of the connecting
-  uid where the platform reports it.
+  Every connection's uid is checked (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on
+  macOS). The expected uid is `COMPOSER_EXECUTOR_PEER_UID` when set, otherwise the
+  executor's own uid: the generated pair runs the agent and the executor from the same
+  image as the same user, so the check is on without configuration. A peer whose uid
+  cannot be read is refused, and a value that is not a uid stops `executor run` with
+  exit 2 instead of turning the check off. Set the variable only when the agent runs
+  as another user.
 - **Framing:** a 4-byte big-endian length prefix and a JSON body, requests and results
   each capped at 64 KiB. A result that would exceed the cap is replaced by a `failed`
   result for the same operation that gives its size, so the agent always gets an
@@ -219,7 +230,14 @@ The runtime volume is shared by the app services, the agent and the executor:
   (uid 0 without capabilities) reach each other's entries only through group 0
   ([app data permissions](app-permissions.md#composers-own-writes));
 - documents are written to a temporary file in the same directory, flushed and
-  renamed over the target, so a reader never sees half a file;
+  renamed over the target, so a reader never sees half a file. The temporary file
+  is created exclusively under a random name (`composer/safe_files.py`): a fixed
+  name such as `.x.json.tmp` could already be a symlink an app service planted,
+  and writing through it would clobber its target. The rename replaces the target
+  itself, a planted symlink included, without following it;
+- documents another service writes (the bridge results, `snapshot.json`,
+  `enroll-request.json`) are read with `O_NOFOLLOW`, only when they are a regular
+  file, and only up to 64 KiB (256 KiB for the snapshot);
 - the package-operation lock opens with `O_NOFOLLOW`, refusing a planted symlink;
 - inputs the agent consumes are bounded where it parses them: control-plane commands
   (64 KiB), relay requests (64 KiB each, at most 64 pending,
@@ -227,4 +245,21 @@ The runtime volume is shared by the app services, the agent and the executor:
   and wheels, and Operations results (200 findings, 2,000 characters each, 20,000 per
   diff);
 - the control-plane outbox keeps only the newest pending snapshot; commands and
-  events replay in order from SQLite.
+  events replay in order from SQLite;
+- at most 32 commands wait or run at once (`MAX_QUEUED_COMMANDS`); a command beyond
+  that fails at once with an event saying the queue is full;
+- one operation queues at most 64 events (`MAX_EVENTS_PER_OPERATION`). Further
+  progress events are dropped before they take a sequence number, so the sequence
+  stays gapless, and the terminal event is always recorded. Nothing is queued after
+  a terminal event;
+- the newest 1,000 finished commands are kept so a redelivered operation is still
+  recognised; older ones are forgotten once all their events are sent;
+- an event carries only the last 32 KiB of the deploy log, and a streamed command
+  keeps the last 5,000 lines of its output (every line is still printed).
+
+## Child processes
+
+Composer runs every child process from an argument list, never a shell string. On
+Windows the executable is resolved through `PATH`/`PATHEXT` instead of `shell=True`,
+so `cmd.exe` never re-parses an argument, and a batch file (`.bat`, `.cmd`) is
+refused because Windows would run it through `cmd.exe` anyway.

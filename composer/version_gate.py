@@ -28,8 +28,10 @@ class VersionGateMixin:
     can't undo, because forward-only migrations may already have run against the
     newer schema. Bypass with ``--force``.
 
-    The gate is fully opt-in and generic: with no active-version source
-    configured it is disabled and always passes.
+    The gate is opt-in and generic: with no active-version source configured it
+    is disabled and always passes. Once configured it fails closed: a target
+    without a readable version label is refused too, since it may be a
+    downgrade. ``--force`` is the deliberate override for both refusals.
     """
 
     def gate_enabled(self) -> bool:
@@ -153,8 +155,8 @@ class VersionGateMixin:
         """Returns (ok, message). ``ok`` False means block the recreate.
 
         Records ``gate_active_version``/``gate_target_version``/``gate_images``
-        for the status file. Passes (with a possible note) whenever the gate is
-        disabled, the metadata is missing, or ``--force`` is set.
+        for the status file. Passes when the gate is disabled; a target image
+        without a readable version label blocks unless ``--force`` is set.
         """
         if not self.gate_enabled():
             return True, ""
@@ -175,9 +177,19 @@ class VersionGateMixin:
 
         if not target_versions:
             self.gate_target_version = None
-            return True, (
-                "Version gate: no readable version label on the target image(s); "
-                "proceeding without a version check."
+            label = getattr(self, "version_label", None) or DEFAULT_VERSION_LABEL
+            named = ", ".join(f"'{image}'" for image in images) or "(none resolved)"
+            if getattr(self, "force", False):
+                return True, (
+                    f"Version gate: no target image carries a readable '{label}' label, "
+                    f"but --force was given — proceeding without a version check."
+                )
+            return False, (
+                f"Version gate: no target image carries a readable '{label}' label "
+                f"(checked {named}), so Composer cannot tell whether this update is a "
+                f"downgrade of the active version {active_raw or 'unknown'}.\n"
+                f"   Rebuild the image with that label, or re-run with --force to "
+                f"update without the version check."
             )
 
         # Report the lowest target version (the one that could regress).

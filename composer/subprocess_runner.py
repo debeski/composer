@@ -1,18 +1,38 @@
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
+from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 from .session import restore_default_signals
 
 
+#: Lines of a streamed command's output kept for its result; the progress
+#: callback still sees every line. A command that prints without end must not
+#: grow this process without end.
+MAX_STREAMED_LINES = 5000
+
+
 class SubprocessRunnerMixin:
-    def _prepare_command(self, cmd: List[str]):
-        if sys.platform == "win32":
-            return subprocess.list2cmdline(cmd)
-        return cmd
+    def _prepare_command(self, cmd: List[str]) -> List[str]:
+        """The argv to execute, never a shell string.
+
+        On Windows the executable is resolved through ``PATH``/``PATHEXT`` here,
+        which is what ``shell=True`` was used for, so the arguments are never
+        re-parsed by ``cmd.exe``. A batch file is refused: Windows runs one
+        through ``cmd.exe`` whatever the caller asks.
+        """
+        argv = [str(part) for part in cmd]
+        if sys.platform == "win32" and argv:
+            resolved = shutil.which(argv[0])
+            if resolved:
+                argv[0] = resolved
+            if argv[0].lower().endswith((".bat", ".cmd")):
+                raise OSError(f"Refusing to run a batch file: {argv[0]}")
+        return argv
 
     def _detached_child_kwargs(self) -> Dict[str, bool]:
         """Run Compose in its own session so a terminal hangup can't kill it.
@@ -55,7 +75,6 @@ class SubprocessRunnerMixin:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                shell=sys.platform == "win32",
                 env=env,
                 **self._detached_child_kwargs(),
             )
@@ -95,7 +114,6 @@ class SubprocessRunnerMixin:
         try:
             result = subprocess.run(
                 self._prepare_command(cmd),
-                shell=sys.platform == "win32",
                 env=env,
                 preexec_fn=None if sys.platform == "win32" else restore_default_signals,
             )
@@ -114,7 +132,7 @@ class SubprocessRunnerMixin:
         env: Optional[Dict[str, str]] = None,
         progress_callback=None,
     ) -> Tuple[bool, str, str]:
-        output_lines: List[str] = []
+        output_lines: deque = deque(maxlen=MAX_STREAMED_LINES)
         started_at = time.time()
 
         try:
@@ -123,7 +141,6 @@ class SubprocessRunnerMixin:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                shell=sys.platform == "win32",
                 env=env,
                 bufsize=1,
                 **self._detached_child_kwargs(),

@@ -938,7 +938,10 @@ class AvailabilitySkipsQuarantineTests(unittest.TestCase):
 
         index = [ReleaseCandidate("1.9.0", "django_lux-1.9.0-py3-none-any.whl",
                                   "https://files.pythonhosted.org/x.whl", "a" * 64)]
-        with unittest.mock.patch("composer.dlux_release_source.fetch_index", return_value=index):
+        with (
+            unittest.mock.patch("composer.dlux_release_source.fetch_index", return_value=index),
+            unittest.mock.patch("composer.dlux_release_source.fetch_release", return_value=None),
+        ):
             payload = build_availability_payload(runtime=self.runtime)
 
         self.assertFalse(payload["available"])
