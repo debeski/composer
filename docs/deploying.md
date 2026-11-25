@@ -200,8 +200,14 @@ then reads wrongly. The guard is always on; it does not need the opt-in
 - **Not compared**: `-d` and `-b` runs (local builds carry no labels) and scoped
   runs that do not touch the app services.
 
-The DjangoLux runtime supervisor separately refuses to boot an image older than the
-active runtime release's `requires.baked_image` floor.
+The baked DjangoLux version is also checked against the image floor of the release
+the runtime volume has active: `requires.baked_image` (legacy `image_baseline`) in
+`releases/<active>/dlux/release-manifest.json`. Composer reads it in a throwaway
+container of its own image (`--pull never`, `--network none`, the volume mounted
+read-only), and only when the volume already exists. From DjangoLux 1.17 the
+runtime supervisor serves an image's baked package when the image is below that
+floor; an older image runs its own supervisor, which never checks, so this
+pre-`up` refusal is the only defence there.
 
 ### Health check
 

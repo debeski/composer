@@ -433,5 +433,114 @@ class DowngradeGuardTests(unittest.TestCase):
         self.assertIn("Refusing to deploy debeski/decrees:v2.1.26", error)
 
 
+class RuntimeFloorTests(unittest.TestCase):
+    """#11: an old image runs its own old supervisor, which never checks the
+    active release's ``requires.baked_image``; the pre-up guard must."""
+
+    CONFIG = {
+        "name": "stack",
+        "services": {
+            "web": {
+                "image": "debeski/decrees:v2.1.26",
+                "volumes": [{"type": "volume", "source": "dlux_runtime", "target": "/opt/dlux-runtime"}],
+            },
+        },
+        "volumes": {"dlux_runtime": {}},
+    }
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web"]
+        self.launcher.compose_config_json = lambda: self.CONFIG
+        self.launcher.get_compose_ps_entries = lambda include_all=False: (True, [], "")
+        self.volume_exists = True
+        self.runtime = {"active": "1.16.6b1", "floor": "1.16.0b1"}
+        self.target = OLD
+        self.runs = []
+
+        def run_command(argv, timeout=None, env=None):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return True, json.dumps(self.target), ""
+            if argv[:3] == ["docker", "volume", "inspect"]:
+                return self.volume_exists, "", ""
+            if argv[:2] == ["docker", "inspect"]:
+                return True, "sha256:composer\n", ""
+            if argv[:2] == ["docker", "run"]:
+                self.runs.append(argv)
+                return True, json.dumps(self.runtime) + "\n", ""
+            return False, "", "unexpected"
+
+        self.launcher.run_command = run_command
+
+    def test_an_image_below_the_active_release_floor_is_refused(self):
+        ok, message = self.launcher.downgrade_guard()
+        self.assertFalse(ok)
+        self.assertIn(
+            "DjangoLux 1.15.1 is below the image floor 1.16.0b1 of the active runtime release 1.16.6b1",
+            message,
+        )
+        run = self.runs[0]
+        self.assertIn("stack_dlux_runtime:/opt/dlux-runtime:ro", run)
+        self.assertEqual(run[run.index("--pull") + 1], "never")
+        self.assertEqual(run[run.index("--network") + 1], "none")
+        self.assertIn("sha256:composer", run)
+
+    def test_an_image_meeting_the_floor_passes(self):
+        self.target = NEW
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def test_force_deploys_below_the_floor(self):
+        self.launcher.force = True
+        ok, message = self.launcher.downgrade_guard()
+        self.assertTrue(ok)
+        self.assertIn("below the image floor", message)
+
+    def test_a_missing_volume_is_never_created(self):
+        self.volume_exists = False
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+        self.assertEqual(self.runs, [])
+
+    def test_the_image_release_in_force_has_no_floor(self):
+        self.runtime = {}
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def _script(self, active, manifest=None, version="1.16.6b1"):
+        import subprocess
+        import sys
+
+        root = Path(self.tmp.name) / "runtime"
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "active.json").write_text(json.dumps(active))
+        if manifest is not None:
+            release = root / "releases" / version / "dlux"
+            release.mkdir(parents=True, exist_ok=True)
+            (release / "release-manifest.json").write_text(json.dumps(manifest))
+        out = subprocess.run(
+            [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_FLOOR_SCRIPT, str(root)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        return json.loads(out)
+
+    def test_the_script_reads_the_active_release_floor(self):
+        self.assertEqual(
+            self._script({"source": "volume", "version": "1.16.6b1"}, {"requires": {"baked_image": ">=1.16.0b1"}}),
+            {"active": "1.16.6b1", "floor": "1.16.0b1"},
+        )
+
+    def test_the_script_falls_back_to_the_legacy_image_baseline(self):
+        self.assertEqual(
+            self._script({"source": "volume", "version": "1.16.6b1"}, {"image_baseline": "1.15.0"}),
+            {"active": "1.16.6b1", "floor": "1.15.0"},
+        )
+
+    def test_the_script_ignores_the_image_release_and_unsafe_versions(self):
+        self.assertEqual(self._script({"source": "image", "version": "1.16.3"}), {})
+        self.assertEqual(self._script({"source": "volume", "version": "../etc"}), {})
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,9 +22,15 @@ falling back to ``org.opencontainers.image.version``). A dimension either side
 does not label is not compared; a target that labels neither while the
 recorded release did is refused, since nothing shows it is not older.
 
-``--force`` deploys anyway and makes the forced release the new record. The
-DjangoLux half of the finding (the supervisor enforcing the active release's
-``requires.baked_image`` floor at boot) lives in DjangoLux.
+The baked DjangoLux version is also checked against the image floor of the
+release the runtime volume has active (``requires.baked_image`` in
+``releases/<active>/dlux/release-manifest.json``, legacy ``image_baseline``). A
+DjangoLux 1.17+ image below that floor serves its baked package instead; an older
+image runs its own supervisor, which never checks, so this guard is the only
+defence there. It is read in a throwaway Composer container with the volume
+mounted read-only, and only when the volume already exists.
+
+``--force`` deploys anyway and makes the forced release the new record.
 """
 import json
 import os
@@ -40,6 +46,27 @@ MANIFEST_LABEL = "org.dlux.project.release-manifest"
 OCI_VERSION_LABEL = "org.opencontainers.image.version"
 BAKED_LABEL_SUFFIX = ".dlux_baked_version"
 DIMENSIONS = (("app", "app"), ("dlux", "DjangoLux"))
+RUNTIME_ROOT = "/opt/dlux-runtime"
+
+# Runs in a throwaway Composer container: prints {"active": ..., "floor": ...}
+# for the active volume release, {} when the image release is in force.
+RUNTIME_FLOOR_SCRIPT = """
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "/opt/dlux-runtime")
+out = {}
+try:
+    active = json.loads((root / "state" / "active.json").read_text(encoding="utf-8"))
+    version = str(active.get("version") or "").strip()
+    if active.get("source") == "volume" and version and "/" not in version and version not in (".", ".."):
+        out["active"] = version
+        manifest = json.loads((root / "releases" / version / "dlux" / "release-manifest.json").read_text(encoding="utf-8"))
+        requires = manifest.get("requires") or {}
+        floor = str(requires.get("baked_image") or manifest.get("image_baseline") or "")
+        out["floor"] = floor.strip().lstrip(">=").strip()
+except Exception:
+    pass
+print(json.dumps(out))
+"""
 
 _GO_NO_VALUE = "<no value>"
 
@@ -136,7 +163,20 @@ def record_warning(reason: str) -> str:
     )
 
 
-def refusal(image: str, found: List[Tuple[str, str, str]], unlabeled: bool) -> str:
+def below_runtime_floor(target: Mapping[str, str], runtime: Mapping[str, str]) -> Optional[str]:
+    """Why the target's baked DjangoLux is below the active release's image floor."""
+    baked, floor = versions.try_parse(target.get("dlux")), versions.try_parse(runtime.get("floor"))
+    if baked is None or floor is None or baked >= floor:
+        return None
+    return (
+        f"DjangoLux {target['dlux']} is below the image floor {runtime['floor']} of the "
+        f"active runtime release {runtime.get('active') or '(unknown)'}"
+    )
+
+
+def refusal(
+    image: str, found: List[Tuple[str, str, str]], unlabeled: bool, extra: Optional[List[str]] = None
+) -> str:
     if unlabeled:
         reasons = [
             "it carries no app or DjangoLux version label, so nothing shows it is not "
@@ -144,6 +184,7 @@ def refusal(image: str, found: List[Tuple[str, str, str]], unlabeled: bool) -> s
         ]
     else:
         reasons = [f"{label} {wanted} is older than {recorded}" for label, wanted, recorded in found]
+    reasons += list(extra or [])
     lines = [f"Refusing to deploy {image}: " + "; ".join(reasons) + "."]
     lines.append(
         "The database was migrated by the newer release. Migrations do not run "
@@ -224,6 +265,38 @@ class DowngradeGuardMixin:
             return None
         return label_versions(labels)
 
+    def runtime_release_floor(self) -> Dict[str, str]:
+        """``{"active", "floor"}`` of the runtime volume's active release, or {}."""
+        from .dlux_runtime_access import find_runtime_volume, qualified_volume_name, self_image
+
+        config = self.compose_config_json() or {}
+        short_name = find_runtime_volume(config, RUNTIME_ROOT)
+        if not short_name:
+            return {}
+        volume = qualified_volume_name(config, short_name)
+        # `docker run -v` would create a missing volume: read only one that exists.
+        ok, _, _ = self.run_command(["docker", "volume", "inspect", volume], timeout=20)
+        if not ok:
+            return {}
+        ok, out, _ = self.run_command(
+            [
+                "docker", "run", "--rm", "--pull", "never", "--network", "none",
+                "-v", f"{volume}:{RUNTIME_ROOT}:ro", "--entrypoint", "python",
+                self_image(self.run_command), "-c", RUNTIME_FLOOR_SCRIPT,
+            ],
+            timeout=60,
+        )
+        if not ok:
+            return {}
+        lines = (out or "").strip().splitlines()
+        try:
+            payload = json.loads(lines[-1]) if lines else {}
+        except ValueError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {key: str(payload[key]) for key in ("active", "floor") if payload.get(key)}
+
     def downgrade_guard(self) -> Tuple[bool, str]:
         """``(ok, message)``. Remembers the target for ``record_deployed_release``."""
         self.guard_target = None
@@ -237,13 +310,12 @@ class DowngradeGuardMixin:
             return True, ""
         self.guard_target = (image, target)
         floor = newest(read_record(), self.deployed_app_versions(services))
-        if not floor:
-            return True, ""
+        runtime_reason = below_runtime_floor(target, self.runtime_release_floor()) if target.get("dlux") else None
         found = downgrades(target, floor)
-        unlabeled = not target
-        if not found and not unlabeled:
+        unlabeled = not target and bool(floor)
+        if not found and not unlabeled and not runtime_reason:
             return True, ""
-        message = refusal(image, found, unlabeled)
+        message = refusal(image, found, unlabeled, [runtime_reason] if runtime_reason else None)
         if getattr(self, "force", False):
             return True, "--force: " + message.splitlines()[0].replace("Refusing to deploy", "Deploying", 1)
         return False, message
