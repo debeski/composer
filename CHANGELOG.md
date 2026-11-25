@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.4
+
+- **Stable 1.10.4 For DjangoLux 1.16.6**: Promote the published and accepted 1.10.4b1. A deployment check whose report is larger than the executor's 64 KiB frame limit no longer disappears: the executor sends a `failed` result that names the size, and `deployment_check` shortens the longest repair diffs so the report fits. `executor run --package-trigger-file` is removed (nothing read it), and the `agent update`/`restart`/`off` help names the resident pair.
+
 ## v1.10.4b1
 
 - **Executor Results Over The Frame Limit**: a result larger than `MAX_EXECUTOR_MESSAGE_BYTES` (64 KiB) used to be dropped, and the agent reported only "executor closed the connection before a full result". `executor_protocol.encode_result_frame` now sends a `failed` result for the same operation that names the size; `deployment_check` shortens the longest repair diffs at a line end until the report fits, and says so in each shortened repair's `note`. A failed check reads "Deployment check failed in the executor: …" without the version-skew advice.
