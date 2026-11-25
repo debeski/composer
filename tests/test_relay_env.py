@@ -613,6 +613,7 @@ class CheckFixTests(unittest.TestCase):
             patch("composer.maintenance_migration.inspect", return_value={"legacy": False}),
             patch("composer.worker_migration.pending", return_value={"compose": False, "dev": False, "stamp": False}),
             patch("composer.front_proxy.inspect", return_value={"files": []}),
+            patch("composer.update_policy_env.preview", return_value={"files": []}),
             patch("composer.relay_env.migrate", return_value=outcome, side_effect=effect) as migrate,
             patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):

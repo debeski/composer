@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from . import safe_files
+from . import safe_files, update_policy
 from .app_permissions import SHARED_UMASK, share_runtime_dirs
 from .agent_protocol import MAX_EVENT_TEXT, ProtocolError, redact_text, utc_now, validate_command
 from .agent_store import AgentStore
@@ -285,6 +285,9 @@ class ComposerAgent:
             # run created. Published here it survives that, because the agent is
             # recreated by the deploy itself.
             "deployer_version": os.environ.get("COMPOSER_VERSION", "").strip(),
+            # The policy this pair enforces. DjangoLux applies the stricter of it
+            # and its own, and warns when they differ (a pair not yet recreated).
+            "update_policy": update_policy.current(),
             "enrolled_at": str(self.store.get_meta("enrolled_at") or ""),
             "last_contact_at": str(self.store.get_meta("last_contact_at") or ""),
             "revoked": bool(self.store.get_meta("revoked")),
@@ -461,6 +464,9 @@ class ComposerAgent:
     def _run_child(self, command: Dict[str, Any]) -> tuple[int, str]:
         operation_id = command["operation_id"]
         action = command["action"]
+        if action == "composer.recovery_deploy" and not update_policy.allows(update_policy.IMAGE_UPDATE):
+            # A recovery deploy is a full `composer update`: it pulls images.
+            return update_policy.REFUSED_EXIT, update_policy.refusal(update_policy.IMAGE_UPDATE)
         # Executor mode: the agent holds no Docker authority. Restart/recovery are
         # synchronous, so delegate over the private socket and report the
         # executor's exit code exactly as the legacy path would. The executor

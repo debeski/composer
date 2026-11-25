@@ -15,6 +15,35 @@ rules. The commands' syntax and exit codes are in the
 | see what is available | `./start.sh agent check`, `./start.sh dlux check` | [image availability](#image-availability) |
 | switch a channel | `./start.sh dlux channel beta`, `./start.sh check --beta` | [channels](#channels) |
 
+## What the application may request
+
+DjangoLux can ask the resident pair for three kinds of update: an application
+image update, an inline DjangoLux update, and a resident Composer update.
+`DLUX_UPDATE_POLICY` in the secrets file decides which of those requests the pair
+performs:
+
+| Request from DjangoLux | `all` (default) | `inline` | `none` |
+| --- | --- | --- | --- |
+| inline DjangoLux update (package trigger, `dlux_package_apply`) | performed | performed | refused |
+| application image update (image trigger) | performed | refused | refused |
+| resident Composer update (`agent-update`) | performed | refused | refused |
+| control-link recovery deploy (`recovery_deploy`, a full `composer update`) | performed | refused | refused |
+| inline rollback, `check`, `agent-check`, availability checks | performed | performed | performed |
+
+An empty value means `all`; any other value counts as `none`. A refused request is
+answered like a failed one, with exit code 2 and a message naming the policy, so
+DjangoLux leaves maintenance and shows why. The pair reads the policy from its own
+Compose `environment`, which `web` cannot change, so it refuses even a request a
+compromised `web` wrote straight onto the runtime volume. The agent reports the
+policy it enforces as `update_policy` in `agent-status.json`, and DjangoLux warns
+when that differs from its own.
+
+Every command in the table above still runs from this shell under every policy:
+the policy covers what the application requests, not what the operator deploys.
+The pair reads the value when it is created, so after changing it run `./start.sh`
+to recreate the pair. `composer check` reports the policy and whether every
+reader receives it ([`update-policy`](check.md#update-policy)).
+
 ## Image updates
 
 `composer update` pulls the latest application image(s), recreates the affected

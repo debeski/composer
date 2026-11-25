@@ -524,6 +524,7 @@ class CheckFixTests(unittest.TestCase):
             patch("composer.worker_migration.pending", return_value={"compose": False, "dev": False, "stamp": False}),
             patch("composer.front_proxy.migrate", return_value=outcome) as migrate,
             patch("composer.relay_env.inspect", return_value={"files": []}),
+            patch("composer.update_policy_env.preview", return_value={"files": []}),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             fixes = launcher._maybe_fix(SimpleNamespace(file=None, dev=False, fix=True, yes=True, json=False), [])
