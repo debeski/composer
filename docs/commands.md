@@ -19,7 +19,7 @@ where they make sense, to the commands below.
 | `--skip-config` | Leave DjangoLux's initial setup wizard available even when the image contains `config.json` (DjangoLux 1.9.4+): [manual first-deploy setup](first-deploy.md). |
 | `-nm`, `-mm`, `-a APP` | Passed to DjangoLux's migrator: [the migrator contract](deploying.md#the-migrator-contract). |
 | `-u [service]` | Compact form of `update`: pull the latest image(s), then recreate immediately. Pass a service name to scope it. |
-| `--force` | Bypass the preflight [version gate](updates.md#version-gate) (allow updating onto an older image version). |
+| `--force` | Deploy an older image anyway: bypasses the preflight [version gate](updates.md#version-gate) and the [downgrade guard](deploying.md#downgrade-guard). Restore a matching database backup first. |
 | `--status-file PATH` | Write a JSON [deploy-status](deploying.md#deploy-status) file to `PATH` (overrides `COMPOSER_STATUS_FILE`). |
 | `--down` | Stop everything (see [`stop`](#stop)). |
 | `-v`, `--volumes` | With `--down`: remove volumes too. Confirmation required. |

@@ -47,6 +47,10 @@ the active release's `requires.baked_image` floor. Only a `keep` verdict permits
 exception; an abort, unavailable service, missing command or invalid response still
 blocks. `--force` bypasses the check explicitly.
 
+Independently of this gate, every deploy runs the
+[downgrade guard](deploying.md#downgrade-guard), which needs no configuration and
+compares the app image's own version labels with what the deployment last ran.
+
 ## Composer itself
 
 Composer has two halves that update separately: the deployer the wrappers run, and

@@ -55,8 +55,8 @@ interactive use.
 `composer agent watch --trigger-file PATH [--interval N]` is the plain watcher that
 `agent run` succeeds; it performs updates itself, in its own process. It watches
 the trigger file and, on each new request (a changed `token`, or the file's `mtime`),
-runs the full `composer update` pipeline (pull → version gate → recreate → health →
-post_start). The processed token and child exit code are recorded in
+runs the full `composer update` pipeline (pull → version gate → downgrade guard →
+recreate → health → post_start). The processed token and child exit code are recorded in
 `<trigger-file>.ack`, so a request is applied once and survives a restart.
 
 - `--status-file PATH` has each run publish [deploy status](deploying.md#deploy-status);

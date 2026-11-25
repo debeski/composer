@@ -166,6 +166,62 @@ ANSI-free console log (`deploy-log.txt` beside the status file, fresh per run).
 Together with the deploy status, a proxy can render a live progress page and console
 while the app is being recreated and unreachable.
 
+## Before and after `up`
+
+### Downgrade guard
+
+Before every `up` that (re)creates the app services, Composer compares the app
+image it is about to deploy with the newest release this deployment has run, and
+refuses an older one. Migrations only run forwards: once a newer image's migrator
+has changed the schema, older code may fail on it or write data the newer release
+then reads wrongly. The guard is always on; it does not need the opt-in
+[version gate](updates.md#version-gate).
+
+- **What is compared**: the app version (the `version` in the image's
+  `org.dlux.project.release-manifest` label, else `org.opencontainers.image.version`)
+  and the baked DjangoLux version (`org.<project>.dlux_baked_version`). A version
+  either side does not label is not compared; an image with neither label is refused
+  when the recorded release had them, since nothing shows it is not older.
+- **What it is compared with**: the labels of the app containers that exist now
+  (they ran the migrator, even if they then failed their health check), and
+  `.xclude/composer-deploy/deployed.json`, which Composer raises after every `up` so
+  the floor survives a `down`.
+- **Refused**: the run stops before anything is recreated and names each older
+  version. To go back on purpose, restore a database backup taken before the newer
+  release, then deploy with `--force`; a forced deploy becomes the new record.
+- **Not compared**: `-d` and `-b` runs (local builds carry no labels) and scoped
+  runs that do not touch the app services.
+
+The DjangoLux runtime supervisor separately refuses to boot an image older than the
+active runtime release's `requires.baked_image` floor.
+
+### Health check
+
+After `up`, every monitored service must reach healthy (running, and `healthy` when
+it has a healthcheck) and then **stay** healthy for a settle window, 20 s by default
+(`COMPOSER_HEALTH_SETTLE_SECONDS`, `0` turns the window off). The run fails, naming
+the service and its last log lines, when:
+
+- a container restarts at any point from the first health poll on (a higher
+  `RestartCount`, a new start time, or a poll that finds it `restarting`): a
+  crash-looping service without a healthcheck reads as running between crashes, so
+  one healthy poll is not proof;
+- a service that was healthy leaves that state before the window ends;
+- not every service is healthy within 180 s of the last state change.
+
+`restart` and inline DjangoLux updates (`dlux update`, `dlux rollback`) use the same check.
+
+### When a deploy fails
+
+The edge proxy (`caddy`, `nginx` or `proxy`) depends on `web`, so Compose can leave
+it "Created" when the app does not come up, and the site then has no front door.
+After `up`, and again when `up` or the health check fails, Composer starts any edge
+proxy in scope that is not running with `docker compose up -d --no-deps`. It then
+serves the [maintenance page](maintenance-page.md) on 502/503/504 while `web` cannot
+answer, and the failure message says so (or says the proxy could not be started).
+The failed containers stay as they are for diagnosis: putting the previous image
+back after its successor migrated the database would itself be a downgrade.
+
 ## How a run behaves
 
 - **Version**: every service gets `COMPOSER_VERSION`.

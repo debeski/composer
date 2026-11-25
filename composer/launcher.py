@@ -35,6 +35,7 @@ from .constants import (
     RUNNING,
 )
 from .docker_compose_manager import DockerComposeMixin
+from .downgrade_guard import DowngradeGuardMixin
 from .health_monitor import HealthMonitorMixin
 from .post_start_hooks import PostStartHooksMixin
 from .progress import PullProgress
@@ -137,6 +138,7 @@ class DockerComposeLauncher(
     ConfigMixin,
     SecretsMixin,
     VersionGateMixin,
+    DowngradeGuardMixin,
     StatusWriterMixin,
     DockerComposeMixin,
     RenderingMixin,
@@ -786,6 +788,7 @@ class DockerComposeLauncher(
                 health_ok, health_detail = self.monitor_health()
                 if not health_ok:
                     self.sections["health"] = ERROR
+                    health_detail = self.keep_site_reachable(health_detail)
                     self.write_status("failed", error=health_detail)
                     self.render(health_detail)
                     sys.exit(1)
@@ -853,6 +856,17 @@ class DockerComposeLauncher(
                 self.render("Failed to read compose services\n\n" + detail)
                 sys.exit(1)
 
+            # An app image older than the release that migrated the database
+            # is refused before anything is recreated (finding #11).
+            guard_ok, guard_msg = self.downgrade_guard()
+            if not guard_ok:
+                self.sections["compose"] = ERROR
+                self.write_status("failed", error=guard_msg)
+                self.render(guard_msg)
+                sys.exit(1)
+            if guard_msg:
+                print(f"⚠ {guard_msg}")
+
             # A DjangoLux image that runs as a non-root uid needs group access to
             # data a root image wrote. Granted here, before anything is recreated;
             # if it cannot be granted the running stack is left as it is.
@@ -866,14 +880,20 @@ class DockerComposeLauncher(
                 print(f"🔐 {note}")
 
             ok, out, err = self.launch_containers()
+            # `up` ran the migrator whether or not it then succeeded.
+            self.record_deployed_release()
             if not ok:
                 self.sections["compose"] = ERROR
                 diagnostics = self.collect_service_diagnostics()
                 detail = self.build_failure_detail(out, err, diagnostics)
+                detail = self.keep_site_reachable(detail)
                 self.write_status("failed", error=detail)
                 self.render(f"Failed to start containers\n\n{detail}")
                 sys.exit(1)
             self.sections["compose"] = OK
+            started, _ = self.ensure_edge_proxy()
+            if started:
+                self.emit_status("Compose", f"Started {', '.join(started)}, which Compose left stopped")
 
             self.sections["health"] = RUNNING
             self.render()
@@ -881,6 +901,7 @@ class DockerComposeLauncher(
             health_ok, health_detail = self.monitor_health()
             if not health_ok:
                 self.sections["health"] = ERROR
+                health_detail = self.keep_site_reachable(health_detail)
                 self.write_status("failed", error=health_detail)
                 self.render(health_detail)
                 sys.exit(1)
