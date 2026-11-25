@@ -214,6 +214,70 @@ class DockerConfigTests(unittest.TestCase):
         self.assertEqual(env["DOCKER_CONFIG"], "/home/op/.docker")
 
 
+class DockerConfigCleanupTests(unittest.TestCase):
+    """A SIGTERM during a registry login left the temporary DOCKER_CONFIG behind:
+    ``atexit`` does not run when a signal ends the process."""
+
+    _CHILD = (
+        "import os, sys, time\n"
+        "from composer import registry_login\n"
+        "print(registry_login.docker_config({'COMPOSER_REGISTRY_USERNAME': 'u', "
+        "'COMPOSER_REGISTRY_PASSWORD': 'p', 'WEB_IMAGE': 'registry.office.test/a:1'}), flush=True)\n"
+        "time.sleep(30)\n"
+    )
+
+    def setUp(self):
+        from tempfile import TemporaryDirectory
+        self._tmp = TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_sigterm_removes_the_login_directory(self):
+        import signal
+        import sys
+        root = Path(__file__).resolve().parents[1]
+        env = dict(os.environ, TMPDIR=str(self.tmp), PYTHONPATH=str(root))
+        child = subprocess.Popen([sys.executable, "-c", self._CHILD], stdout=subprocess.PIPE, text=True, env=env)
+        try:
+            path = Path(child.stdout.readline().strip())
+            self.assertTrue((path / "config.json").is_file())
+            child.send_signal(signal.SIGTERM)
+            self.assertEqual(child.wait(timeout=10), -signal.SIGTERM, "still dies of SIGTERM")
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.stdout.close()
+        self.assertFalse(path.exists())
+
+    def test_a_dead_processs_login_directory_is_swept(self):
+        import sys
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        orphan = self.tmp / f"composer-registry-{dead.pid}-abc"
+        orphan.mkdir()
+        (orphan / "config.json").write_text("{}")
+        live = self.tmp / f"composer-registry-{os.getppid()}-abc"
+        live.mkdir()
+        outsider = self.tmp / "composer-registry-notapid"
+        outsider.mkdir()
+        environ = {"COMPOSER_REGISTRY_USERNAME": "sweep", "COMPOSER_REGISTRY_PASSWORD": "p", "WEB_IMAGE": IMAGE}
+        with patch("tempfile.tempdir", str(self.tmp)):
+            path = registry_login.docker_config(environ)
+        self.assertTrue(Path(path).is_relative_to(self.tmp))
+        self.assertFalse(orphan.exists())
+        self.assertTrue(live.exists(), "a live process keeps its login")
+        self.assertTrue(outsider.exists())
+
+    def test_this_pids_leftover_from_an_earlier_process_is_swept(self):
+        leftover = self.tmp / f"composer-registry-{os.getpid()}-old"
+        leftover.mkdir()
+        environ = {"COMPOSER_REGISTRY_USERNAME": "pid1", "COMPOSER_REGISTRY_PASSWORD": "p", "WEB_IMAGE": IMAGE}
+        with patch("tempfile.tempdir", str(self.tmp)):
+            path = registry_login.docker_config(environ)
+        self.assertFalse(leftover.exists())
+        self.assertTrue(Path(path).exists())
+
+
 class WatcherLoginTests(unittest.TestCase):
     @patch("composer.watcher._local_repo_digest", return_value="sha256:old")
     def test_the_watcher_sends_the_login_to_its_registry_only(self, _local):

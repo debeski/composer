@@ -220,7 +220,7 @@ umask 0002
 python -m composer agent update
 code=$?
 python - "$OPS_TOKEN" "$code" <<'PYEOF'
-import datetime, json, os, sys
+import datetime, json, os, sys, tempfile
 
 token, code = sys.argv[1], int(sys.argv[2])
 state = "/opt/dlux-runtime/state"
@@ -235,11 +235,13 @@ ack = {
     "exit_code": code, "error": error, "finished_at": now,
 }
 for name, payload in (("ops-result.json", result), ("ops-request.json.ack", ack)):
-    target = os.path.join(state, name)
-    tmp = os.path.join(state, "." + name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
+    # A random, exclusively created temp name: a fixed one on this shared
+    # volume could be a planted symlink.
+    fd, tmp = tempfile.mkstemp(dir=state, prefix="." + name + ".", suffix=".tmp")
+    os.fchmod(fd, 0o664)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
-    os.replace(tmp, target)
+    os.replace(tmp, os.path.join(state, name))
 PYEOF
 """
 

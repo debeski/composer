@@ -5,7 +5,21 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-from .agent_protocol import utc_now
+from .agent_protocol import TERMINAL_STATES, utc_now
+
+# Commands waiting or in progress. The control plane delivers one at a time, so a
+# deeper queue only means something is flooding it; the excess fails at once,
+# with an event saying why, instead of growing the store.
+MAX_QUEUED_COMMANDS = 32
+# Progress events one operation may queue before further progress is dropped.
+# DjangoLux can rewrite its result file as often as it likes, and each new digest
+# is a `running` transition. The terminal event is always recorded, and a dropped
+# event never takes a sequence number, so the sequence stays gapless.
+MAX_EVENTS_PER_OPERATION = 64
+# Finished commands kept so a redelivered operation is still recognised.
+MAX_FINISHED_COMMANDS = 1000
+_ACTIVE_STATES = ("received", "accepted", "running")
+_TERMINAL_SQL = ", ".join(f"'{state}'" for state in sorted(TERMINAL_STATES))
 
 
 class AgentStore:
@@ -138,6 +152,9 @@ class AgentStore:
     def enqueue_command(self, command: Dict[str, Any]) -> bool:
         now = utc_now()
         with self.connection() as connection:
+            queued = connection.execute(
+                "SELECT COUNT(*) FROM commands WHERE state IN (?, ?, ?)", _ACTIVE_STATES
+            ).fetchone()[0]
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO commands "
                 "(operation_id, action, body, state, received_at, updated_at) "
@@ -150,7 +167,29 @@ class AgentStore:
                     now,
                 ),
             )
-            return cursor.rowcount == 1
+            inserted = cursor.rowcount == 1
+            if inserted:
+                self._prune_finished(connection)
+        if inserted and queued >= MAX_QUEUED_COMMANDS:
+            self.transition(
+                command["operation_id"],
+                "failed",
+                {"error": f"The agent already has {queued} commands queued; this one was not run."},
+            )
+        return inserted
+
+    @staticmethod
+    def _prune_finished(connection):
+        """Forget the oldest finished commands whose events have all been sent."""
+        stale = connection.execute(
+            f"SELECT operation_id FROM commands WHERE state IN ({_TERMINAL_SQL}) "
+            "AND operation_id NOT IN (SELECT operation_id FROM outbox) "
+            "ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
+            (MAX_FINISHED_COMMANDS,),
+        ).fetchall()
+        for row in stale:
+            connection.execute("DELETE FROM commands WHERE operation_id=?", (row[0],))
+            connection.execute("DELETE FROM metadata WHERE key=?", (f"bridge_result:{row[0]}",))
 
     def has_running_command(self) -> bool:
         with self.connection() as connection:
@@ -210,9 +249,13 @@ class AgentStore:
         now = utc_now()
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT sequence FROM commands WHERE operation_id=?", (operation_id,)
+                "SELECT sequence, state FROM commands WHERE operation_id=?", (operation_id,)
             ).fetchone()
             if not row:
+                return
+            if row["state"] in TERMINAL_STATES:
+                return
+            if state not in TERMINAL_STATES and int(row["sequence"]) >= MAX_EVENTS_PER_OPERATION - 1:
                 return
             sequence = int(row["sequence"]) + 1
             connection.execute(

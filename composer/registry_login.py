@@ -16,7 +16,9 @@ Two readers use the login:
   ``DOCKER_CONFIG`` holding this one login. The Docker daemon takes registry
   credentials from its client, and the Composer containers have no Docker login
   of their own. The directory belongs to the process (0700, file 0600) and is
-  removed when the process exits.
+  removed when the process exits, also on SIGTERM. A directory a killed process
+  could not remove (SIGKILL, a crash) is swept by the next process that makes
+  one: its name carries the owner's pid.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ import base64
 import json
 import os
 import shutil
+import signal
+import stat
 import tempfile
 from typing import Dict, Mapping, Optional, Tuple
 
@@ -42,7 +46,10 @@ _DOCKER_HUB_ALIASES = {"docker.io", "index.docker.io", "registry-1.docker.io", "
 # The key Docker's own login writes for Docker Hub.
 _DOCKER_HUB_CONFIG_KEY = "https://index.docker.io/v1/"
 
+_CONFIG_PREFIX = "composer-registry-"
+
 _configs: Dict[Tuple[str, str, str], str] = {}
+_term_guard_installed = False
 
 
 def normalize_host(value: str) -> str:
@@ -111,7 +118,9 @@ def docker_config(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
     path = _configs.get(key)
     if path and os.path.isfile(os.path.join(path, "config.json")):
         return path
-    path = tempfile.mkdtemp(prefix="composer-registry-")
+    _install_term_guard()
+    _sweep_orphans()
+    path = tempfile.mkdtemp(prefix=f"{_CONFIG_PREFIX}{os.getpid()}-")
     entry = _DOCKER_HUB_CONFIG_KEY if host == DOCKER_HUB_REGISTRY else host
     auth = base64.b64encode(f"{login[0]}:{login[1]}".encode("utf-8")).decode("ascii")
     descriptor = os.open(os.path.join(path, "config.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -120,3 +129,82 @@ def docker_config(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
     _configs[key] = path
     atexit.register(shutil.rmtree, path, True)
     return path
+
+
+def remove_configs() -> None:
+    """Remove every login directory this process made."""
+    while _configs:
+        _key, path = _configs.popitem()
+        shutil.rmtree(path, True)
+
+
+def _install_term_guard() -> None:
+    """Remove the login on SIGTERM too: ``atexit`` does not run for a signal.
+
+    The previous handler still runs afterwards; under the default action the
+    process then dies of the same signal, so its exit status is unchanged.
+    """
+    global _term_guard_installed
+    if _term_guard_installed:
+        return
+    try:
+        previous = signal.getsignal(signal.SIGTERM)
+        if previous == signal.SIG_IGN:
+            _term_guard_installed = True
+            return
+
+        def _on_term(signum, frame):
+            remove_configs()
+            if callable(previous):
+                previous(signum, frame)
+                return
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        signal.signal(signal.SIGTERM, _on_term)
+    except (OSError, ValueError):
+        # Not the main thread: the next process's sweep removes what is left.
+        return
+    _term_guard_installed = True
+
+
+def _sweep_orphans() -> None:
+    """Remove login directories left by processes that are gone.
+
+    Only real directories this user owns are touched. A directory named for this
+    process's own pid but not made by it is a leftover from an earlier process
+    that had the same pid (pid 1 in a restarted container).
+    """
+    root = tempfile.gettempdir()
+    mine = set(_configs.values())
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(_CONFIG_PREFIX):
+            continue
+        pid_text = name[len(_CONFIG_PREFIX):].split("-", 1)[0]
+        if not pid_text.isdigit():
+            continue
+        path = os.path.join(root, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or path in mine:
+            continue
+        pid = int(pid_text)
+        if pid != os.getpid() and _alive(pid):
+            continue
+        shutil.rmtree(path, True)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True

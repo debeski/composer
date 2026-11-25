@@ -36,7 +36,12 @@ def _agent_args(root):
 
 
 class _ServedExecutor:
-    """Start a real executor server with an injected handler on a temp socket."""
+    """Start a real executor server with an injected handler on a temp socket.
+
+    Waits until the server is listening, not until the socket file exists:
+    `bind()` creates the file before `listen()`, and a connect in between is
+    refused, which the client reports as 127 ("executor unreachable").
+    """
 
     def __init__(self, test, handler):
         self.tmp = tempfile.mkdtemp()
@@ -45,10 +50,7 @@ class _ServedExecutor:
         self.executor = Executor(self.socket_path, handler)
         threading.Thread(target=self.executor.serve_forever, daemon=True).start()
         test.addCleanup(self.executor.stop)
-        for _ in range(100):
-            if os.path.exists(self.socket_path):
-                break
-            time.sleep(0.02)
+        test.assertTrue(self.executor.wait_until_listening(timeout=10), "executor never started listening")
 
 
 def _ok_handler(request):
@@ -95,6 +97,25 @@ class ExecutorClientTests(unittest.TestCase):
             code, detail = executor_client.run_operation("restart", {"service": "web"}, str(uuid.uuid4()))
         self.assertEqual(code, 2)
         self.assertIn("nope", detail)
+
+    def test_a_slow_listen_does_not_read_as_executor_down(self):
+        # Under load the gap between bind() and listen() was long enough for a
+        # client connect to be refused (127 != 2 in a full-suite run).
+        import socket as socket_module
+
+        class _SlowListen(socket_module.socket):
+            def listen(self, *args):
+                time.sleep(0.3)
+                return super().listen(*args)
+
+        def handler(request):
+            return proto.build_result(request["operation_id"], "rejected", exit_code=2, detail="nope")
+
+        with patch.object(socket_module, "socket", _SlowListen):
+            served = _ServedExecutor(self, handler)
+        with patch.dict(os.environ, {"COMPOSER_EXECUTOR_SOCKET": served.socket_path}):
+            code, _detail = executor_client.run_operation("restart", {"service": "web"}, str(uuid.uuid4()))
+        self.assertEqual(code, 2)
 
     def test_run_operation_executor_down_is_reported_not_swallowed(self):
         # Point at a socket that does not exist: no Docker fallback in exec mode.

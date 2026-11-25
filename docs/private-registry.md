@@ -29,7 +29,9 @@ before:
   to the storage host a blob read is redirected to;
 - every `docker compose` Composer runs gets a private `DOCKER_CONFIG` holding only
   this login (directory `0700`, `config.json` `0600`, removed when the Composer
-  process exits). The Docker daemon takes registry credentials from its client,
+  process exits, on SIGTERM too). A directory a killed process could not remove
+  (SIGKILL, a crash) is removed by the next Composer process that makes one: its
+  name, `composer-registry-<pid>-…`, says which process owned it. The Docker daemon takes registry credentials from its client,
   and the Composer containers have no Docker login of their own: a `docker login`
   on the host does not reach them.
 

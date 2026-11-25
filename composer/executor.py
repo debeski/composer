@@ -27,7 +27,9 @@ EXECUTOR_SOCKET_ENV = "COMPOSER_EXECUTOR_SOCKET"
 # Dedicated mount (a shared named volume) rather than a subpath of dlux_runtime,
 # so the socket volume never nests inside another mount.
 DEFAULT_EXECUTOR_SOCKET = "/run/composer-exec/composer-exec.sock"
-# Optional expected peer uid (the agent's uid); when set, enforced via SO_PEERCRED.
+# The uid a connecting peer must have (checked via SO_PEERCRED). Unset, it is the
+# executor's own uid: the generated pair runs agent and executor from the same
+# image as the same user.
 EXECUTOR_PEER_UID_ENV = "COMPOSER_EXECUTOR_PEER_UID"
 
 _ACCEPT_BACKLOG = 8
@@ -58,13 +60,23 @@ def _recv_exactly(conn: socket.socket) -> Callable[[int], bytes]:
 
 
 def _peer_uid(conn: socket.socket) -> Optional[int]:
-    """Return the connecting peer's uid via SO_PEERCRED (Linux), else None."""
+    """The connecting peer's uid: SO_PEERCRED on Linux, LOCAL_PEERCRED on macOS/BSD.
+
+    None when the platform cannot say, which the caller treats as a refusal.
+    """
     try:
-        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        _pid, uid, _gid = struct.unpack("3i", creds)
-        return uid
-    except (OSError, AttributeError, ValueError):
+        if hasattr(socket, "SO_PEERCRED"):
+            creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            _pid, uid, _gid = struct.unpack("3i", creds)
+            return uid
+        if sys.platform == "darwin" or "bsd" in sys.platform:
+            # struct xucred { u_int cr_version; uid_t cr_uid; ... }, at level SOL_LOCAL (0).
+            creds = conn.getsockopt(0, getattr(socket, "LOCAL_PEERCRED", 1), 76)
+            _version, uid = struct.unpack_from("Ii", creds)
+            return uid
+    except (OSError, AttributeError, ValueError, struct.error):
         return None
+    return None
 
 
 class Executor:
@@ -197,12 +209,9 @@ class Executor:
     def _authorized(self, conn: socket.socket) -> bool:
         if self.expected_peer_uid is None:
             return True
+        # A peer whose uid cannot be read is refused: the check fails closed.
         uid = _peer_uid(conn)
-        # If the platform cannot report peer creds, fall back to the filesystem
-        # permission control (the socket is 0660 on a private volume).
-        if uid is None:
-            return True
-        return uid == self.expected_peer_uid
+        return uid is not None and uid == self.expected_peer_uid
 
     def _send(self, conn: socket.socket, obj: Dict) -> None:
         frame = proto.encode_result_frame(obj)
@@ -212,14 +221,21 @@ class Executor:
             pass  # the agent hung up; there is no one left to tell
 
 
-def _expected_peer_uid_from_env() -> Optional[int]:
-    raw = os.environ.get(EXECUTOR_PEER_UID_ENV)
-    if raw is None or not str(raw).strip():
-        return None
+def _expected_peer_uid_from_env() -> int:
+    """The peer uid to enforce: the variable when set, otherwise this process's uid.
+
+    A value that is not a uid is an error, never "no check".
+    """
+    raw = str(os.environ.get(EXECUTOR_PEER_UID_ENV) or "").strip()
+    if not raw:
+        return os.getuid()
     try:
-        return int(str(raw).strip())
+        uid = int(raw)
     except ValueError:
-        return None
+        uid = -1
+    if uid < 0:
+        raise ValueError(f"{EXECUTOR_PEER_UID_ENV} must be a uid, not {raw!r}.")
+    return uid
 
 
 def _run_watch_loop(watch, op_lease, stop_event) -> None:
@@ -280,11 +296,12 @@ def run_executor(args) -> int:
 
     os.umask(SHARED_UMASK)
     socket_path = getattr(args, "socket", None) or resolve_socket_path()
-    executor = Executor(
-        socket_path,
-        default_operation_handler,
-        expected_peer_uid=_expected_peer_uid_from_env(),
-    )
+    try:
+        expected_peer_uid = _expected_peer_uid_from_env()
+    except ValueError as exc:
+        print(f"✖ {exc}", file=sys.stderr)
+        return 2
+    executor = Executor(socket_path, default_operation_handler, expected_peer_uid=expected_peer_uid)
     stop_event = threading.Event()
     watch = _build_watch_runtime(args)
     if watch is not None:

@@ -379,9 +379,6 @@ class StackSchemaRequirementTests(unittest.TestCase):
 
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class StaleIndexRetryTests(unittest.TestCase):
     """PyPI's CDN served an index without a just-published beta to alternate
@@ -401,6 +398,7 @@ class StaleIndexRetryTests(unittest.TestCase):
         sleeps = []
         with (
             patch.object(source, "fetch_index", side_effect=lambda opener=None: next(stale)),
+            patch.object(source, "fetch_release", return_value=None),
             patch.object(source, "verify_attestation", side_effect=capture),
         ):
             with self.assertRaises(self._Selected):
@@ -429,3 +427,138 @@ class StaleIndexRetryTests(unittest.TestCase):
         self.assertEqual(self._resolve([new], expected="1.11.0b2"), ("1.11.0b2", []))
         old = SelectionTests._candidates("1.11.0b1", "1.10.1")
         self.assertEqual(self._resolve([old], expected="1.11.0b2", target_version="1.10.1"), ("1.10.1", []))
+
+
+def _release_page(version, digest="d" * 64, *, yanked=False, host="files.pythonhosted.org"):
+    filename = f"django_lux-{version}-py3-none-any.whl"
+    return json.dumps({
+        "info": {"version": version},
+        "urls": [
+            {"filename": f"django_lux-{version}.tar.gz", "url": f"https://{host}/x.tar.gz",
+             "digests": {"sha256": "e" * 64}, "yanked": False},
+            {"filename": filename, "url": f"https://{host}/{filename}",
+             "digests": {"sha256": digest}, "yanked": yanked},
+        ],
+    }).encode("utf-8")
+
+
+class _PyPI:
+    """A fake PyPI whose index lags behind its per-release pages."""
+
+    def __init__(self, index_versions, published):
+        self.index = SelectionTests._candidates(*index_versions)
+        self.published = set(published)
+        self.requested = []
+
+    def opener(self, request, timeout=None):
+        import urllib.error
+        url = request.full_url
+        self.requested.append(url)
+        if url == source.PYPI_SIMPLE_URL:
+            return _Response(_index([(c.filename, c.sha256) for c in self.index]), url)
+        version = url.rstrip("/").split("/")[-2]
+        if version in self.published:
+            return _Response(_release_page(version), url)
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+
+class CdnLagTests(unittest.TestCase):
+    """2026-11-25: for minutes after 1.16.6 was published the index still ended
+    at 1.16.6b1/1.16.5, while /pypi/django-lux/1.16.6/json was already fresh."""
+
+    def test_a_pin_reads_its_own_release_page_when_the_index_lags(self):
+        pypi = _PyPI(["1.16.5", "1.16.6b1"], published=["1.16.6"])
+        sleeps = []
+        found = source.resolve_candidate("1.16.6", opener=pypi.opener, sleep=sleeps.append)
+        self.assertEqual(found.version, "1.16.6")
+        self.assertEqual(found.sha256, "d" * 64)
+        self.assertEqual(sleeps, [])
+
+    def test_a_pin_retries_before_saying_not_published(self):
+        pypi = _PyPI(["1.16.5"], published=[])
+        sleeps = []
+        with self.assertRaisesRegex(ReleaseSourceError, "1.16.6 is not published"):
+            source.resolve_candidate("1.16.6", opener=pypi.opener, sleep=sleeps.append)
+        self.assertEqual(sleeps, list(source.INDEX_RETRY_DELAYS))
+
+    def test_a_pin_found_on_a_retry(self):
+        pypi = _PyPI(["1.16.5"], published=[])
+        sleeps = []
+
+        def sleep(delay):
+            sleeps.append(delay)
+            pypi.published.add("1.16.6")
+
+        found = source.resolve_candidate("1.16.6", opener=pypi.opener, sleep=sleep)
+        self.assertEqual((found.version, sleeps), ("1.16.6", [3]))
+
+    def test_an_unpinned_check_finds_the_final_of_the_newest_beta(self):
+        pypi = _PyPI(["1.16.5", "1.16.6b1"], published=["1.16.6"])
+        found = source.resolve_candidate(channel="stable", opener=pypi.opener, sleep=lambda _d: None)
+        self.assertEqual(found.version, "1.16.6")
+
+    def test_an_unpinned_check_finds_the_next_patch(self):
+        pypi = _PyPI(["1.16.5"], published=["1.16.6"])
+        found = source.resolve_candidate(channel="stable", opener=pypi.opener, sleep=lambda _d: None)
+        self.assertEqual(found.version, "1.16.6")
+
+    def test_stable_never_probes_or_picks_a_beta(self):
+        pypi = _PyPI(["1.16.5"], published=["1.16.6b1", "1.17.0b1"])
+        found = source.resolve_candidate(channel="stable", opener=pypi.opener, sleep=lambda _d: None)
+        self.assertEqual(found.version, "1.16.5")
+        self.assertFalse([u for u in pypi.requested if "b1/json" in u])
+
+    def test_beta_probes_the_next_beta(self):
+        pypi = _PyPI(["1.16.5", "1.16.6b1"], published=["1.16.6b2"])
+        found = source.resolve_candidate(channel="beta", opener=pypi.opener, sleep=lambda _d: None)
+        self.assertEqual(found.version, "1.16.6b2")
+
+    def test_the_expected_release_is_read_directly(self):
+        pypi = _PyPI(["1.11.0b1"], published=["1.11.0b4"])
+        found = source.resolve_candidate(channel="beta", expected="1.11.0b4", opener=pypi.opener,
+                                         sleep=lambda _d: None)
+        self.assertEqual(found.version, "1.11.0b4")
+
+    def test_a_quarantined_probe_result_is_still_skipped(self):
+        pypi = _PyPI(["1.16.5"], published=["1.16.6"])
+        found = source.resolve_candidate(channel="stable", exclude=["1.16.6"], opener=pypi.opener,
+                                         sleep=lambda _d: None)
+        self.assertEqual(found.version, "1.16.5")
+
+    def test_probe_failures_do_not_fail_the_check(self):
+        def opener(request, timeout=None):
+            if request.full_url == source.PYPI_SIMPLE_URL:
+                return _Response(_index([(c.filename, c.sha256) for c in SelectionTests._candidates("1.16.5")]),
+                                 request.full_url)
+            raise OSError("connection reset")
+        found = source.resolve_candidate(channel="stable", opener=opener, sleep=lambda _d: None)
+        self.assertEqual(found.version, "1.16.5")
+
+
+class ReleasePageTests(unittest.TestCase):
+    def _fetch(self, payload, url="https://pypi.org/pypi/django-lux/1.16.6/json"):
+        return source.fetch_release("1.16.6", opener=_opener_for(payload, url))
+
+    def test_reads_the_wheel_and_its_digest(self):
+        found = self._fetch(_release_page("1.16.6"))
+        self.assertEqual(found.filename, "django_lux-1.16.6-py3-none-any.whl")
+
+    def test_a_yanked_wheel_is_absent(self):
+        self.assertIsNone(self._fetch(_release_page("1.16.6", yanked=True)))
+
+    def test_a_wheel_on_an_unapproved_host_is_absent(self):
+        self.assertIsNone(self._fetch(_release_page("1.16.6", host="evil.example.com")))
+
+    def test_a_wheel_for_another_version_is_absent(self):
+        self.assertIsNone(self._fetch(_release_page("1.16.5")))
+
+    def test_a_bad_digest_is_absent(self):
+        self.assertIsNone(self._fetch(_release_page("1.16.6", digest="xyz")))
+
+    def test_a_redirect_off_pypi_is_refused(self):
+        with self.assertRaises(ReleaseSourceError):
+            self._fetch(_release_page("1.16.6"), url="https://evil.example.com/json")
+
+
+if __name__ == "__main__":
+    unittest.main()
