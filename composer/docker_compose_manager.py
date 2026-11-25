@@ -21,6 +21,7 @@ from .constants import (
     SUPERVISOR_MODULE,
 )
 from . import registry_login
+from .failure_hints import likely_cause, next_steps
 from .output_utils import OutputUtilsMixin
 from .service_selection import scoped_service_list
 from .subprocess_runner import SubprocessRunnerMixin
@@ -197,6 +198,7 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         excluded = set(getattr(self, "exclude_services", []) or [])
         issues: List[str] = []
         failed_services: List[str] = []
+        exit_codes: Dict[str, str] = {}
 
         for service in services:
             name = service.get("Service") or service.get("Name") or "unknown"
@@ -205,6 +207,7 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             state = str(service.get("State", "")).lower()
             health = str(service.get("Health", "")).lower()
             exit_code = str(service.get("ExitCode", "")).strip()
+            exit_codes[name] = exit_code
 
             if state in {"exited", "dead"} or health == "unhealthy":
                 message = f"{name}: state={state or 'unknown'}"
@@ -233,6 +236,10 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
                 summary = self.summarize_output(out, err, max_lines=12)
                 if summary:
                     sections.append(f"{service_name} logs:\n{summary}")
+                cause = likely_cause(service_name, f"{out}\n{err}", exit_codes.get(service_name))
+                if cause:
+                    sections.append(f"{service_name}: {cause}")
+            sections.append(next_steps(wanted[:3]))
 
         return "\n\n".join(section for section in sections if section.strip())
 

@@ -146,7 +146,8 @@ class HealthMonitorMixin:
         details = ""
         if unhealthy:
             details = "Containers failed to become healthy: " + ", ".join(unhealthy)
-        diagnostics = self.collect_service_diagnostics()
+        stuck = [s for s in self.services if self.service_state.get(s) != SERVICE_HEALTHY]
+        diagnostics = self.collect_service_diagnostics(log_services=stuck)
         if diagnostics:
             details = f"{details}\n\n{diagnostics}".strip()
         return False, details or "Containers failed to become healthy before the timeout."

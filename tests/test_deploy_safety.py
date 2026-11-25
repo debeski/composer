@@ -93,6 +93,18 @@ class HealthSettleWindowTests(HealthHarness, unittest.TestCase):
         self.assertIn("celery restarted once during the health check", detail)
         self.assertIn("No module named 'celery'", detail)
         self.assertEqual(self.logs_requested, ["celery"])
+        self.assertIn("celery: Likely cause: its image has no Python module 'celery'", detail)
+        self.assertIn("./start.sh logs celery", detail)
+        self.assertIn("COMPOSER_EXCLUDE_SERVICES=celery", detail)
+
+    def test_a_service_stuck_starting_gets_its_logs_at_the_timeout(self):
+        polls = [[_running("web", "aaa", "starting"), _running("celery", "ccc")]]
+        self.script(polls, ["aaa 0 t0\nccc 0 t0\n"])
+        ok, detail = self.launcher.monitor_health()
+        self.assertFalse(ok)
+        self.assertIn("web (starting)", detail)
+        self.assertIn("web", self.logs_requested)
+        self.assertIn("./start.sh logs web", detail)
 
     def test_a_service_caught_restarting_fails(self):
         polls = [
@@ -216,6 +228,37 @@ class HealthSettleWindowTests(HealthHarness, unittest.TestCase):
             {"web": {"aaa111": (0, "t0")}, "celery": {"ccc222": (4, "t1")}},
         )
 
+
+class FailureHintTests(unittest.TestCase):
+    def test_causes_seen_on_djangolux_stacks(self):
+        from composer.failure_hints import likely_cause
+
+        cases = {
+            "ModuleNotFoundError: No module named 'celery'": "no Python module 'celery'",
+            "exec /app/entrypoint.sh: exec format error": "another CPU architecture",
+            "OSError: [Errno 98] Address already in use": "already taken",
+            'django.db.utils.OperationalError: connection to server at "db" failed': "cannot reach the database",
+            "redis.exceptions.ConnectionError: Error 111 connecting to redis:6379. Connection refused.": "cannot reach Redis",
+            'psycopg.errors.UndefinedTable: relation "dlux_task" does not exist': "schema does not match",
+            "PermissionError: [Errno 13] Permission denied: '/app/media/x'": "app-permissions",
+        }
+        for log, expected in cases.items():
+            with self.subTest(log=log):
+                self.assertIn(expected, likely_cause("svc", log))
+
+    def test_exit_137_is_named_and_unknown_logs_say_nothing(self):
+        from composer.failure_hints import likely_cause
+
+        self.assertIn("out of memory", likely_cause("web", "", "137"))
+        self.assertEqual(likely_cause("web", "everything is fine", "1"), "")
+
+    def test_next_steps_name_the_services(self):
+        from composer.failure_hints import next_steps
+
+        text = next_steps(["celery", "worker", "celery"])
+        self.assertIn("./start.sh logs celery worker", text)
+        self.assertIn("COMPOSER_EXCLUDE_SERVICES=celery,worker", text)
+        self.assertEqual(next_steps([]), "")
 
 class EdgeProxyTests(unittest.TestCase):
     """#10: a failed deploy must leave the proxy serving the maintenance page."""
@@ -533,11 +576,76 @@ class RuntimeFloorTests(unittest.TestCase):
             if argv[:2] == ["docker", "inspect"]:
                 return True, "sha256:composer\n", ""
             if argv[:2] == ["docker", "run"]:
+                if downgrade_guard.RUNTIME_WRITE_SCRIPT in argv:
+                    self.writes.append(argv)
+                    return self.write_ok, "", "" if self.write_ok else "OSError: read-only file system"
                 self.runs.append(argv)
                 return True, json.dumps(self.runtime) + "\n", ""
             return False, "", "unexpected"
 
+        self.writes = []
+        self.write_ok = True
         self.launcher.run_command = run_command
+
+    def test_the_runtime_record_still_refuses_with_no_containers_and_no_project_record(self):
+        # A deploy root Composer cannot write keeps no .xclude record; after a
+        # `down` only the copy on the runtime volume remembers the release.
+        self.runtime = {"record": {"app": "2.2.1", "dlux": "1.16.3"}}
+        ok, message = self.launcher.downgrade_guard()
+        self.assertFalse(ok)
+        self.assertIn("app 2.1.26 is older than 2.2.1", message)
+
+    def test_the_record_is_written_to_both_places(self):
+        self.target = NEWER
+        self.runtime = {"record": {"app": "2.2.1", "dlux": "1.16.3"}}
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+        self.launcher.record_deployed_release()
+        expected = {"app": "2.2.2", "dlux": "1.16.6"}
+        self.assertEqual(downgrade_guard.read_record(), expected)
+        write = self.writes[0]
+        self.assertIn("stack_dlux_runtime:/opt/dlux-runtime", write)
+        self.assertNotIn("stack_dlux_runtime:/opt/dlux-runtime:ro", write)
+        payload = json.loads(write[-1])
+        self.assertEqual({k: payload[k] for k in ("app", "dlux")}, expected)
+
+    def test_a_read_only_deploy_root_is_covered_by_the_runtime_copy(self):
+        Path(".xclude").mkdir()
+        Path(".xclude/composer-deploy").write_text("not a directory")
+        self.target = NEWER
+        self.launcher.log_file = str(Path(self.tmp.name) / "deploy-log.txt")
+        self.launcher.downgrade_guard()
+        with patch("builtins.print") as printed:
+            self.launcher.record_deployed_release()
+        printed.assert_not_called()
+        self.assertFalse(getattr(self.launcher, "deploy_warnings", None))
+        self.assertEqual(len(self.writes), 1)
+        self.assertIn("runtime volume only", Path(self.launcher.log_file).read_text())
+
+    def test_both_copies_failing_warns_with_both_reasons(self):
+        Path(".xclude").mkdir()
+        Path(".xclude/composer-deploy").write_text("not a directory")
+        self.write_ok = False
+        self.target = NEWER
+        self.launcher.downgrade_guard()
+        with patch("builtins.print"):
+            self.launcher.record_deployed_release()
+        (warning,) = self.launcher.deploy_warnings
+        self.assertIn(".xclude/composer-deploy/deployed.json", warning)
+        self.assertIn("copy on the DjangoLux runtime volume (OSError: read-only file system)", warning)
+
+    def test_the_scripts_write_and_read_back_the_volume_record(self):
+        import subprocess
+        import sys
+
+        root = Path(self.tmp.name) / "runtime"
+        payload = json.dumps({"app": "2.2.1", "dlux": "1.16.3", "image": "x"})
+        subprocess.run(
+            [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_WRITE_SCRIPT, str(root), payload],
+            check=True,
+        )
+        written = root / "state" / "composer-deployed.json"
+        self.assertEqual(written.stat().st_mode & 0o777, 0o664)
+        self.assertEqual(self._script({"source": "image"})["record"], {"app": "2.2.1", "dlux": "1.16.3"})
 
     def test_an_image_below_the_active_release_floor_is_refused(self):
         ok, message = self.launcher.downgrade_guard()
@@ -583,7 +691,7 @@ class RuntimeFloorTests(unittest.TestCase):
             release.mkdir(parents=True, exist_ok=True)
             (release / "release-manifest.json").write_text(json.dumps(manifest))
         out = subprocess.run(
-            [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_FLOOR_SCRIPT, str(root)],
+            [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_STATE_SCRIPT, str(root)],
             capture_output=True, text=True, check=True,
         ).stdout
         return json.loads(out)
