@@ -90,6 +90,62 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(ap.discover_targets({"services": {"db": {"image": "postgres:17"}}}, "/srv"), [])
 
 
+def _dev_config(project):
+    """`./start.sh -d`: the dev file resets `image:` and builds web/worker instead."""
+    config = _config(project)
+    config["name"] = "eservices"
+    for name in ("web", "worker", "ocr"):
+        config["services"][name].pop("image")
+        config["services"][name]["build"] = {"context": project, "dockerfile": "Dockerfile"}
+    return config
+
+
+class DevModeTests(unittest.TestCase):
+    """In development mode no app service had an `image`, so app_image() was ""
+    and app-permissions was skipped before `up`: a USER 10001:0 image then
+    stopped at DjangoLux's mount_access gate (exit 78)."""
+
+    def test_the_built_image_is_composes_own_name(self):
+        self.assertEqual(ap.app_image(_dev_config("/srv/e")), "eservices-web")
+
+    def test_every_service_built_from_the_app_build_counts(self):
+        self.assertEqual(ap.app_services(_dev_config("/srv/e")), ["ocr", "web", "worker"])
+
+    def test_the_workers_mounts_are_included(self):
+        labels = {t.label for t in ap.discover_targets(_dev_config("/srv/e"), "/srv/e")}
+        self.assertIn("volume dlux_runtime", labels)
+        self.assertIn("./media", labels)
+
+    def test_a_short_build_string_is_the_same_build(self):
+        config = _dev_config("/srv/e")
+        for name in ("web", "worker", "ocr"):
+            config["services"][name]["build"] = "."
+        self.assertEqual(ap.app_services(config), ["ocr", "web", "worker"])
+
+    def test_another_build_is_another_app(self):
+        config = _dev_config("/srv/e")
+        config["services"]["ocr"]["build"] = {"context": "/srv/e/ocr"}
+        self.assertEqual(ap.app_services(config), ["web", "worker"])
+
+    def test_production_matching_is_unchanged(self):
+        self.assertEqual(ap.app_image(_config("/srv/a")), "debeski/archive:latest")
+        self.assertEqual(ap.app_services(_config("/srv/a")), ["ocr", "web", "worker"])
+
+    def test_without_a_project_name_nothing_is_guessed(self):
+        config = _dev_config("/srv/e")
+        config.pop("name")
+        self.assertEqual(ap.app_image(config), "")
+
+    def test_prepare_app_data_runs_in_dev_mode(self):
+        from composer.launcher import DockerComposeLauncher
+
+        launcher = DockerComposeLauncher()
+        launcher.compose_config_json = lambda: _dev_config("/srv/e")
+        with patch.object(ap, "ensure_for_image", return_value=(True, "granted")) as ensure:
+            self.assertEqual(launcher.prepare_app_data(), (True, "granted"))
+        self.assertEqual(ensure.call_args.args[1], "eservices-web")
+
+
 class RuleTests(unittest.TestCase):
     def test_root_written_directory_gets_group_write_only(self):
         self.assertEqual(ap.planned(_st(0, 0, 0o755), 10001, 0, ap.needs(_st(0, 0, 0o755), "data", False)),
@@ -452,6 +508,29 @@ class RunTests(unittest.TestCase):
         ready, note = ap.ensure_for_image(launcher, "img")
         self.assertFalse(ready)
         self.assertIn("numeric USER", note)
+
+
+class DevModeGrantTests(unittest.TestCase):
+    def setUp(self):
+        self.project = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.project, ignore_errors=True))
+        for name in ("media", "logs", "imports"):
+            os.mkdir(os.path.join(self.project, name))
+
+    def test_the_dev_build_is_built_read_and_granted_before_up(self):
+        wrong = [{"label": "./media", "kind": "bind", "wrong": 3, "missing": False}]
+        launcher = FakeLauncher(
+            self.project,
+            lambda action: wrong if action == "scan" else [dict(wrong[0], changed=3, wrong=0)],
+            local=False, pull_ok=False,
+        )
+        launcher.config = _dev_config(self.project)
+        ready, note = ap.ensure_for_image(launcher, ap.app_image(launcher.config), launcher.config)
+        self.assertTrue(ready, note)
+        self.assertEqual(launcher.compose[-1], ["build", "ocr", "web", "worker"])
+        inspected = [argv[3] for argv in launcher.commands if argv[:3] == ["docker", "image", "inspect"]]
+        self.assertEqual(set(inspected), {"eservices-web"})
+        self.assertTrue(any(argv[:2] == ["docker", "run"] and "apply" in argv for argv in launcher.commands))
 
 
 class PrepareScopeTests(unittest.TestCase):
