@@ -36,23 +36,38 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
 
 ## How `--fix` is guarded
 
+0. **One at a time.** `--fix` holds `.xclude/composer-check/check-fix.lock` (`flock`)
+   for the whole run. A second `--fix` on the same project is refused at once with
+   `check-fix` FAIL, naming the holder's pid, host and start time, and changes
+   nothing. A run keeps going when its terminal is closed or its `./start.sh` is
+   killed (the Composer container finishes it), so wait for it (`docker ps` lists
+   it). The system frees the lock when the holder ends, however it ends. The holder
+   records itself in the file and empties it on exit, so a run that was killed
+   (SIGKILL, a host crash) is reported by the next one as a `check-fix` WARN: one of
+   its fixes may have stopped halfway, and this run checked everything again. Where
+   `flock` is unsupported, that record decides: a holder on this host whose process
+   is gone, or one older than two hours, is stale.
 1. **Plan and ask.** `--fix` plans every repair, prints what each will change, and
    asks before applying (`-y` answers in advance; a non-terminal without `-y` is
    refused). Declining reports `fix` WARN "Changes declined."
 2. **Validate first.** Every repair validates its result with `docker compose config`
    before writing; a changed proxy file mounted by Caddy or Nginx is validated as
    well, in a throwaway container.
-3. **Archive.** Every changed deployment or proxy file is archived under
-   `.xclude/composer-check/` first (the secrets file excepted: only its stamp
-   changes, see [stamps](stack-migrations.md#stamps)).
+3. **Archive, then write as found.** Every changed deployment or proxy file is
+   archived under `.xclude/composer-check/` first (the secrets file excepted: only
+   its stamp changes, see [stamps](stack-migrations.md#stamps)). A rewritten file
+   keeps its line endings, so a CRLF `compose.yml` stays CRLF. A file Composer
+   cannot write stops the repair before anything is validated, archived or written,
+   with a message naming the file and the `chmod`/`chown` that fixes it.
 4. **Apply in a fixed order:** wrappers, maintenance page, stored files, front proxy,
    relay settings, obsolete services and routes, init containers, dev compose,
    Composer install, `agent enable`, `executor enable`, resident block, updater
-   runtime, post-start label, restart labels, app permissions, task worker. A
-   failed obsolete-services cleanup stops there.
-5. **Re-check.** `resident-commands`, `docker-proxy` and `stored-files` are checked
-   again when they failed, and `app-permissions` always is (deep); the new results
-   replace the old.
+   runtime, post-start label, restart labels, app permissions, task worker,
+   `celery` removal, stamp repair. A failed obsolete-services cleanup stops there.
+5. **Re-check.** After a repair the services are discovered again. `resident-commands`,
+   `docker-proxy`, `stored-files`, `stack-schema`, `task-worker` and `services` are
+   checked again when they failed, and `app-permissions` always is (deep); the new
+   results replace the old.
 
 The obsolete-services cleanup stops and removes only the detected obsolete
 containers with a targeted `docker compose rm -sf`, applies the service and route
@@ -111,12 +126,19 @@ FAIL, the fix, and what `--fix` does.
 - **Checks:** the secrets file (the first of `.env`, `secrets/.env`, `.secrets/.env`)
   is present, readable, parses and holds values; then, when the stack has
   `composer-executor`, that the executor can open it too.
-- **OK** readable by the launcher and the executor. **WARN** no file (secrets may come
-  from the environment), or the executor's access cannot be verified (it is not
-  running). **FAIL** unreadable, unparseable or empty (an empty file falls through to
-  Compose defaults), or unreadable by the executor.
-- **Fix:** for an unreadable file, the `sudo setfacl` commands for the mapped host UID
-  ([when the executor cannot read the file](deploying.md#when-the-executor-cannot-read-the-file)).
+- **OK** readable by the launcher and the executor. **WARN** no file while the
+  environment supplies every value the Compose files read from it, or the executor's
+  access cannot be verified (it is not running). **FAIL** no file while the Compose
+  files read a value DjangoLux's generated secrets file supplies (`DJANGO_SECRET_KEY`,
+  `POSTGRES_PASSWORD`, `ADMIN_PASS`, `WEB_IMAGE`, …, the keys of its
+  `.secrets/.env` template) and nothing else supplies it: a deploy would run on the
+  Compose file's built-in defaults, a placeholder secret key and default database
+  credentials. The message lists the keys, credentials first. Also FAIL: unreadable,
+  unparseable or empty (an empty file falls through to Compose defaults), or
+  unreadable by the executor.
+- **Fix:** restore the secrets file from your backup, or supply the values through the
+  environment; for an unreadable file, the `sudo setfacl` commands for the mapped host
+  UID ([when the executor cannot read the file](deploying.md#when-the-executor-cannot-read-the-file)).
 - **`--fix`:** nothing to the file. The resident-block repair gives `composer-executor`
   the `DAC_OVERRIDE` capability it needs to read it
   ([executor hardening](executor-hardening.md#capabilities)).
@@ -218,13 +240,22 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 
 #### `stack-schema`
 
-- **Checks:** that the stamped stack files agree on their DjangoLux stack schema.
-- **OK** none stamped, or compose stamped and every other stamp agrees. **WARN**
-  stamps disagree, or other files are stamped but compose is not.
-- **Fix:** bring the older files up to date using DjangoLux's `docs/stack-schema.md`,
-  then restamp; or add `DLUX_STACK_SCHEMA: "<n>"` to compose's `x-environment`.
-- **`--fix`:** nothing for this finding; each schema migration restamps the files it
-  moves on. Details: [stamps](stack-migrations.md#stamps).
+- **Checks:** every stamp in every stamped stack file, compose.yml's included (a
+  file may carry a `# dlux stack schema N` header above its `DLUX_STACK_SCHEMA`
+  value).
+- **OK** none stamped, or compose carries `DLUX_STACK_SCHEMA` and every stamp agrees.
+  **WARN** files disagree with each other; a file other than compose disagrees with
+  itself; other files are stamped but compose is not; or compose is stamped in a
+  comment only, without the `DLUX_STACK_SCHEMA` value DjangoLux reads. **FAIL**
+  compose's own stamps disagree, the trace of a restamp that changed only some of
+  them: DjangoLux runs the stack as the schema `DLUX_STACK_SCHEMA` names.
+- **Fix:** for a file at odds with itself, `check --fix`, which names the schema the
+  stack's layout follows; otherwise bring the older files up to date using
+  DjangoLux's `docs/stack-schema.md`, then restamp, or add `DLUX_STACK_SCHEMA: "<n>"`
+  to compose's `x-environment`.
+- **`--fix`:** each schema migration restamps every stamp in the files it moves on.
+  A file whose own stamps disagree is restamped to the schema the stack's layout
+  follows, last of all repairs. Details: [stamps](stack-migrations.md#stamps).
 
 #### `maintenance-page`
 
@@ -243,9 +274,14 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   DjangoLux's check.
 - **OK** no `/media/` route, or private. **WARN** custom `/media/` rules. **FAIL**
   (security) the legacy public `/media/` route.
-- **Fix:** update DjangoLux to 1.15.3+, then `check --fix` (stack schema 4).
+- **Fix:** on DjangoLux 1.15.3+, `check --fix` (stack schema 4). On an older one, the
+  way there, worked out from the release data: `./start.sh dlux update --version X`
+  with X the newest release this stack still takes inline, or, when none reaches
+  1.15.3, a project image on 1.15.3 or later; then `check --fix`
+  ([the way out of an old stack](stack-migrations.md#the-way-out-of-an-old-stack)).
 - **`--fix`:** rewrites an unmodified generated proxy, then re-checks; refuses on
-  DjangoLux older than 1.15.3. Details: [stored files](proxy.md#stored-files).
+  DjangoLux older than 1.15.3, naming the same way there. Details:
+  [stored files](proxy.md#stored-files).
 
 #### `fetch-metadata`
 
@@ -316,10 +352,41 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 
 - **Checks:** that a DjangoLux 1.16+ stack has the `worker` service. No finding
   without `worker` or `celery`.
-- **OK** `worker` present, or not needed yet (the reason is given). **WARN** DjangoLux
-  1.16+ and no `worker`: its tasks are queued and never run.
-- **`--fix`:** adds `worker` (stack schema 5), last of all repairs. Details:
+- **OK** `worker` present, or not needed yet (the reason is given). **FAIL** DjangoLux
+  1.16+ and no `worker`: its tasks are queued and never run, so scheduled backups and
+  jobs stop.
+- **`--fix`:** adds `worker` (stack schema 5), after the other migrations. Details:
   [schema 4 to 5](stack-migrations.md#schema-4-to-5-worker).
+
+#### `celery`
+
+- **Checks:** on a stack with both `worker` and `celery`, whether the project image
+  can run celery: one `docker run --rm --pull never --network none` of celery's image
+  (no Compose hooks, mounts or environment) looks up the `celery` module and the app
+  its command names (`-A`/`--app`), importing nothing of the project but that app's
+  package. No finding when it can, or when the probe cannot run.
+- **WARN** the image has no Celery, or no such app: celery restarts for good, while
+  `worker` runs DjangoLux's tasks.
+- **`--fix`:** removes celery: its service block leaves `compose.yml` and
+  `COMPOSER_AGENT_RESTART_SERVICES`, and a `compose.dev.yml` override of celery moves
+  to `worker` when `worker` has none. The result is
+  validated with `docker compose config`, the originals are archived under
+  `.xclude/composer-check/<UTC>/celery-removal/`, the container is stopped and
+  removed, and volumes are kept; restoring the archived files brings celery back.
+  It also runs in the same `--fix` that adds `worker`. Details:
+  [schema 4 to 5](stack-migrations.md#schema-4-to-5-worker).
+
+#### `services`
+
+- **Checks:** the stack's containers (`docker compose ps --all`, with each one's
+  restart count from `docker inspect`). No finding when Docker reports none.
+- **OK** nothing restarting or unhealthy. **WARN** a service is unhealthy. **FAIL** a
+  service is crash-looping: restarting now, or restarted 3+ times and started less
+  than 2 minutes ago. The message gives the restart count and the last error line of
+  its log.
+- **Fix:** read the service's log (`./start.sh logs <service>`) and fix the cause;
+  for celery in an image without Celery, `check --fix` ([`celery`](#celery)).
+- **`--fix`:** nothing for this finding; re-checked after the repairs.
 
 #### `versions`
 

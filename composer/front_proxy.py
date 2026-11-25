@@ -44,7 +44,7 @@ from .stack_cleanup import (
     _stage_candidate,
     _validate_proxy_candidates,
 )
-from .stack_schema import preview_diff, secrets_file, write_updates
+from .stack_schema import ensure_writable, preview_diff, secrets_file, write_updates
 from .worker_migration import WorkerMigrationError, _inline_value, _span, _split_block
 
 VARIABLE = "DLUX_FRONT_PROXY"
@@ -382,6 +382,7 @@ def migrate(
     }
     if not updates:
         return result
+    ensure_writable(project_root, updates)
     blocked = blocked_reason(project_root, environment)
     if blocked:
         raise FrontProxyError(blocked)

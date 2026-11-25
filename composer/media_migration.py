@@ -25,10 +25,11 @@ from typing import Any, Dict, Mapping, Sequence
 
 from .stack_schema import (
     STAMPED_FILES,
+    ensure_writable,
+    line_ending,
     preview_diff,
-    read_stamp,
-    restamp,
     restamp_secrets,
+    restamp_step,
     secrets_file,
     secrets_note,
     write_updates,
@@ -218,8 +219,9 @@ def _plan(project_root: Path, compose_files: Sequence[str]):
             if not path.is_file():
                 continue
             text = updates.get(path, path.read_text(encoding="utf-8"))
-            if read_stamp(text) == LEGACY_SCHEMA:
-                updates[path] = restamp(text, TARGET_SCHEMA)
+            restamped = restamp_step(text, LEGACY_SCHEMA, TARGET_SCHEMA)
+            if restamped is not None:
+                updates[path] = restamped
         restamp_secrets(project_root, updates, LEGACY_SCHEMA, TARGET_SCHEMA)
     return sources, updates
 
@@ -258,6 +260,7 @@ def migrate(
     }
     if not updates:
         return result
+    ensure_writable(project_root, updates)
     if not shutil.which("docker"):
         raise StackCleanupError("Docker is required to validate the migrated proxy configuration.")
 
@@ -271,7 +274,7 @@ def migrate(
     try:
         for path, text in proxy_updates.items():
             candidate = path.with_name(f".{path.name}.composer-media.tmp")
-            candidate.write_text(text, encoding="utf-8", newline="\n")
+            candidate.write_text(text, encoding="utf-8", newline=line_ending(path))
             staged[path] = candidate
         _validate_proxy_candidates(command_runner, project_root, sources, environment, mounts, staged)
     finally:

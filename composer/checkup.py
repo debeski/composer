@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import wrappers
+from . import check_lock, wrappers
 from .config import ConfigMixin
 from .confirmation import confirm
 from .proxy_cleanup import inspect_legacy_proxy_routes
@@ -16,9 +16,10 @@ from . import (
     maintenance_page,
     media_migration,
     relay_env,
+    stack_layout,
     worker_migration,
 )
-from .stack_schema import collect_stamps, read_stamp
+from .stack_schema import collect_all_stamps, has_env_stamp
 from .stack_cleanup import OBSOLETE_SERVICES
 
 # First DjangoLux whose inline updates Composer can drive end to end.
@@ -111,6 +112,18 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
     def _check_secrets(self) -> Dict[str, Any]:
         candidates = self.plaintext_env_candidates()
         if not candidates:
+            unsupplied = self.unsupplied_secrets_file_keys()
+            if unsupplied:
+                shown = ", ".join(unsupplied[:8]) + (f" and {len(unsupplied) - 8} more" if len(unsupplied) > 8 else "")
+                return _result(
+                    FAIL,
+                    "secrets",
+                    "No secrets file found (.env / secrets/.env / .secrets/.env), and nothing else supplies "
+                    f"{shown}, which the Compose file reads from it. A deploy would run on the Compose file's "
+                    "built-in defaults: a placeholder secret key and default database credentials.",
+                    fix="Restore the secrets file (usually .secrets/.env, from your backup), or supply those "
+                    "variables through the environment, then run the check again.",
+                )
             return _result(
                 WARN,
                 "secrets",
@@ -573,8 +586,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
     def _check_stack_schema(self) -> Dict[str, Any]:
         """Do the generated stack files agree on the stack contract schema?
 
-        compose.yml's stamp is the one DjangoLux reads at runtime, so it leads.
-        Whether that schema is the one the running DjangoLux expects is the app's
+        Every stamp in every file is read. compose.yml's ``DLUX_STACK_SCHEMA`` is
+        the value DjangoLux reads at runtime, so compose.yml stamps that disagree
+        with each other (a half restamp) FAIL; other disagreements WARN. Whether
+        the schema is the one the running DjangoLux expects is the app's
         `stack.schema` doctor check, relayed by `--deep`.
         """
         compose = next(
@@ -582,18 +597,40 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "compose.yml",
         )
         secrets = [str(c) for c in self.plaintext_env_candidates()[:1]]
-        stamps = collect_stamps(".", compose, secrets)
-        stamped = {path: schema for path, schema in stamps.items() if schema is not None}
+        stamps = collect_all_stamps(".", compose, secrets)
+        stamped = {path: found for path, found in stamps.items() if found}
         if not stamped:
             return _result(
                 OK,
                 "stack-schema",
                 "Stack files carry no schema stamp; they predate DjangoLux stack schema stamping.",
             )
-        schemas = sorted(set(stamped.values()))
+        split = {path: found for path, found in stamped.items() if len(set(found)) > 1}
+        if split:
+            schema, why = stack_layout.layout_schema(Path("."), self._maintenance_compose_files())
+            listed = "; ".join(
+                f"{path} says " + " and ".join(str(value) for value in dict.fromkeys(found))
+                for path, found in sorted(split.items())
+            )
+            if schema is None:
+                fix = f"Restamp them by hand to the schema the stack follows ({why})."
+            else:
+                fix = f"Run 'composer check --fix' to restamp them {schema}, the schema the stack's files follow."
+            if compose in split:
+                return _result(
+                    FAIL,
+                    "stack-schema",
+                    f"A file's own schema stamps disagree ({listed}), left by a restamp that changed only "
+                    f"some of them. DjangoLux reads DLUX_STACK_SCHEMA from {compose}, so it runs the stack "
+                    "as the schema that value names.",
+                    fix=fix,
+                )
+            return _result(WARN, "stack-schema", f"A file's own schema stamps disagree ({listed}).", fix=fix)
+        lowest = {path: min(found) for path, found in stamped.items()}
+        schemas = sorted(set(lowest.values()))
         if len(schemas) > 1:
             by_schema = "; ".join(
-                f"{schema}: " + ", ".join(sorted(p for p, s in stamped.items() if s == schema))
+                f"{schema}: " + ", ".join(sorted(p for p, s in lowest.items() if s == schema))
                 for schema in schemas
             )
             return _result(
@@ -603,11 +640,23 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 fix="Bring the older files up to date using DjangoLux's docs/stack-schema.md, then restamp them.",
             )
         schema = schemas[0]
-        if stamps.get(compose) is None:
+        if not stamps.get(compose):
             return _result(
                 WARN,
                 "stack-schema",
                 f"Stack files declare schema {schema}, but {compose} carries no DLUX_STACK_SCHEMA.",
+                fix=f'Add DLUX_STACK_SCHEMA: "{schema}" to the x-environment block of {compose}.',
+            )
+        try:
+            env_stamped = has_env_stamp(Path(compose).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            env_stamped = True
+        if not env_stamped:
+            return _result(
+                WARN,
+                "stack-schema",
+                f"{compose} declares stack schema {schema} in a comment only; DjangoLux reads the "
+                "DLUX_STACK_SCHEMA value, which it does not have.",
                 fix=f'Add DLUX_STACK_SCHEMA: "{schema}" to the x-environment block of {compose}.',
             )
         unstamped = len(stamps) - len(stamped)
@@ -660,6 +709,32 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return self._dlux_runtime_version("web")
         return self._dlux_runtime_version()
 
+    def _stored_files_way_out(self) -> str:
+        """How this stack gets the DjangoLux the stored-files fix needs (1.15.3+).
+
+        Named from the release data (``dlux_upgrade_path``): ``dlux update`` alone
+        may refuse the newest release on an old stack schema, which is how the
+        advice used to go in a circle (break-it finding #1). Worked out once per run.
+        """
+        cached = getattr(self, "_stored_files_way_out_cache", None)
+        if cached is not None:
+            return cached
+        from . import dlux_upgrade_path
+        from .stack_schema import deployment_schema
+
+        running = self._running_dlux_version()
+        if running is not None and tuple(running) >= media_migration.MEDIA_ACCESS_FLOOR:
+            advice = "Run 'composer check --fix' to make stored files private (stack schema 4)."
+        else:
+            stone, error = (None, "") if running is None else dlux_upgrade_path.find_stone(tuple(running))
+            if running is None:
+                error = "the running DjangoLux version is unknown"
+            advice = dlux_upgrade_path.media_way_out(
+                running=running, stamp=deployment_schema("."), stone=stone, index_error=error,
+            )
+        self._stored_files_way_out_cache = advice
+        return advice
+
     def _check_media_privacy(self) -> Dict[str, Any]:
         """Stored files must not be served past the app (DjangoLux 1.15.3 security
         fix, stack schema 4); ``check --fix`` switches a generated proxy over."""
@@ -672,8 +747,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "SECURITY: the proxy serves every /media/ file without authorization ("
                 + ", ".join(exposed)
                 + "), so anyone who can reach this site can download stored files by URL without signing in.",
-                fix="Update DjangoLux to 1.15.3 or later ('./start.sh dlux update', or an image built on it), "
-                "then run 'composer check --fix' to make stored files private (stack schema 4).",
+                fix=self._stored_files_way_out(),
             )
         if state["custom"]:
             return _result(
@@ -1362,11 +1436,35 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         deployment executor answering DjangoLux's Operations card — gets the same
         results without the printing, and without a second list of checks that
         could drift from this one.
+
+        ``--fix`` runs one at a time per project (``check_lock``): a second one
+        is refused before it reads anything, and a run that was killed is
+        reported by the next.
         """
+        if not getattr(args, "fix", False):
+            return self._collect_checkup(args)
+        try:
+            with check_lock.hold(".") as interrupted:
+                results, fixed = self._collect_checkup(args)
+        except check_lock.CheckFixLockError as exc:
+            return [_result(FAIL, "check-fix", str(exc))], []
+        if interrupted:
+            fixed.insert(0, _result(
+                WARN,
+                "check-fix",
+                f"The previous 'check --fix' ({check_lock.describe(interrupted)}) was stopped before it "
+                "finished, so one of its fixes may have stopped halfway. This run checked everything again; "
+                "the originals of what each fix changed are under .xclude/composer-check/.",
+            ))
+        return results, fixed
+
+    def _collect_checkup(self, args) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         self.compose_file = args.file
         self.dev_mode = args.dev
         self.resolve_active_compose_files()
         self._worker_gate_cache = None
+        self._celery_probe_cache = None
+        self._stored_files_way_out_cache = None
 
         # Before the diagnosis, so the checks below report the state the
         # operator asked for rather than the one they are leaving.
@@ -1412,11 +1510,20 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             worker = self._check_task_worker()
             if worker is not None:
                 results.append(worker)
+            celery = self._check_celery()
+            if celery is not None:
+                results.append(celery)
+            states = self._check_service_states()
+            if states is not None:
+                results.append(states)
             results.append(self._check_versions())
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
 
         fixed = switched + (self._maybe_fix(args, results) if args.fix else [])
+        if args.fix and any(entry["level"] == OK and entry["name"].startswith("fix:") for entry in fixed):
+            # The fixes may have added or removed services.
+            self.discover_services(silent=True)
         if args.fix:
             # A repaired finding must not fail the run: report the file as it now stands.
             rechecks = {
@@ -1426,6 +1533,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 # FAIL behind, or `check --fix` exits 1 after fixing it.
                 "stored-files": self._check_media_privacy,
                 "app-permissions": lambda: self._check_app_permissions(deep=True),
+                "stack-schema": self._check_stack_schema,
+                "task-worker": self._check_task_worker,
+                "services": self._check_service_states,
             }
             for index, result in enumerate(results):
                 if result["name"] in rechecks and (result["level"] == FAIL or result["name"] == "app-permissions"):
@@ -1609,6 +1719,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         except Exception:
             needs_restart_labels = False
         needs_worker, worker_blocked = self._worker_fix_plan(needs_init_containers, init_containers_blocked)
+        # celery in a project image without Celery crash-loops for good once
+        # worker runs DjangoLux's tasks: removed after the worker step below.
+        services_now = set(self.services)
+        retire_celery = bool(
+            "celery" in services_now
+            and ("worker" in services_now or needs_worker == "add")
+            and self._celery_unusable()
+        )
         if updater_migration_blocked:
             fixes.append(_result(WARN, "dlux-updater-runtime", updater_migration_blocked))
         if init_containers_blocked:
@@ -1659,12 +1777,21 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         grant_access = getattr(self, "_app_permissions_state", None) or {}
         if not (grant_access.get("wrong") or grant_access.get("missing")):
             grant_access = {}
+        from .stack_cleanup import StackCleanupError
+
+        try:
+            stamp_repair = stack_layout.preview(".", self._maintenance_compose_files())
+        except (OSError, ValueError, StackCleanupError) as exc:
+            stamp_repair = {"files": [], "notes": [f"Cannot plan the stack schema stamp repair: {exc}"], "schema": None}
+        if stamp_repair["notes"] and not stamp_repair["files"]:
+            fixes.append(_result(WARN, "stack-schema", " ".join(stamp_repair["notes"])))
         if (not legacy and not obsolete and not proxy_routes and not needs_hardening
                 and not needs_agent_block_migration and not needs_updater_migration
                 and not needs_post_start_migration and not stale_wrappers
                 and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration and not media_exposed
-                and not needs_worker and not front_proxy_files and not relay_env_files and not grant_access):
+                and not needs_worker and not front_proxy_files and not relay_env_files and not grant_access
+                and not stamp_repair["files"] and not retire_celery):
             return fixes
         consequences = []
         if maintenance_legacy:
@@ -1774,6 +1901,20 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             consequences.append(
                 "Finish stack schema 5: mirror the compose.dev.yml celery override for worker "
                 "in development, and bring the stack's schema stamps to 5."
+            )
+        if retire_celery:
+            consequences.append(
+                f"Remove celery: {self._celery_unusable()} worker runs DjangoLux's tasks. Its service block "
+                "(and a compose.dev.yml override) leaves the Compose files and COMPOSER_AGENT_RESTART_SERVICES, "
+                "its container is stopped and removed, and volumes are kept. The configuration is validated "
+                "first and the originals archived under .xclude/composer-check/; restoring them brings celery back."
+            )
+        if stamp_repair["files"]:
+            consequences.append(
+                f"Restamp {', '.join(stamp_repair['files'])} to stack schema {stamp_repair['schema']}, the schema "
+                "the stack's files follow: their own stamps disagree (a restamp changed only some of them), and "
+                "DjangoLux reads DLUX_STACK_SCHEMA. Only the stamps change; the secrets file is rewritten in place "
+                "and not copied."
             )
         if needs_install:
             consequences.append(
@@ -1915,8 +2056,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         FAIL,
                         "fix:stored-files",
                         f"DjangoLux {'.'.join(map(str, running)) if running else 'version unknown'} has no "
-                        "media access check, so switching the proxy now would refuse every private file. Update "
-                        "DjangoLux to 1.15.3 or later, then run 'composer check --fix' again.",
+                        "media access check, so switching the proxy now would refuse every private file. "
+                        + self._stored_files_way_out(),
                     )
                 )
             else:
@@ -2194,6 +2335,40 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 fixes.append(_result(OK, "fix:task-worker", f"{detail} Backup: {outcome['backup_root'] or 'n/a'}"))
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:task-worker", str(exc)))
+        if retire_celery and not any(
+            entry["name"] == "fix:task-worker" and entry["level"] == FAIL for entry in fixes
+        ):
+            from .stack_cleanup import StackCleanupError
+
+            try:
+                outcome = worker_migration.retire_celery(
+                    ".", self._maintenance_compose_files(), environment=self.build_compose_env()
+                )
+                if outcome["applied"]:
+                    fixes.append(_result(
+                        OK, "fix:celery",
+                        f"Removed celery ({', '.join(outcome['files'])}); its container is gone and worker runs "
+                        f"DjangoLux's tasks. Backup: {outcome['backup_root']}",
+                    ))
+            except (OSError, StackCleanupError) as exc:
+                fixes.append(_result(FAIL, "fix:celery", str(exc)))
+        # After every step that restamps: it re-reads the files they left.
+        if stamp_repair["files"]:
+            from .stack_cleanup import StackCleanupError
+
+            try:
+                outcome = stack_layout.repair(
+                    ".", self._maintenance_compose_files(), environment=self.build_compose_env()
+                )
+                if outcome["applied"]:
+                    detail = f"Restamped {', '.join(outcome['files'])} to stack schema {outcome['schema']}."
+                    if outcome["notes"]:
+                        detail += " " + " ".join(outcome["notes"])
+                    fixes.append(_result(OK, "fix:stack-schema", f"{detail} Backup: {outcome['backup_root']}"))
+                elif outcome["notes"]:
+                    fixes.append(_result(WARN, "fix:stack-schema", " ".join(outcome["notes"])))
+            except (OSError, StackCleanupError) as exc:
+                fixes.append(_result(FAIL, "fix:stack-schema", str(exc)))
         return fixes
 
     def _worker_gate(self) -> Tuple[bool, str]:
@@ -2262,10 +2437,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         running = self._worker_running
         if ready and running is not None and tuple(running) >= worker_migration.WORKER_FLOOR:
             return _result(
-                WARN,
+                FAIL,
                 "task-worker",
                 f"DjangoLux {'.'.join(map(str, running))} runs its tasks in a 'worker' service, which this "
-                "stack does not have, so they are queued and never run.",
+                "stack does not have, so they are queued and never run: scheduled backups and jobs stop.",
                 fix="Run 'composer check --fix' to add it (stack schema 5), then deploy.",
             )
         if ready:
@@ -2276,6 +2451,199 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "'composer check --fix' adds it (stack schema 5). Rebuild with './start.sh -d -b' afterwards.",
             )
         return _result(OK, "task-worker", f"celery runs DjangoLux's tasks (stack schema 4 layout). {why}")
+
+    # A container restarted this often, and started this recently, is crash-looping
+    # even when `ps` catches it between two restarts.
+    CRASH_LOOP_RESTARTS = 3
+    CRASH_LOOP_WINDOW_SECONDS = 120
+
+    def _container_states(self) -> List[Dict[str, Any]]:
+        """``[{service, name, state, health, restarts, started_at}]`` for the stack's containers.
+
+        Empty when Docker cannot say: the check then reports nothing rather than guessing.
+        """
+        ok, out, _err = self.run_docker_compose(["ps", "--all", "--format", "json"], timeout=20)
+        if not ok or not out.strip():
+            return []
+        try:
+            parsed = json.loads(out)
+            rows = parsed if isinstance(parsed, list) else [parsed]
+        except ValueError:
+            rows = []
+            for line in out.splitlines():
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+        containers = [
+            {
+                "service": str(row.get("Service") or ""),
+                "name": str(row.get("Name") or row.get("ID") or ""),
+                "id": str(row.get("ID") or ""),
+                "state": str(row.get("State") or "").lower(),
+                "health": str(row.get("Health") or "").lower(),
+                "restarts": 0,
+                "started_at": "",
+            }
+            for row in rows if isinstance(row, dict) and row.get("Service")
+        ]
+        ids = [entry["id"] or entry["name"] for entry in containers]
+        if ids:
+            ok, out, _err = self.run_command(
+                ["docker", "inspect", "--format",
+                 "{{.Id}}|{{.Name}}|{{.RestartCount}}|{{.State.Restarting}}|{{.State.StartedAt}}", *ids],
+                timeout=20,
+            )
+            details = {}
+            for line in (out.splitlines() if ok else []):
+                parts = line.split("|")
+                if len(parts) == 5:
+                    details[parts[0]] = parts
+                    details[parts[1].lstrip("/")] = parts
+            for entry in containers:
+                found = next(
+                    (details[key] for key in details if entry["id"] and key.startswith(entry["id"])),
+                    details.get(entry["name"]),
+                )
+                if not found:
+                    continue
+                try:
+                    entry["restarts"] = int(found[2])
+                except ValueError:
+                    pass
+                if found[3] == "true":
+                    entry["state"] = "restarting"
+                entry["started_at"] = found[4]
+        return containers
+
+    @classmethod
+    def _crash_looping(cls, entry: Dict[str, Any], now=None) -> bool:
+        if entry["state"] == "restarting":
+            return True
+        if entry["restarts"] < cls.CRASH_LOOP_RESTARTS or entry["state"] != "running":
+            return False
+        from datetime import datetime, timezone
+
+        try:
+            started = datetime.fromisoformat(entry["started_at"].replace("Z", "+00:00")[:32])
+        except ValueError:
+            return False
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        now = now or datetime.now(timezone.utc)
+        return (now - started).total_seconds() < cls.CRASH_LOOP_WINDOW_SECONDS
+
+    def _last_error_line(self, service: str) -> str:
+        ok, out, err = self.run_docker_compose(["logs", "--no-color", "--tail", "30", service], timeout=20)
+        lines = [line.split("|", 1)[-1].strip() for line in (out or err or "").splitlines() if line.strip()]
+        for line in reversed(lines):
+            if "error" in line.lower() or "exception" in line.lower():
+                return line[:200]
+        return lines[-1][:200] if lines else ""
+
+    def _check_service_states(self) -> Optional[Dict[str, Any]]:
+        """Are any of the stack's containers crash-looping, restarting or unhealthy?"""
+        containers = self._container_states()
+        if not containers:
+            return None
+        looping = sorted({entry["service"] for entry in containers if self._crash_looping(entry)})
+        unhealthy = sorted({
+            entry["service"] for entry in containers
+            if entry["health"] == "unhealthy" and entry["service"] not in looping
+        })
+        if not looping and not unhealthy:
+            running = sum(1 for entry in containers if entry["state"] == "running")
+            return _result(OK, "services", f"No service is crash-looping or unhealthy ({running} running).")
+        parts = []
+        for service in looping:
+            restarts = max(entry["restarts"] for entry in containers if entry["service"] == service)
+            error = self._last_error_line(service)
+            parts.append(
+                f"{service} keeps restarting ({restarts} restart(s))"
+                + (f"; last error: {error}" if error else "")
+            )
+        parts += [f"{service} is unhealthy" for service in unhealthy]
+        celery = self._celery_unusable() if "celery" in looping else ""
+        if celery:
+            fix = f"{celery} Run 'composer check --fix' to remove celery (worker runs DjangoLux's tasks)."
+        else:
+            fix = "Read the service's log ('./start.sh logs <service>'), fix the cause, then redeploy."
+        return _result(FAIL if looping else WARN, "services", "; ".join(parts) + ".", fix=fix)
+
+    # Does the image celery runs have Celery and the app celery's command names?
+    # Only module lookups: nothing of the project is imported but the package the
+    # app lives in.
+    CELERY_PROBE = """import importlib.util,json,sys
+app=sys.argv[1] if len(sys.argv)>1 else ''
+out={'celery':importlib.util.find_spec('celery') is not None,'app':None}
+if out['celery'] and app:
+ try: out['app']=importlib.util.find_spec(app.split(':')[0]) is not None
+ except Exception: out['app']=False
+print(json.dumps(out))
+"""
+
+    @staticmethod
+    def _celery_app(command) -> str:
+        tokens = command if isinstance(command, list) else str(command or "").split()
+        tokens = [str(token) for token in tokens]
+        for index, token in enumerate(tokens):
+            if token in ("-A", "--app") and index + 1 < len(tokens):
+                return tokens[index + 1]
+            if token.startswith("--app="):
+                return token.split("=", 1)[1]
+            if token.startswith("-A") and len(token) > 2:
+                return token[2:]
+        return ""
+
+    def _celery_unusable(self) -> str:
+        """Why celery cannot run in its image (no Celery, or no such app), or ``""``.
+
+        Asked once per run, and only of a schema 5 stack (worker and celery), or
+        one ``check --fix`` is bringing to schema 5. Runs celery's image alone, so
+        an image Docker has not pulled is simply not probed.
+        """
+        cached = getattr(self, "_celery_probe_cache", None)
+        if cached is not None:
+            return cached
+        reason = ""
+        config = self.compose_config_json() or {}
+        services = config.get("services") if isinstance(config, dict) else None
+        celery = services.get("celery") if isinstance(services, dict) else None
+        image = celery.get("image") if isinstance(celery, dict) else None
+        if isinstance(image, str) and image:
+            app = self._celery_app(celery.get("command"))
+            # The bare image, not `compose run`: no init containers, mounts,
+            # environment or network, so the probe cannot change anything.
+            ok, out, _err = self.run_command(
+                ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "python", image,
+                 "-c", self.CELERY_PROBE, *([app] if app else [])],
+                timeout=90,
+            )
+            try:
+                probe = json.loads(out.strip().splitlines()[-1]) if ok and out.strip() else {}
+            except ValueError:
+                probe = {}
+            if probe.get("celery") is False:
+                reason = "The project image has no Celery, so celery cannot start."
+            elif probe.get("app") is False:
+                reason = f"The project image has no Celery app '{app}', so celery cannot start."
+        self._celery_probe_cache = reason
+        return reason
+
+    def _check_celery(self) -> Optional[Dict[str, Any]]:
+        """On a schema 5 stack, can celery still run the project's own tasks?"""
+        if not {"worker", "celery"} <= set(self.services):
+            return None
+        reason = self._celery_unusable()
+        if not reason:
+            return None
+        return _result(
+            WARN,
+            "celery",
+            f"{reason} DjangoLux runs its tasks in worker; celery only ran the project's own, and this "
+            "image has none, so the container restarts for good.",
+            fix="Run 'composer check --fix' to remove celery from the Compose files (archived first).",
+        )
 
     @staticmethod
     def _print_checkup(results: List[Dict[str, Any]], fixes: List[Dict[str, Any]]):

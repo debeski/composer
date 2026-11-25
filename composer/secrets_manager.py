@@ -9,6 +9,22 @@ from .subprocess_runner import SubprocessRunnerMixin
 # Searched in order; first existing/complete match wins.
 PLAINTEXT_ENV_CANDIDATES = (".env", "secrets/.env", ".secrets/.env")
 
+# The values DjangoLux's generated secrets file supplies (mirrors the keys of
+# dlux/scaffold/templates/project/.secrets/.env.tmpl). compose.yml reads each with
+# a ``${VAR:-default}`` fallback, so without the file a deploy comes up on those
+# defaults: a published placeholder secret key and default database credentials.
+SECRETS_FILE_KEYS = frozenset({
+    "DJANGO_SECRET_KEY", "WEB_IMAGE", "POSTGRES_USER", "POSTGRES_PASSWORD", "ADMIN_PASS",
+    "BASE_URL", "ALLOWED_URLS", "ALLOWED_HOSTS", "TIME_ZONE",
+    "NGINX_PORT", "NGINX_SERVER_NAME", "NGINX_MAX_SIZE",
+    "CADDY_PORT", "CADDY_SITE_ADDRESS", "CADDY_MAX_SIZE",
+    "DEFAULT_FROM_EMAIL", "SMTP_RELAY_HOST", "SMTP_RELAY_PORT", "SMTP_RELAY_USE_TLS",
+    "SMTP_RELAY_USE_SSL", "SMTP_RELAY_USER", "SMTP_RELAY_PASSWORD", "SMTP_RELAY_TLS_VERIFY",
+    "SMTP_RELAY_CA_FILE",
+})
+# Listed first in a report: the ones whose default is a credential.
+CREDENTIAL_KEYS = ("DJANGO_SECRET_KEY", "POSTGRES_PASSWORD", "ADMIN_PASS", "POSTGRES_USER", "SMTP_RELAY_PASSWORD")
+
 
 class SecretsMixin(SubprocessRunnerMixin):
     loaded_secrets: List[str]
@@ -54,6 +70,27 @@ class SecretsMixin(SubprocessRunnerMixin):
                 pass
             candidates.append(path)
         return candidates
+
+    def unsupplied_secrets_file_keys(self) -> List[str]:
+        """Secrets-file keys the active compose files read that nothing supplies.
+
+        Only meaningful when no secrets file exists: each key the compose files
+        interpolate, minus those the environment (or the launcher's inherited
+        secrets) provides. Credentials first, then alphabetically.
+        """
+        from .config import _COMMENT_RE, _ESCAPED_DOLLAR_RE, _VAR_REF_RE
+
+        referenced = set()
+        for file in getattr(self, "active_compose_files", None) or []:
+            try:
+                text = Path(file).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            scannable = _ESCAPED_DOLLAR_RE.sub("", _COMMENT_RE.sub(r"\1", text))
+            referenced.update(braced or bare for braced, _op, bare in _VAR_REF_RE.findall(scannable))
+        supplied = set(os.environ) | set(self.inherited_secret_keys() or [])
+        missing = (referenced & SECRETS_FILE_KEYS) - supplied
+        return [key for key in CREDENTIAL_KEYS if key in missing] + sorted(missing - set(CREDENTIAL_KEYS))
 
     def inherited_secret_keys(self) -> Optional[List[str]]:
         raw = os.environ.get(INHERITED_SECRET_KEYS_ENV)

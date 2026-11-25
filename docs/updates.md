@@ -184,9 +184,14 @@ A DjangoLux wheel carries a release manifest, and Composer accepts schemas 1 and
 - `requires.services.composer` is a floor on Composer itself: update both the deployer
   (`update self`) and the resident pair (`agent update`) before applying a release
   that raises it;
-- `requires.stack_schema` is the stack schema stamp in the project's `compose.yml`;
-  below it the release is reported but not installed inline, and the reason says to
-  run `check --fix` ([stack migrations](stack-migrations.md)).
+- `requires.stack_schema` is the stack schema stamp in the project's `compose.yml`
+  (its lowest, when its stamps disagree); below it the release is reported but not
+  installed inline. `dlux update`, `dlux update --dry-run`, `dlux check` and the
+  Updates card's reason then name the way forward, worked out from the release data:
+  `check --fix` first when it can reach the schema on the running DjangoLux,
+  otherwise the newest release this stack still takes inline (`dlux update --version
+  X`), and a project image for what no inline release reaches
+  ([the way out of an old stack](stack-migrations.md#the-way-out-of-an-old-stack)).
 
 ## Image availability
 

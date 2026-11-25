@@ -170,7 +170,11 @@ def _stage_candidate(source: Path, contents: str) -> Path:
     )
     path = Path(temporary)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+        # In the source's own line endings: remove_obsolete_services moves the
+        # candidate over the source.
+        from .stack_schema import line_ending
+
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline=line_ending(source)) as stream:
             stream.write(contents)
             stream.flush()
             os.fsync(stream.fileno())
