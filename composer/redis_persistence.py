@@ -23,11 +23,8 @@ import re
 import shlex
 import shutil
 import subprocess
-import textwrap
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-
-import yaml
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .stack_cleanup import (
     StackCleanupError,
@@ -162,6 +159,99 @@ def _render(style: str, key_line: str, body: List[str], tokens: Sequence[str]) -
     return f"{prefix}\n" + "".join(f"{indent}- {_quote(token)}\n" for token in tokens)
 
 
+def _scalar(text: str) -> Tuple[str, str]:
+    """``(value, rest)`` for one YAML scalar at the start of ``text``: quoted or plain."""
+    text = text.lstrip()
+    if text.startswith('"'):
+        index, escaped = 1, False
+        while index < len(text):
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                return json.loads(text[: index + 1]), text[index + 1:]
+            index += 1
+        raise ValueError("an unterminated double-quoted string")
+    if text.startswith("'"):
+        index, out = 1, []
+        while index < len(text):
+            if text[index] == "'":
+                if text[index + 1: index + 2] == "'":
+                    out.append("'")
+                    index += 2
+                    continue
+                return "".join(out), text[index + 1:]
+            out.append(text[index])
+            index += 1
+        raise ValueError("an unterminated single-quoted string")
+    return text, ""
+
+
+def _strip_comment(text: str) -> str:
+    match = re.search(r"(^|\s)#", text)
+    return text[: match.start()].rstrip() if match else text.rstrip()
+
+
+def parse_command(body: Sequence[str]) -> Union[str, List[str]]:
+    """The ``command:`` value of a Compose service, without a YAML library.
+
+    ``body`` starts with the ``command:`` line. Compose files write it as a flow
+    list (``["redis-server", "--appendonly", "yes"]``, on one or more lines), a
+    block list (``- redis-server`` items) or a plain or quoted string; anything
+    else (block scalars, anchors, nested values) raises ``ValueError``. Every
+    item comes back as a string, as YAML's base loader reads it.
+    """
+    after_key = body[0].split("command:", 1)[1].strip()
+    if after_key.startswith(("|", ">", "&", "*", "!")):
+        raise ValueError(f"an unsupported YAML form after 'command:' ({after_key[:1]})")
+    if after_key.startswith("["):
+        text = " ".join([after_key[1:]] + [line.strip() for line in body[1:]])
+        items: List[str] = []
+        while True:
+            text = text.lstrip()
+            if text.startswith("]"):
+                return items
+            if text.startswith(("'", '"')):
+                value, text = _scalar(text)
+            else:
+                match = re.match(r"([^,\]]*)", text)
+                value, text = match.group(1).strip(), text[match.end():]
+                if not value:
+                    raise ValueError("an empty item in the flow list")
+            items.append(value)
+            text = text.lstrip()
+            if text.startswith(","):
+                text = text[1:]
+            elif not text.startswith("]"):
+                raise ValueError("a flow list without its closing ']'")
+    if after_key and not after_key.startswith("#"):
+        stripped = after_key if after_key.startswith(("'", '"')) else _strip_comment(after_key)
+        value, rest = _scalar(stripped)
+        if rest.strip() and not rest.strip().startswith("#"):
+            raise ValueError("text after the quoted command")
+        return value
+    items = []
+    for line in body[1:]:
+        content = line.strip()
+        if not content or content.startswith("#"):
+            continue
+        if not content.startswith("- ") and content != "-":
+            raise ValueError(f"an unexpected line in the command list: {content[:40]!r}")
+        item = content[1:].strip()
+        if item.startswith(("'", '"')):
+            value, rest = _scalar(item)
+            if rest.strip() and not rest.strip().startswith("#"):
+                raise ValueError("text after a quoted list item")
+        else:
+            value = _strip_comment(item)
+        items.append(value)
+    if not items:
+        raise ValueError("an empty command")
+    return items
+
+
 def rewrite_block(block: str) -> str:
     """One ``redis`` service block with its command on RDB snapshots, or the block unchanged."""
     try:
@@ -175,8 +265,8 @@ def rewrite_block(block: str) -> str:
     key_index = next(index for index, line in enumerate(lines) if _KEY.match(line))
     body = lines[key_index:]
     try:
-        value = yaml.load(textwrap.dedent("".join(body)), Loader=yaml.BaseLoader)["command"]
-    except (yaml.YAMLError, KeyError, TypeError) as exc:
+        value = parse_command(body)
+    except ValueError as exc:
         raise RedisPersistenceError(f"Composer cannot read the redis command ({exc}).") from exc
     tokens = command_tokens(value)
     if classify(tokens) != AOF:

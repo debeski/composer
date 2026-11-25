@@ -333,5 +333,42 @@ class PreviewTests(unittest.TestCase):
         self.assertIn("aof-archive", entries[0]["note"])
 
 
+
+class ParseCommandTests(unittest.TestCase):
+    """The redis command is read without a YAML library: the Composer image has none."""
+
+    def parse(self, text):
+        from composer.redis_persistence import parse_command
+
+        return parse_command(text.splitlines(keepends=True))
+
+    def test_every_form_matches_yaml(self):
+        for text in (
+            '    command: ["redis-server", "--appendonly", "yes", "--save", "60 1"]\n',
+            "    command: ['redis-server', '--appendonly', 'it''s']\n",
+            "    command: [redis-server, --appendonly, yes]  # comment\n",
+            '    command: ["redis-server",\n      "--appendonly", "yes"]\n',
+            "    command:\n      - redis-server\n      # note\n      - \"--maxmemory-policy\"\n      - allkeys-lru # trailing\n",
+            "    command: redis-server --appendonly yes  # comment\n",
+            '    command: "redis-server --appendonly yes"\n',
+        ):
+            with self.subTest(text=text):
+                expected = yaml.load(text.replace("    command:", "command:").replace("\n      ", "\n  "),
+                                     Loader=yaml.BaseLoader)["command"]
+                self.assertEqual(self.parse(text), expected)
+
+    def test_forms_it_cannot_read_are_refused(self):
+        for text in (
+            "    command: |\n      redis-server\n",
+            "    command: *redis_cmd\n",
+            '    command: ["redis-server", "--appendonly"\n',
+            '    command: "redis-server\n',
+            "    command:\n      key: value\n",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    self.parse(text)
+
+
 if __name__ == "__main__":
     unittest.main()
