@@ -25,6 +25,9 @@ from .output_utils import OutputUtilsMixin
 from .service_selection import scoped_service_list
 from .subprocess_runner import SubprocessRunnerMixin
 
+# Services that front the stack and serve the maintenance page while `web` is down.
+EDGE_PROXY_SERVICES = ("caddy", "nginx", "proxy")
+
 
 class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
     def resident_secret_keys(self) -> List[str]:
@@ -183,7 +186,10 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
             return False, [], self.build_failure_detail(out, err)
         return True, self.parse_compose_json_output(out), ""
 
-    def collect_service_diagnostics(self, include_logs: bool = True) -> str:
+    def collect_service_diagnostics(
+        self, include_logs: bool = True, log_services: Optional[List[str]] = None
+    ) -> str:
+        """Failing services' state, and the last log lines of those and ``log_services``."""
         ok, services, detail = self.get_compose_ps_entries(include_all=True)
         if not ok:
             return detail
@@ -210,13 +216,16 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
                 failed_services.append(name)
             elif state == "restarting":
                 issues.append(f"{name}: state=restarting")
+                failed_services.append(name)
 
         sections: List[str] = []
         if issues:
             sections.append("Service state:\n" + "\n".join(f"- {issue}" for issue in issues))
 
         if include_logs:
-            for service_name in failed_services[:3]:
+            wanted = list(log_services or [])
+            wanted += [name for name in failed_services if name not in wanted]
+            for service_name in wanted[:3]:
                 ok, out, err = self.run_docker_compose(
                     ["logs", "--no-color", "--tail", "25", service_name],
                     timeout=15,
@@ -391,6 +400,8 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
 
         seen = set()
         excluded = set(getattr(self, "exclude_services", []) or [])
+        self.service_container_ids = {}
+        self.restarting_services = []
         for svc in services:
             try:
                 name = svc["Service"]
@@ -401,6 +412,11 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
                 exit_code = str(svc.get("ExitCode", "")).strip()
 
                 seen.add(name)
+                container_id = str(svc.get("ID") or "").strip()
+                if container_id:
+                    self.service_container_ids.setdefault(name, []).append(container_id)
+                if state == "restarting" and name in self.services:
+                    self.restarting_services.append(name)
 
                 if state == "running":
                     if not health or health == "healthy":
@@ -423,6 +439,99 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
                 self.service_state[s] = SERVICE_NOT_SEEN
         self.last_runtime_diagnostic = ""
         return True
+
+    def container_restart_markers(self) -> Dict[str, Dict[str, Tuple[int, str]]]:
+        """``{service: {container_id: (RestartCount, StartedAt)}}`` for the last poll.
+
+        Best effort: an inspect that fails yields what it could read, so a
+        container removed between the two calls is simply absent.
+        """
+        ids = {
+            container_id: service
+            for service, containers in (getattr(self, "service_container_ids", {}) or {}).items()
+            if service in self.services
+            for container_id in containers
+        }
+        if not ids:
+            return {}
+        _, out, _ = self.run_command(
+            ["docker", "inspect", "--format", "{{.Id}} {{.RestartCount}} {{.State.StartedAt}}", *ids],
+            timeout=10,
+        )
+        markers: Dict[str, Dict[str, Tuple[int, str]]] = {}
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            full_id = parts[0]
+            service = next(
+                (svc for cid, svc in ids.items() if full_id.startswith(cid) or cid.startswith(full_id)),
+                None,
+            )
+            if service is None:
+                continue
+            try:
+                count = int(parts[1])
+            except ValueError:
+                continue
+            started_at = parts[2] if len(parts) > 2 else ""
+            markers.setdefault(service, {})[full_id] = (count, started_at)
+        return markers
+
+    def edge_proxy_services(self) -> List[str]:
+        """The stack's edge proxy services within this run's scope."""
+        proxies = [s for s in self.services if s in EDGE_PROXY_SERVICES]
+        scoped = scoped_service_list(getattr(self, "up_service", None))
+        if scoped:
+            proxies = [s for s in proxies if s in scoped]
+        return proxies
+
+    def ensure_edge_proxy(self) -> Tuple[List[str], str]:
+        """Start the edge proxy on its own when a deploy left it stopped.
+
+        The proxy depends on `web`, so Compose can leave it "Created" when the
+        app does not come up, and the site then has no front door at all. Started
+        with ``--no-deps`` it serves the maintenance page on 502/503/504 while the
+        app is down. Returns ``(started, error)``.
+        """
+        proxies = self.edge_proxy_services()
+        if not proxies:
+            return [], ""
+        ok, entries, detail = self.get_compose_ps_entries(include_all=True)
+        if not ok:
+            return [], detail
+        running = {
+            entry.get("Service")
+            for entry in entries
+            if str(entry.get("State", "")).lower() == "running"
+        }
+        stopped = [proxy for proxy in proxies if proxy not in running]
+        if not stopped:
+            return [], ""
+        ok, out, err = self.run_docker_compose(["up", "-d", "--no-deps", *stopped], timeout=120)
+        if not ok:
+            return [], self.build_failure_detail(out, err)
+        return stopped, ""
+
+    def keep_site_reachable(self, detail: str) -> str:
+        """``detail`` plus what happened to the edge proxy after a failed deploy."""
+        proxies = self.edge_proxy_services()
+        if not proxies:
+            return detail
+        started, error = self.ensure_edge_proxy()
+        names = ", ".join(proxies)
+        if error:
+            note = (
+                f"The edge proxy ({names}) is not running and could not be started, so "
+                f"the site is unreachable:\n{error}"
+            )
+        else:
+            how = "was started on its own and " if started else ""
+            note = (
+                f"The edge proxy ({names}) {how}is running: visitors get the maintenance "
+                "page whenever web cannot answer."
+            )
+        return f"{detail}\n\n{note}".strip()
 
     def launch_containers(self) -> Tuple[bool, str, str]:
         if not os.path.exists("Dockerfile") and os.path.exists("dockerfile"):

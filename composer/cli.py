@@ -118,7 +118,7 @@ def parse_args():
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Bypass the preflight version gate (allow updating onto an older image version)",
+        help="Deploy an older image anyway: bypass the version gate and the downgrade guard",
     )
     parser.add_argument(
         "--status-file",
@@ -185,7 +185,7 @@ def parse_update_args(argv):
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Bypass the preflight version gate (allow updating onto an older image version)",
+        help="Deploy an older image anyway: bypass the version gate and the downgrade guard",
     )
     parser.add_argument(
         "--skip-config", action="store_true",
