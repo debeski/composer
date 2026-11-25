@@ -110,10 +110,12 @@ and `--since`/`--until` bound the window. `composer logs` is an alias.
 
 ### `check`
 
-`composer check [--fix] [-y] [--deep] [--deep-service S] [--deep-command CMD] [--json] [--beta|--stable] [--allow-unverified-composer] [-f FILE] [-d]`
+`composer check [--fix] [-y] [--no-recreate] [--deep] [--deep-service S] [--deep-command CMD] [--json] [--beta|--stable] [--allow-unverified-composer] [-f FILE] [-d]`
 
-Diagnoses the outside of a stack, and with `--fix` repairs it. Reference, with every
-finding: [`composer check`](check.md).
+Diagnoses the outside of a stack, and with `--fix` repairs it, then stops and removes
+the services the repairs drop and recreates the running services they change
+(`--no-recreate` leaves that to `./start.sh`). Reference, with every finding:
+[`composer check`](check.md).
 
 ### `app-permissions revert`
 

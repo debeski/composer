@@ -181,7 +181,7 @@ class EnableExecutorTests(unittest.TestCase):
             result = enable_executor(str(root), include_diff=True)
             self.assertFalse(result["applied"])
             self.assertEqual(result["files"], ["compose.yml"])
-            self.assertIn("composer-executor", result["command"])
+            self.assertEqual(result["command"], "./start.sh")
             self.assertIn("composer-executor", result["diff"])
 
     def test_apply_validates_backs_up_and_writes(self):

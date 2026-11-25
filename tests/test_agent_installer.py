@@ -133,7 +133,7 @@ class AgentInstallerTests(unittest.TestCase):
                 'COMPOSER_EXCLUDE_SERVICES: "composer-agent,composer-executor,db,redis"',
                 updated,
             )
-            self.assertIn("composer-executor", result["command"])
+            self.assertEqual(result["command"], "./start.sh")
             self.assertEqual((root / "compose.yml").stat().st_mode & 0o777, 0o600)
             backup = Path(result["backup_root"]) / "compose.yml"
             self.assertEqual(backup.read_text(encoding="utf-8"), COMPOSE)

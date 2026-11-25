@@ -110,7 +110,7 @@ def _run_check_local(runtime) -> dict:
         json=True, beta=False, stable=False,
     )
     results, _fixed = launcher.collect_checkup(args)
-    repairs, digest = _dry_run_repairs(launcher, args)
+    repairs, digest = _dry_run_repairs(launcher, args, results)
     return {
         "exit_code": 1 if any(r.get("level") == "fail" for r in results) else 0,
         "composer_version": launcher.composer_version,
@@ -172,8 +172,13 @@ def _preview_fixes(runtime) -> dict:
     return _run_check(runtime)
 
 
-def _dry_run_repairs(launcher, args):
-    """(repairs, compose digest) — what `check --fix` would change. Writes nothing."""
+def _dry_run_repairs(launcher, args, results=None):
+    """(repairs, compose digest) — what `check --fix` would change. Writes nothing.
+
+    The last entries say what an apply then does to the running stack: the
+    services it stops and removes, and the ones it recreates (``results`` are
+    the findings the preview was computed with).
+    """
     from . import agent_installer
 
     compose_file = args.file or ""
@@ -210,7 +215,20 @@ def _dry_run_repairs(launcher, args):
     repairs.extend(_celery_repair(launcher))
     repairs.extend(_stamp_repair(launcher))
     repairs.extend(_composer_pin_repair(launcher))
+    repairs.extend(_lifecycle_repairs(launcher, args, results))
     return repairs, compose_digest(launcher)
+
+
+def _lifecycle_repairs(launcher, args, results):
+    """What an apply does to the running stack after the files: removals, then recreations."""
+    planned = getattr(launcher, "planned_lifecycle", None)
+    if planned is None:
+        return []
+    return [
+        {"name": entry["name"], "files": [], "diff": "",
+         "note": redact_text(str(entry.get("note") or ""))[:MAX_MESSAGE_CHARS]}
+        for entry in planned(args, list(results or []))
+    ]
 
 
 def _maintenance_repair(launcher):

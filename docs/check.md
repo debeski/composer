@@ -7,14 +7,15 @@ single evolving check that replaces per-change `enable-*` one-offs: Composer own
 outside and hands the rest to the container(s) (`--deep`).
 
 ```
-composer check [--fix] [-y] [--deep] [--deep-service S] [--deep-command CMD]
-               [--json] [--beta|--stable] [-f FILE] [-d]
+composer check [--fix] [-y] [--no-recreate] [--deep] [--deep-service S]
+               [--deep-command CMD] [--json] [--beta|--stable] [-f FILE] [-d]
 ```
 
 | Flag | Effect |
 | --- | --- |
-| `--fix` | plan the repairs, list their consequences, ask, then apply them (see [below](#how---fix-is-guarded)) |
+| `--fix` | plan the repairs, list their consequences, ask, apply them, then bring the running stack to the changed files (see [below](#how---fix-is-guarded)) |
 | `-y`, `--yes` | answer the confirmation in advance ([confirmation guard](commands.md#confirmation-guard)) |
+| `--no-recreate` | with `--fix`, change the files only: running services keep their definition until `./start.sh` recreates them ([after the repairs](#after-the-repairs)) |
 | `--deep` | also relay the app-level doctor ([`deep`](#deep)), and walk every entry for [`app-permissions`](#app-permissions) |
 | `--deep-service`, `--deep-command` | where and what `--deep` runs (default `web`, `python manage.py dlux_doctor`) |
 | `--json` | print `{"results": [...], "fixes": [...]}` |
@@ -47,9 +48,10 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    its fixes may have stopped halfway, and this run checked everything again. Where
    `flock` is unsupported, that record decides: a holder on this host whose process
    is gone, or one older than two hours, is stale.
-1. **Plan and ask.** `--fix` plans every repair, prints what each will change, and
-   asks before applying (`-y` answers in advance; a non-terminal without `-y` is
-   refused). Declining reports `fix` WARN "Changes declined."
+1. **Plan and ask.** `--fix` plans every repair, prints what each will change, which
+   services it will stop and remove, which it expects to recreate and their restart
+   window, and asks once before applying (`-y` answers in advance; a non-terminal
+   without `-y` is refused). Declining reports `fix` WARN "Changes declined."
 2. **Validate first.** Every repair validates its result with `docker compose config`
    before writing; a changed proxy file mounted by Caddy or Nginx is validated as
    well, in a throwaway container.
@@ -64,7 +66,9 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    Composer install, `agent enable`, `executor enable`, resident block, updater
    runtime, post-start label, restart labels, app permissions, task worker,
    `celery` removal, stamp repair. A failed obsolete-services cleanup stops there.
-5. **Re-check.** After a repair the services are discovered again. `resident-commands`,
+5. **Finish what changed.** The stack is brought to the files the repairs wrote, in the
+   same run ([after the repairs](#after-the-repairs)).
+6. **Re-check.** After a repair the services are discovered again. `resident-commands`,
    `docker-proxy`, `stored-files`, `stack-schema`, `task-worker` and `services` are
    checked again when they failed, and `app-permissions` always is (deep); the new
    results replace the old.
@@ -79,6 +83,50 @@ The fix never uses a broad orphan-cleaning redeploy and never removes volumes.
 From the Operations card, an apply carries the digest of the files its preview read
 and is refused if they have changed since, so the repair that lands is the one the
 operator confirmed.
+
+### After the repairs
+
+Before its first write, a confirmed `--fix` reads the resolved Compose model
+(`docker compose config`, with the deployment's secrets, as a deploy reads it) and
+the stack's containers. After the repairs it reads the model again and compares the
+two one service at a time, key order aside:
+
+- **Dropped services are stopped and removed.** A repair that drops a service
+  (`dlux-updater` retired into init containers, `composer-updater` and
+  `docker-socket-proxy` replaced by the hardened pair, `celery`, the obsolete
+  `db-backup`/`pgadmin`) runs `docker compose rm -s -f` for it while the file still
+  defines it, and writes nothing if that fails. Whatever a repair drops and leaves
+  running is then found by Compose's project and service labels and stopped and
+  removed. Volumes are kept.
+- **Changed services are recreated.** Every service whose definition changed and that
+  was running (or restarting), and every service the repairs added to a running stack,
+  is recreated with `docker compose up -d --no-deps --force-recreate`, so its
+  start-up steps run, with the deployment's secrets loaded and refused when they
+  cannot be read. A service its own repair already recreated (the proxy, `caddy`,
+  `web` for the relay settings) is not recreated twice. Then the health check runs
+  for those services alone, with the per-container settle window
+  ([health check](deploying.md#health-check)). A stopped service stays stopped and
+  takes its new definition when it next starts; in development (`-d`) a service the
+  repairs add is left for `./start.sh -d -b`, which builds it first.
+- **Never another image on the side.** A service whose image reference is unchanged
+  but now names another image than its container runs (pulled or built, not
+  deployed) is not recreated: `./start.sh` deploys it on purpose.
+- **The resident pair goes last.** From a terminal, `composer-executor` and then
+  `composer-agent` are recreated after the application services are healthy. An
+  Operations panel apply runs inside the pair, so it never recreates it: the apply
+  reports `./start.sh` as the remaining step, and the
+  [`pending-recreate`](#pending-recreate) finding shows it on the card until the pair
+  runs the new definition.
+- **`--no-recreate`** keeps the files-only behaviour for an operator who schedules
+  the restart: nothing is recreated, dropped services are still removed (nothing else
+  would remove them), and `pending-recreate` names what `./start.sh` will recreate.
+  `-y` still recreates.
+
+Each step reports itself as a fix: `fix:remove-services`, `fix:recreate` and
+`fix:recreate-resident`. A recreate that fails or does not stay healthy is a FAIL
+naming `./start.sh logs <service>`; the files stay changed (their originals are
+archived) and the resident pair is left as it is. Every remaining step is a
+`./start.sh` command.
 
 ## Findings
 
@@ -360,8 +408,8 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   as `none`.
 - **`--fix`:** adds `DLUX_UPDATE_POLICY: "${DLUX_UPDATE_POLICY:-all}"` to the
   `x-environment` block and to both resident services, and archives the original
-  under `.xclude/composer-check/<UTC>/update-policy/`. It recreates nothing: run
-  `./start.sh` afterwards. Details:
+  under `.xclude/composer-check/<UTC>/update-policy/`. The services that read it
+  are then recreated ([after the repairs](#after-the-repairs)). Details:
   [what the application may request](updates.md#what-the-application-may-request).
 
 #### `app-permissions`
@@ -415,6 +463,18 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 - **Fix:** read the service's log (`./start.sh logs <service>`) and fix the cause;
   for celery in an image without Celery, `check --fix` ([`celery`](#celery)).
 - **`--fix`:** nothing for this finding; re-checked after the repairs.
+
+#### `pending-recreate`
+
+- **Checks:** the services a `check --fix` left on the definition they were created
+  from (`--no-recreate`, the resident pair after an Operations panel apply, a
+  recreate it refused), recorded with their container in
+  `.xclude/composer-check/pending-recreate.json`. No finding when there is no record,
+  or once each recorded container has been replaced.
+- **WARN** a recorded container still runs: a restart keeps it, and with it the old
+  definition.
+- **Fix:** run `./start.sh`, which recreates the services whose definition changed.
+- **`--fix`:** nothing for this finding; checked again after the repairs.
 
 #### `versions`
 

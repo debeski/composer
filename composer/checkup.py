@@ -1,5 +1,6 @@
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,6 +18,7 @@ from . import (
     media_migration,
     relay_env,
     stack_layout,
+    stack_lifecycle,
     worker_migration,
 )
 from .stack_schema import collect_all_stamps, has_env_stamp
@@ -1485,19 +1487,20 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             f"Pin the resident Composer pair to {lock.ref}",
             [
                 "The generated block's debeski/composer lines are rewritten; the original is kept under .xclude/.",
-                "composer-agent and composer-executor run that image from their next recreate.",
+                "composer-agent and composer-executor are then recreated on that image (an Operations panel "
+                "apply leaves them to './start.sh' on the server).",
             ],
             assume_yes=args.yes,
         ):
             return [_result(WARN, "fix:composer-pin", "Pinning the resident pair declined.")]
+        if getattr(self, "_capture_lifecycle", False) and not getattr(self, "_fix_confirmed", False):
+            self._fix_confirmed = True
+            self._fix_baseline = self._lifecycle_baseline()
         try:
             outcome = pin_composer_image(".", pin=lock, compose_file=args.file or "", apply=True)
         except AgentInstallError as exc:
             return [_result(FAIL, "fix:composer-pin", str(exc))]
-        detail = f"Resident pair pinned to Composer {lock.short}."
-        if outcome.get("command"):
-            detail += f" Recreate it with: {outcome['command']}"
-        return [_result(OK, "fix:composer-pin", detail)]
+        return [_result(OK, "fix:composer-pin", f"Resident pair pinned to Composer {lock.short}.")]
 
     def _compose_contents(self) -> str:
         for candidate in (self.compose_file, "compose.yml", "docker-compose.yml"):
@@ -1607,6 +1610,13 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         self._worker_gate_cache = None
         self._celery_probe_cache = None
         self._stored_files_way_out_cache = None
+        # A confirmed --fix takes the stack's state before its first write, then
+        # brings the running stack to the files it wrote (_finish_fix).
+        self._capture_lifecycle = bool(getattr(args, "fix", False))
+        self._fix_confirmed = False
+        self._fix_baseline = None
+        self._fix_recreated = set()
+        self._fix_force_recreate = set()
 
         # Before the diagnosis, so the checks below report the state the
         # operator asked for rather than the one they are leaving.
@@ -1659,6 +1669,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             states = self._check_service_states()
             if states is not None:
                 results.append(states)
+            pending = self._check_pending_recreate()
+            if pending is not None:
+                results.append(pending)
             results.append(self._check_versions())
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
@@ -1672,6 +1685,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 index = next((i for i, r in enumerate(results) if r["name"] == "composer-channel"), None)
                 if index is not None:
                     results[index] = self._check_composer_channel()
+            if self._fix_confirmed:
+                fixed.extend(self._finish_fix(args, self._fix_baseline))
         if args.fix and any(entry["level"] == OK and entry["name"].startswith("fix:") for entry in fixed):
             # The fixes may have added or removed services.
             self.discover_services(silent=True)
@@ -1693,6 +1708,13 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     rechecked = rechecks[result["name"]]()
                     if rechecked is not None:
                         results[index] = rechecked
+            if self._fix_confirmed and self.services:
+                # The lifecycle step may have replaced the containers a record named, or left new ones behind.
+                pending = self._check_pending_recreate()
+                results[:] = [result for result in results if result["name"] != "pending-recreate"]
+                if pending is not None:
+                    at = next((i for i, r in enumerate(results) if r["name"] == "versions"), len(results))
+                    results.insert(at, pending)
 
         return results, fixed
 
@@ -1708,7 +1730,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
 
         return 1 if any(r["level"] == FAIL for r in results + fixed) else 0
 
-    def _maybe_fix(self, args, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _fix_plan(self, args, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """What ``check --fix`` would do on this stack: each repair's flag, read-only.
+
+        ``_maybe_fix`` lists, confirms and applies it; the Operations preview
+        reads from it the services an apply would remove and recreate.
+        """
         fixes: List[Dict[str, Any]] = []
         legacy = "composer-updater" in set(self.services) and "composer-agent" not in set(self.services)
         needs_hardening = (
@@ -1908,7 +1935,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     + ", ".join(proxy_inspection["unsupported"]),
                 )
             )
-            return fixes
+            return {"fixes": fixes, "refused": True, "pending": False}
         proxy_routes = proxy_inspection["recognized"]
         media_exposed = media_migration.inspect(Path("."))["exposed"]
         try:
@@ -1943,15 +1970,75 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             stamp_repair = {"files": [], "notes": [f"Cannot plan the stack schema stamp repair: {exc}"], "schema": None}
         if stamp_repair["notes"] and not stamp_repair["files"]:
             fixes.append(_result(WARN, "stack-schema", " ".join(stamp_repair["notes"])))
-        if (not legacy and not obsolete and not proxy_routes and not needs_hardening
-                and not needs_agent_block_migration and not needs_updater_migration
-                and not needs_post_start_migration and not stale_wrappers
-                and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
-                and not needs_restart_labels and not needs_dev_override_migration and not media_exposed
-                and not needs_worker and not front_proxy_files and not relay_env_files and not grant_access
-                and not update_policy_files
-                and not stamp_repair["files"] and not retire_celery):
+        plan: Dict[str, Any] = dict(
+            fixes=fixes,
+            refused=False,
+            legacy=legacy,
+            needs_hardening=needs_hardening,
+            needs_agent_block_migration=needs_agent_block_migration,
+            needs_updater_migration=needs_updater_migration,
+            needs_install=needs_install,
+            init_host=init_host,
+            needs_init_containers=needs_init_containers,
+            needs_dev_override_migration=needs_dev_override_migration,
+            dev_override_file=dev_override_file,
+            base_compose_file=base_compose_file,
+            needs_post_start_migration=needs_post_start_migration,
+            needs_restart_labels=needs_restart_labels,
+            needs_worker=needs_worker,
+            retire_celery=retire_celery,
+            stale_wrappers=stale_wrappers,
+            maintenance_legacy=maintenance_legacy,
+            maintenance_unpublished=maintenance_unpublished,
+            obsolete=obsolete,
+            proxy_routes=proxy_routes,
+            media_exposed=media_exposed,
+            front_proxy_files=front_proxy_files,
+            relay_env_files=relay_env_files,
+            update_policy_files=update_policy_files,
+            grant_access=grant_access,
+            stamp_repair=stamp_repair,
+        )
+        plan["pending"] = bool(
+            legacy or obsolete or proxy_routes or needs_hardening or needs_agent_block_migration
+            or needs_updater_migration or needs_post_start_migration or stale_wrappers
+            or maintenance_legacy or maintenance_unpublished or needs_install or needs_init_containers
+            or needs_restart_labels or needs_dev_override_migration or media_exposed or needs_worker
+            or front_proxy_files or relay_env_files or grant_access or update_policy_files
+            or stamp_repair["files"] or retire_celery
+        )
+        return plan
+
+    def _maybe_fix(self, args, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        plan = self._fix_plan(args, results)
+        fixes = plan["fixes"]
+        if plan["refused"] or not plan["pending"]:
             return fixes
+        legacy = plan["legacy"]
+        needs_hardening = plan["needs_hardening"]
+        needs_agent_block_migration = plan["needs_agent_block_migration"]
+        needs_updater_migration = plan["needs_updater_migration"]
+        needs_install = plan["needs_install"]
+        init_host = plan["init_host"]
+        needs_init_containers = plan["needs_init_containers"]
+        needs_dev_override_migration = plan["needs_dev_override_migration"]
+        dev_override_file = plan["dev_override_file"]
+        base_compose_file = plan["base_compose_file"]
+        needs_post_start_migration = plan["needs_post_start_migration"]
+        needs_restart_labels = plan["needs_restart_labels"]
+        needs_worker = plan["needs_worker"]
+        retire_celery = plan["retire_celery"]
+        stale_wrappers = plan["stale_wrappers"]
+        maintenance_legacy = plan["maintenance_legacy"]
+        maintenance_unpublished = plan["maintenance_unpublished"]
+        obsolete = plan["obsolete"]
+        proxy_routes = plan["proxy_routes"]
+        media_exposed = plan["media_exposed"]
+        front_proxy_files = plan["front_proxy_files"]
+        relay_env_files = plan["relay_env_files"]
+        update_policy_files = plan["update_policy_files"]
+        grant_access = plan["grant_access"]
+        stamp_repair = plan["stamp_repair"]
         consequences = []
         if maintenance_legacy:
             consequences.append(
@@ -2095,7 +2182,6 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     "Harden composer-agent into the executor topology: add composer-executor "
                     "(sole Docker authority) and remove docker-socket-proxy, its container "
                     "included.",
-                    "Recreate composer-executor and composer-agent.",
                 ]
             )
         if needs_agent_block_migration:
@@ -2135,6 +2221,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "Preserve original deployment files under .xclude/.",
             ]
         )
+        consequences.extend(self._lifecycle_consequences(plan, args))
         if not confirm(
             "composer check --fix will apply safe stack migrations",
             consequences,
@@ -2142,6 +2229,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         ):
             fixes.append(_result(WARN, "fix", "Changes declined."))
             return fixes
+        self._fix_confirmed = True
+        if getattr(self, "_capture_lifecycle", False):
+            # After the answer, before the first write: what the stack runs now.
+            self._fix_baseline = self._lifecycle_baseline()
 
         if stale_wrappers:
             from .stack_cleanup import _archive_root
@@ -2190,6 +2281,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         detail += f"; kept the customised page as {outcome['override']}"
                     if outcome["recreated"]:
                         detail += f"; recreated {', '.join(outcome['recreated'])}"
+                        self._note_recreated(outcome["recreated"])
                     fixes.append(_result(OK, "fix:maintenance-page", f"{detail}. Backup: {outcome['backup_root']}"))
                 except (OSError, StackCleanupError) as exc:
                     fixes.append(_result(FAIL, "fix:maintenance-page", str(exc)))
@@ -2235,6 +2327,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     detail = f"Made stored files private: {', '.join(outcome['files'])}"
                     if outcome["recreated"]:
                         detail += f"; recreated {', '.join(outcome['recreated'])}"
+                        self._note_recreated(outcome["recreated"])
                     fixes.append(_result(OK, "fix:stored-files", f"{detail}. Backup: {outcome['backup_root']}"))
                 except (OSError, StackCleanupError) as exc:
                     fixes.append(_result(FAIL, "fix:stored-files", str(exc)))
@@ -2249,6 +2342,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 detail = f"Caddy reads its trusted front proxies from DLUX_FRONT_PROXY: {', '.join(outcome['files'])}"
                 if outcome["recreated"]:
                     detail += f"; recreated {', '.join(outcome['recreated'])}"
+                    self._note_recreated(outcome["recreated"])
                 if outcome["notes"]:
                     detail += ". " + " ".join(outcome["notes"])
                 fixes.append(_result(OK, "fix:front-proxy", f"{detail}. Backup: {outcome['backup_root']}"))
@@ -2266,7 +2360,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         OK, "fix:update-policy",
                         "web, worker, composer-agent and composer-executor read DLUX_UPDATE_POLICY: "
                         + ", ".join(outcome["files"])
-                        + ". Run './start.sh' to recreate them. Backup: " + outcome["backup_root"],
+                        + ". Backup: " + outcome["backup_root"],
                     ))
             except (OSError, ValueError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:update-policy", str(exc)))
@@ -2285,6 +2379,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     )
                     if outcome["recreated"]:
                         detail += f"; recreated {', '.join(outcome['recreated'])}"
+                        self._note_recreated(outcome["recreated"])
                     fixes.append(_result(OK, "fix:relay-env", f"{detail}. Backup: {outcome['backup_root']}"))
             except (OSError, ValueError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:relay-env", str(exc)))
@@ -2352,8 +2447,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     ".", compose_file=args.file or "", apply=True)
                 fixes.append(_result(
                     OK, "fix:dlux-init-containers",
-                    f"Retired dlux-updater into Compose init containers on {init_host}. "
-                    f"Apply with '{outcome.get('command')}'. Backup: "
+                    f"Retired dlux-updater into Compose init containers on {init_host}. Backup: "
                     + (outcome.get("backup_root") or "n/a"),
                 ))
             except AgentInstallError as exc:
@@ -2392,8 +2486,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 outcome = install_composer_stack(".", compose_file=args.file or "", apply=True)
                 fixes.append(_result(
                     OK, "fix:install-composer",
-                    "Installed composer-executor and composer-agent. "
-                    f"Start them with '{outcome.get('command')}'. Backup: "
+                    "Installed composer-executor and composer-agent. Backup: "
                     + (outcome.get("backup_root") or "n/a"),
                 ))
             except AgentInstallError as exc:
@@ -2440,8 +2533,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         "Normalized the Composer resident block: nested 'agent run'/'executor run' "
                         "commands, DAC_OVERRIDE as composer-executor's only added capability, no "
                         "docker-socket-proxy (its container removed), and the registry login passed to "
-                        "composer-agent and composer-executor. Recreate composer-executor and "
-                        "composer-agent to apply. Backup: "
+                        "composer-agent and composer-executor. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )
                 )
@@ -2456,8 +2548,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     _result(
                         OK,
                         "fix:dlux-updater-runtime",
-                        "Normalized DjangoLux runtime commands and local tools mounts. "
-                        "Recreate affected services to apply. Backup: "
+                        "Normalized DjangoLux runtime commands and local tools mounts. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )
                 )
@@ -2474,7 +2565,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                             OK,
                             "fix:post-start-label",
                             "Installed the org.dlux.post-start label "
-                            "(one migrator run per start). Recreate the service to apply. Backup: "
+                            "(one migrator run per start). Backup: "
                             + (outcome.get("backup_root") or "n/a"),
                         )
                     )
@@ -2507,10 +2598,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     ".", self._maintenance_compose_files(), environment=self.build_compose_env()
                 )
                 if needs_worker == "add":
-                    detail = (
-                        f"Added the worker service (stack schema 5): {', '.join(outcome['files'])}. "
-                        "Deploy to start it ('./start.sh', or './start.sh -d -b' in development)."
-                    )
+                    detail = f"Added the worker service (stack schema 5): {', '.join(outcome['files'])}."
+                    if getattr(self, "dev_mode", False):
+                        detail += " Build and start it with './start.sh -d -b'."
                 else:
                     detail = f"Brought the stack to schema 5: {', '.join(outcome['files'])}."
                 if outcome["notes"]:
@@ -2553,6 +2643,489 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:stack-schema", str(exc)))
         return fixes
+
+    # --- After the repairs: the running stack follows the files ------------------
+
+    def _resident_apply(self, args) -> bool:
+        """True for an Operations panel apply, which runs inside the resident pair.
+
+        The agent applies in-process on a stack without an executor
+        (``resident_check``); the executor applies in a sibling container it starts
+        with ``--resident-apply``. Neither may recreate the pair under itself.
+        """
+        return bool(getattr(self, "resident_check", False) or getattr(args, "resident_apply", False))
+
+    def _note_recreated(self, services) -> None:
+        """A repair recreated these itself; the lifecycle step waits for them but does not repeat it."""
+        recreated = getattr(self, "_fix_recreated", None)
+        if recreated is None:
+            recreated = self._fix_recreated = set()
+        recreated.update(services)
+
+    @contextmanager
+    def _deployment_environment(self):
+        """``(ok, error)``: the deployment's secrets in this process's environment, then restored.
+
+        Containers are built from the interpolated Compose model, so without the
+        secrets a recreated one would run on Compose defaults (a placeholder
+        SECRET_KEY, default database credentials). Values a question wrote to the
+        secrets file in this run are added too: ``./start.sh`` handed over the
+        file as it was when the run started.
+        """
+        saved = dict(os.environ)
+        loaded = list(getattr(self, "loaded_secrets", []) or [])
+        try:
+            try:
+                ok, error = self.resolve_secrets()
+            except Exception as exc:  # an unreadable file is reported, never fatal here
+                ok, error = False, str(exc)
+            for key, value in (getattr(self, "_written_secrets", None) or {}).items():
+                os.environ[key] = value
+            yield ok, error
+        finally:
+            for key in set(os.environ) - set(saved):
+                os.environ.pop(key, None)
+            for key, value in saved.items():
+                if os.environ.get(key) != value:
+                    os.environ[key] = value
+            self.loaded_secrets = loaded
+
+    def _lifecycle_baseline(self) -> Optional[Dict[str, Any]]:
+        """What the stack runs before the repairs write anything, or None when Compose cannot say."""
+        try:
+            with self._deployment_environment():
+                model = self.compose_config_json()
+                containers = self._container_states() if model else []
+        except Exception:
+            return None
+        if not model:
+            return None
+        return {
+            "definitions": stack_lifecycle.definitions(model),
+            "images": stack_lifecycle.images(model),
+            "project": str(model.get("name") or ""),
+            "containers": containers,
+        }
+
+    def _finish_fix(self, args, baseline: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Bring the running stack to the files the repairs wrote.
+
+        The resolved Compose model is compared with ``baseline`` one service at a
+        time. A service the repairs dropped is stopped and removed (volumes kept).
+        A running service whose definition changed, and a service the repairs
+        added to a running stack, is recreated with its start-up steps and must
+        become healthy and stay up for the settle window. composer-executor and
+        composer-agent go last; an Operations panel apply runs inside them and
+        leaves them to ``./start.sh``. ``--no-recreate`` changes the files only.
+        """
+        apply = stack_lifecycle.APPLY_COMMAND
+        join = stack_lifecycle.join
+        unreadable = (
+            "Composer could not read the Compose configuration {when} the repairs, so it removed and recreated "
+            f"nothing. Run '{apply}' to apply the changed files."
+        )
+        if baseline is None:
+            return [_result(WARN, "fix:recreate", unreadable.format(when="before"))]
+        entries: List[Dict[str, Any]] = []
+        resident_services = set(stack_lifecycle.RESIDENT_SERVICES)
+        with self._deployment_environment() as (secrets_ok, secrets_error):
+            after = self.compose_config_json()
+            if not after:
+                return [_result(WARN, "fix:recreate", unreadable.format(when="after"))]
+            diff = stack_lifecycle.changes(baseline["definitions"], stack_lifecycle.definitions(after))
+            if diff["dropped"]:
+                entries.append(self._remove_dropped(baseline.get("project") or str(after.get("name") or ""),
+                                                    diff["dropped"]))
+            rows = baseline.get("containers") or []
+            live = {row["service"] for row in rows if row.get("state") in stack_lifecycle.LIVE_STATES}
+            ids: Dict[str, str] = {}
+            for row in rows:
+                if row.get("state") in stack_lifecycle.LIVE_STATES and row.get("id"):
+                    ids.setdefault(row["service"], row["id"])
+            done = set(getattr(self, "_fix_recreated", None) or ()) & live
+            forced = set(getattr(self, "_fix_force_recreate", None) or ())
+            changed = {name for name in diff["changed"] if name in live}
+            # A development stack builds what it adds first ('./start.sh -d -b').
+            added = set(diff["added"]) if live and not getattr(self, "dev_mode", False) else set()
+            targets = stack_lifecycle.ordered((changed | added | forced) - done)
+            if not targets and not done:
+                if (diff["changed"] or diff["added"]) and not live:
+                    entries.append(_result(
+                        OK, "fix:recreate",
+                        f"Nothing of this stack is running, so nothing was recreated: '{apply}' starts it on the "
+                        "changed files.",
+                    ))
+                return entries
+            pending: List[str] = []
+            if getattr(args, "no_recreate", False):
+                left = [name for name in targets if name not in forced]
+                targets = [name for name in targets if name in forced]
+                if left:
+                    entries.append(_result(
+                        WARN, "fix:recreate",
+                        f"--no-recreate: {join(left)} keep running the definition they were created from. Run "
+                        f"'{apply}' when you are ready: it recreates them on the changed files.",
+                    ))
+                    pending += left
+            held = self._image_drift(
+                [name for name in targets if name not in resident_services and name not in forced], baseline, after
+            )
+            if held:
+                entries.append(_result(
+                    WARN, "fix:recreate",
+                    "Not recreated, so that check --fix does not deploy another image on the side: "
+                    + "; ".join(f"{name}: {why}" for name, why in sorted(held.items()))
+                    + f". Run '{apply}' to deploy it on purpose.",
+                ))
+                pending += sorted(held)
+                targets = [name for name in targets if name not in held]
+            resident = [name for name in targets if name in resident_services]
+            app = [name for name in targets if name not in resident_services]
+            if (app or resident) and not secrets_ok:
+                reason = (str(secrets_error or "").strip().splitlines() or ["they could not be read"])[0]
+                entries.append(_result(
+                    FAIL, "fix:recreate",
+                    f"Refusing to recreate {join(app + resident)} without the deployment's secrets ({reason}): a "
+                    f"container built without them would run on Compose defaults. Run '{apply}' once the secrets "
+                    "file can be read.",
+                ))
+                pending += app + resident
+                app, resident = [], []
+            if app or done:
+                healthy, entry = self._recreate_and_wait(app, sorted(done), "fix:recreate")
+                entries.append(entry)
+                if not healthy and resident:
+                    pending += resident
+                    resident = []
+            if resident and self._resident_apply(args):
+                entries.append(_result(
+                    WARN, "fix:recreate-resident",
+                    f"{join(resident)} changed, and an Operations panel apply runs inside them, so it does not "
+                    f"recreate them. Run '{apply}' on the server: it recreates them on the changed files.",
+                ))
+                pending += resident
+            elif resident:
+                entries.append(self._recreate_and_wait(resident, [], "fix:recreate-resident")[1])
+            leftover = {name: ids[name] for name in pending if name in ids}
+            if leftover:
+                try:
+                    stack_lifecycle.record_pending(Path("."), leftover)
+                except OSError:
+                    pass
+        return entries
+
+    def _recreate_and_wait(self, services: List[str], already: List[str], name: str) -> Tuple[bool, Dict[str, Any]]:
+        """``(healthy, result)``: recreate ``services``, then wait for them and ``already``."""
+        from .health_monitor import settle_seconds
+
+        join = stack_lifecycle.join
+        waited = stack_lifecycle.ordered(set(services) | set(already))
+        logs = f"./start.sh logs {' '.join(waited)}"
+        if services:
+            ok, out, err = self.recreate_containers(list(services))
+            if not ok:
+                detail = (str(err or out or "").strip().splitlines() or ["Compose gave no reason"])[-1][:500]
+                return False, _result(
+                    FAIL, name,
+                    f"Could not recreate {join(services)}: {detail}. Read '{logs}', fix the cause, then run "
+                    f"'{stack_lifecycle.APPLY_COMMAND}'.",
+                )
+        healthy, detail = self._wait_healthy(waited)
+        if not healthy:
+            reason = str(detail or "").strip().split("\n\n")[0][:1200]
+            return False, _result(
+                FAIL, name,
+                f"Recreated {join(waited)}, but they did not stay healthy: {reason} Read '{logs}', fix the cause, "
+                f"then run '{stack_lifecycle.APPLY_COMMAND}'.",
+            )
+        message = f"Recreated {join(services)} with their start-up steps" if services else ""
+        if already:
+            by_repair = f"{join(already)} recreated by {'its' if len(already) == 1 else 'their'} own repair"
+            message = f"{message} ({by_repair})" if message else by_repair[0].upper() + by_repair[1:]
+        return True, _result(OK, name, f"{message}; healthy and up {settle_seconds():g} s.")
+
+    def _wait_healthy(self, services: List[str]) -> Tuple[bool, str]:
+        """``monitor_health()`` scoped to ``services``, without the deploy screen."""
+        from .constants import SERVICE_NOT_SEEN
+
+        saved_services = list(getattr(self, "services", []) or [])
+        saved_state = dict(getattr(self, "service_state", {}) or {})
+        own_render = self.__dict__.get("render")
+        self.services = list(services)
+        self.service_state = {service: SERVICE_NOT_SEEN for service in services}
+        self.render = lambda *args, **kwargs: None
+        try:
+            return self.monitor_health()
+        finally:
+            if own_render is None:
+                self.__dict__.pop("render", None)
+            else:
+                self.render = own_render
+            self.services = saved_services
+            self.service_state = saved_state
+            finish = getattr(self, "finish_progress_line", None)
+            if finish is not None:
+                finish()
+
+    def _image_drift(self, services: List[str], baseline: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, str]:
+        """``{service: why}`` for services whose image reference now names another image than they run.
+
+        Recreating one would deploy that image (pulled or built, never deployed),
+        which ``check --fix`` must not do on the side. A repair that changes the
+        reference itself (a Composer pin) is meant to, so only an unchanged
+        reference is compared.
+        """
+        before_images = baseline.get("images") or {}
+        after_images = stack_lifecycle.images(after)
+        ids = {
+            row["service"]: row["id"] for row in baseline.get("containers") or []
+            if row.get("id") and row.get("state") in stack_lifecycle.LIVE_STATES
+        }
+        candidates = [
+            name for name in services
+            if name in ids and after_images.get(name) and after_images.get(name) == before_images.get(name)
+        ]
+        if not candidates:
+            return {}
+        ok, out, _err = self.run_command(
+            ["docker", "inspect", "--format", "{{.Id}} {{.Image}}", *[ids[name] for name in candidates]], timeout=20
+        )
+        if not ok:
+            return {}
+        running = dict(line.split(None, 1) for line in out.splitlines() if len(line.split()) == 2)
+        local: Dict[str, str] = {}
+        held: Dict[str, str] = {}
+        for name in candidates:
+            image = next(
+                (value.strip() for cid, value in running.items() if cid.startswith(ids[name]) or ids[name].startswith(cid)),
+                "",
+            )
+            reference = after_images[name]
+            if reference not in local:
+                found, text, _ = self.run_command(["docker", "image", "inspect", "--format", "{{.Id}}", reference], timeout=15)
+                local[reference] = text.strip() if found else ""
+            if image and local[reference] and local[reference] != image:
+                held[name] = f"{reference} now names another image than the one it runs"
+        return held
+
+    def _remove_dropped(self, project: str, services: List[str]) -> Dict[str, Any]:
+        """Stop and remove the containers of services the Compose files no longer define.
+
+        Compose cannot name them any more, so they are found by the labels it gave
+        them. ``docker rm`` without ``-v``: volumes are kept.
+        """
+        join = stack_lifecycle.join
+        if not project:
+            return _result(
+                WARN, "fix:remove-services",
+                f"{join(services)} left the Compose files, but the project name could not be read, so their "
+                "containers were not looked for.",
+            )
+        found: Dict[str, List[str]] = {}
+        failed: List[str] = []
+        for service in services:
+            ok, out, err = self.run_command(
+                ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}",
+                 "--filter", f"label=com.docker.compose.service={service}"],
+                timeout=20,
+            )
+            if not ok:
+                failed.append(f"{service} ({(err or out or 'docker ps failed').strip()[:200]})")
+            elif out.split():
+                found[service] = out.split()
+        removed = []
+        for service, containers in found.items():
+            stopped, _out, stop_err = self.run_command(["docker", "stop", *containers], timeout=120)
+            deleted, _out, rm_err = self.run_command(["docker", "rm", *containers], timeout=60)
+            if stopped and deleted:
+                removed.append(service)
+            else:
+                failed.append(f"{service} ({(rm_err or stop_err or 'docker rm failed').strip()[:200]})")
+        if failed:
+            return _result(
+                FAIL, "fix:remove-services",
+                f"{join(services)} left the Compose files, but Composer could not remove the containers of "
+                f"{'; '.join(failed)}. They keep running outside the Compose files until they are removed; "
+                "volumes are kept.",
+            )
+        if removed:
+            return _result(
+                OK, "fix:remove-services",
+                f"Stopped and removed the containers of {join(removed)}: their definitions left the Compose "
+                "files. Volumes are kept.",
+            )
+        return _result(
+            OK, "fix:remove-services",
+            f"{join(services)} left the Compose files and no container of {'it' if len(services) == 1 else 'them'} "
+            "is left. Volumes are kept.",
+        )
+
+    def _check_pending_recreate(self) -> Optional[Dict[str, Any]]:
+        """Services ``check --fix`` left on their old definition, until their container is replaced."""
+        recorded = stack_lifecycle.read_pending(Path("."))
+        if not recorded:
+            return None
+        current: Dict[str, set] = {}
+        for row in self._container_states():
+            if row.get("id"):
+                current.setdefault(row["service"], set()).add(row["id"])
+        pending = stack_lifecycle.still_pending(recorded, current)
+        if not pending:
+            return None
+        join = stack_lifecycle.join
+        since = min(recorded[name]["since"] for name in pending)
+        one = len(pending) == 1
+        message = (
+            f"{join(pending)} still run{'s' if one else ''} the Compose definition from before 'check --fix' "
+            f"changed it ({since})"
+        )
+        if set(pending) & set(stack_lifecycle.RESIDENT_SERVICES):
+            message += (
+                "; an Operations panel apply runs inside composer-agent and composer-executor, so it cannot "
+                "recreate them"
+            )
+        return _result(
+            WARN, "pending-recreate", message + ".",
+            fix=f"Run '{stack_lifecycle.APPLY_COMMAND}' on the server: it recreates "
+            f"{'it' if one else 'them'} on the changed files.",
+        )
+
+    # Services each repair changes, for the confirmation and the Operations
+    # preview. What is recreated goes by the Compose model, not by this list.
+    _EDGE_PROXIES = ("caddy", "nginx", "proxy")
+    _SHARED_ENVIRONMENT = ("web", "worker", "celery", "smtp-relay")
+
+    def _lifecycle_expectation(self, plan: Dict[str, Any]) -> Dict[str, List[str]]:
+        """``{"remove", "recreate", "resident"}``: the services a planned run removes and recreates."""
+        get = plan.get
+        services = set(getattr(self, "services", []) or [])
+        choices = getattr(self, "_operator_choices", None) or {}
+        resident_pair = {"composer-agent", "composer-executor"}
+        remove = set(get("obsolete") or [])
+        if get("retire_celery"):
+            remove.add("celery")
+        if get("legacy"):
+            remove.add("composer-updater")
+        if get("legacy") or get("needs_hardening") or get("needs_agent_block_migration"):
+            remove.add("docker-socket-proxy")
+        if get("needs_init_containers"):
+            remove.add("dlux-updater")
+        remove &= services
+        # Services that merge x-environment, where the schema stamp and shared settings live.
+        shared = set(self._SHARED_ENVIRONMENT)
+        recreate: set = set()
+        if get("maintenance_legacy") or get("media_exposed"):
+            recreate |= set(self._EDGE_PROXIES) | shared
+        if get("front_proxy_files") or "DLUX_FRONT_PROXY" in choices:
+            recreate.add("caddy")
+        if get("relay_env_files") or (get("stamp_repair") or {}).get("files"):
+            recreate |= shared
+        if get("update_policy_files") or "DLUX_UPDATE_POLICY" in choices:
+            recreate |= shared | resident_pair
+        if get("needs_init_containers"):
+            recreate |= {get("init_host") or "celery", "web"}
+        if get("needs_dev_override_migration"):
+            recreate |= {"celery", "worker"}
+        if get("needs_worker"):
+            recreate |= shared
+        if get("needs_worker") == "add" or get("retire_celery"):
+            # Their restart list (COMPOSER_AGENT_RESTART_SERVICES) gains worker or loses celery.
+            recreate |= resident_pair
+        if get("needs_updater_migration"):
+            recreate |= {"dlux-updater", "smtp-relay", "web", "celery", "worker"}
+        if get("needs_post_start_migration"):
+            recreate.add("web")
+        if get("needs_restart_labels"):
+            recreate |= services
+        if get("legacy") or get("needs_install") or get("needs_hardening") or get("needs_agent_block_migration"):
+            recreate |= resident_pair
+        if get("redis_files") or get("redis_corrupt"):
+            recreate.add("redis")
+        known = set(services)
+        if get("needs_worker") == "add":
+            known.add("worker")
+        if get("legacy") or get("needs_install"):
+            known |= resident_pair
+        recreate = (recreate & known) - remove
+        return {
+            "remove": sorted(remove),
+            "recreate": sorted(recreate - resident_pair),
+            "resident": [name for name in stack_lifecycle.RESIDENT_SERVICES if name in recreate],
+        }
+
+    def _lifecycle_consequences(self, plan: Dict[str, Any], args) -> List[str]:
+        """The confirmation's lines for what the run does to the running stack."""
+        from .health_monitor import settle_seconds
+
+        join = stack_lifecycle.join
+        apply = stack_lifecycle.APPLY_COMMAND
+        life = self._lifecycle_expectation(plan)
+        lines = []
+        if life["remove"]:
+            lines.append(
+                f"Stop and remove the containers of {join(life['remove'])}: their definitions leave the Compose "
+                "files. Volumes are kept."
+            )
+        if getattr(args, "no_recreate", False):
+            lines.append(
+                f"--no-recreate: running services keep the definition they were created from until you run "
+                f"'{apply}', which recreates the changed ones."
+            )
+            return lines
+        if not (life["recreate"] or life["resident"]):
+            return lines
+        expected = f" (expected: {join(life['recreate'])})" if life["recreate"] else ""
+        lines.append(
+            f"Recreate each running service whose Compose definition this run changes{expected}, with its start-up "
+            f"steps, and wait until it is healthy and has stayed up {settle_seconds():g} s. A service the repairs "
+            "add to a running stack is started."
+        )
+        if life["resident"]:
+            if self._resident_apply(args):
+                lines.append(
+                    "composer-agent and composer-executor change too; this apply runs inside them, so they are left "
+                    f"for '{apply}' on the server."
+                )
+            else:
+                lines.append("Recreate composer-executor and then composer-agent last.")
+        lines.append(
+            "Restart window: each recreated service is down for the seconds Docker needs to replace its container; "
+            "while web is down the proxy shows the maintenance page."
+        )
+        return lines
+
+    def planned_lifecycle(self, args, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The Operations preview's entries for what an apply does to the running stack."""
+        join = stack_lifecycle.join
+        try:
+            plan = self._fix_plan(args, results)
+        except Exception as exc:  # a planning step that refuses is not a crash
+            return [{"name": "recreate-services", "files": [], "diff": "",
+                     "note": f"Could not plan which services an apply removes or recreates: {exc}"}]
+        if plan.get("refused") or not plan.get("pending"):
+            return []
+        life = self._lifecycle_expectation(plan)
+        entries = []
+        if life["remove"]:
+            entries.append({
+                "name": "remove-services", "files": [], "diff": "",
+                "note": f"Stops and removes the containers of {join(life['remove'])}: their definitions leave the "
+                "Compose files. Volumes are kept.",
+            })
+        if not (life["recreate"] or life["resident"]):
+            return entries
+        expected = f" (expected: {join(life['recreate'])})" if life["recreate"] else ""
+        note = (
+            f"Recreates each running service whose Compose definition the apply changes{expected}, with its "
+            "start-up steps, and waits until it is healthy; each is down for a few seconds meanwhile."
+        )
+        if life["resident"]:
+            note += (
+                " composer-agent and composer-executor change too; the apply runs inside them, so run "
+                f"'{stack_lifecycle.APPLY_COMMAND}' on the server afterwards to recreate them."
+            )
+        entries.append({"name": "recreate-services", "files": [], "diff": "", "note": note})
+        return entries
 
     def _worker_gate(self) -> Tuple[bool, str]:
         """``(ready, why not)``: may ``worker`` be added to this stack now?
