@@ -13,6 +13,7 @@ from . import (
     app_permissions,
     fetch_metadata,
     front_proxy,
+    guidance,
     maintenance_migration,
     maintenance_page,
     media_migration,
@@ -1587,6 +1588,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         is refused before it reads anything, and a run that was killed is
         reported by the next.
         """
+        self._fix_summary = None
         if not getattr(args, "fix", False):
             return self._collect_checkup(args)
         try:
@@ -1618,6 +1620,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         self._fix_baseline = None
         self._fix_recreated = set()
         self._fix_force_recreate = set()
+        self._operator_choices = {}
+        self._skipped_questions = []
+        self._written_secrets = {}
 
         # Before the diagnosis, so the checks below report the state the
         # operator asked for rather than the one they are leaving.
@@ -1683,6 +1688,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             if args.deep:
                 results.append(self._run_deep(args.deep_service, args.deep_command))
 
+        before = {result.get("name"): result.get("level") for result in results}
+        if args.fix and guidance.interactive(args, resident=self._resident_apply(args)):
+            self._ask_operator_questions(results)
         fixed = switched + (self._maybe_fix(args, results) if args.fix else [])
         if args.fix:
             # After the other repairs: hardening re-renders the block on its tag.
@@ -1725,6 +1733,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 if pending is not None:
                     at = next((i for i, r in enumerate(results) if r["name"] == "versions"), len(results))
                     results.insert(at, pending)
+            self._fix_summary = guidance.summary(results, fixed, self._skipped_questions, before=before)
 
         return results, fixed
 
@@ -1737,8 +1746,74 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             print(json.dumps({"results": results, "fixes": fixed}, indent=2))
         else:
             self._print_checkup(results, fixed)
+            if getattr(args, "fix", False):
+                guidance.print_summary(getattr(self, "_fix_summary", None))
 
         return 1 if any(r["level"] == FAIL for r in results + fixed) else 0
+
+    def _ask_operator_questions(self, results: List[Dict[str, Any]], *, reader=input, stream=None) -> None:
+        """Ask the operator-choice findings as questions; record the answers and the skips.
+
+        Only for a terminal run (``guidance.interactive``). Nothing is written
+        here: the answers become part of the plan the confirmation lists.
+        """
+        from . import update_policy
+
+        choices: Dict[str, str] = {}
+        skipped: List[Dict[str, str]] = []
+        self._operator_choices, self._skipped_questions = choices, skipped
+        found = {result.get("name"): result.get("level") for result in results}
+        values = guidance.secret_values(Path("."))
+        if values is not None and found.get("front-proxy") == WARN:
+            environment = self.build_compose_env()
+            try:
+                state = front_proxy.inspect(Path("."), self._maintenance_compose_files(), environment)
+            except OSError:
+                state = None
+            if (
+                state and not state["set"] and not state["unsupported"]
+                and state["compose"] in (front_proxy.PASSED, front_proxy.ABSENT)
+                and state["caddyfile"] in (front_proxy.LEGACY, front_proxy.MANAGED)
+                and not front_proxy.blocked_reason(Path("."), environment)
+            ):
+                value = guidance.ask_front_proxy(reader=reader, stream=stream)
+                if value is None:
+                    skipped.append({"name": "front-proxy", "command": guidance.ASK_AGAIN})
+                else:
+                    choices[front_proxy.VARIABLE] = value
+        readers = {"web", "worker", "composer-agent", "composer-executor"}
+        if values is not None and set(self.services) & readers:
+            raw = values.get(update_policy.ENV_KEY)
+            policy, valid = update_policy.normalize((raw or "").strip("'\""))
+            if raw is None or not valid:
+                value = guidance.ask_update_policy(policy, reader=reader, stream=stream)
+                if value is None:
+                    skipped.append({"name": "update-policy", "command": guidance.ASK_AGAIN})
+                else:
+                    choices[update_policy.ENV_KEY] = value
+        if found.get("redis-persistence") == WARN and found.get("redis-aof-corrupt") != FAIL:
+            if not guidance.ask_redis(reader=reader, stream=stream):
+                choices["redis"] = "keep"
+                skipped.append({"name": "redis-persistence", "command": guidance.ASK_AGAIN})
+
+    def _write_operator_choices(self, values: Dict[str, str]) -> Dict[str, Any]:
+        """Write the answers to the secrets file, in place; the recreate that follows reads them."""
+        try:
+            path = guidance.set_secret_values(Path("."), values)
+        except (OSError, ValueError) as exc:
+            return _result(FAIL, "fix:secrets", f"Could not write {', '.join(values)} to the secrets file: {exc}")
+        written = dict(getattr(self, "_written_secrets", None) or {})
+        written.update(values)
+        self._written_secrets = written
+        try:
+            shown = path.relative_to(Path(".").resolve())
+        except ValueError:
+            shown = path
+        return _result(
+            OK, "fix:secrets",
+            f"Wrote {', '.join(values)} to {shown} in place (only {'that line' if len(values) == 1 else 'those lines'} "
+            "changed; the file is not copied).",
+        )
 
     def _fix_plan(self, args, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """What ``check --fix`` would do on this stack: each repair's flag, read-only.
@@ -1969,8 +2044,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             update_policy_files = update_policy_env.preview(".", self._maintenance_compose_files())["files"]
         except (OSError, ValueError, StackCleanupError):
             update_policy_files = []
+        choices = getattr(self, "_operator_choices", None) or {}
+        secret_writes = {key: choices[key] for key in ("DLUX_FRONT_PROXY", "DLUX_UPDATE_POLICY") if key in choices}
         redis_files: List[str] = []
-        if redis_persistence.SERVICE in set(self.services):
+        if redis_persistence.SERVICE in set(self.services) and choices.get("redis") != "keep":
             try:
                 redis_plan = redis_persistence.preview(".", self._maintenance_compose_files())
             except (OSError, ValueError, StackCleanupError) as exc:
@@ -2022,6 +2099,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             stamp_repair=stamp_repair,
             redis_files=redis_files,
             redis_corrupt=redis_corrupt,
+            secret_writes=secret_writes,
         )
         plan["pending"] = bool(
             legacy or obsolete or proxy_routes or needs_hardening or needs_agent_block_migration
@@ -2029,7 +2107,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             or maintenance_legacy or maintenance_unpublished or needs_install or needs_init_containers
             or needs_restart_labels or needs_dev_override_migration or media_exposed or needs_worker
             or front_proxy_files or relay_env_files or grant_access or update_policy_files
-            or stamp_repair["files"] or retire_celery or redis_files or redis_corrupt
+            or stamp_repair["files"] or retire_celery or redis_files or redis_corrupt or secret_writes
         )
         return plan
 
@@ -2065,7 +2143,16 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         stamp_repair = plan["stamp_repair"]
         redis_files = plan["redis_files"]
         redis_corrupt = plan["redis_corrupt"]
+        secret_writes = plan["secret_writes"]
         consequences = []
+        if secret_writes:
+            one = len(secret_writes) == 1
+            consequences.append(
+                "Write " + ", ".join(f"{key}={value}" for key, value in secret_writes.items())
+                + f" to the secrets file in place: only {'that line changes' if one else 'those lines change'} "
+                "(added at the end when missing), and the file is not copied. The services that read "
+                f"{'it' if one else 'them'} are recreated."
+            )
         if maintenance_legacy:
             consequences.append(
                 "Move the maintenance page to Composer: rewrite the proxy config to serve it from "
@@ -2273,6 +2360,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if getattr(self, "_capture_lifecycle", False):
             # After the answer, before the first write: what the stack runs now.
             self._fix_baseline = self._lifecycle_baseline()
+        if secret_writes:
+            # First: the front-proxy repair validates Caddy with the value chosen.
+            fixes.append(self._write_operator_choices(secret_writes))
 
         if stale_wrappers:
             from .stack_cleanup import _archive_root
@@ -2728,7 +2818,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 fix="Run 'composer check --fix': it switches Redis to RDB snapshots (--appendonly no --save 60 1, "
                 "its other flags kept), archives the Compose file and recreates redis. A snapshot is renamed into "
                 "place only when complete; after a crash up to about a minute of cache and sessions is lost, so a "
-                "few users sign in again.",
+                "few users sign in again. At a terminal it asks first: answer no to keep the append-only file.",
             )
         if state == redis_persistence.CUSTOM:
             return _result(

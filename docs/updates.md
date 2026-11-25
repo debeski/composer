@@ -20,7 +20,8 @@ rules. The commands' syntax and exit codes are in the
 DjangoLux can ask the resident pair for three kinds of update: an application
 image update, an inline DjangoLux update, and a resident Composer update.
 `DLUX_UPDATE_POLICY` in the secrets file decides which of those requests the pair
-performs:
+performs (at a terminal, `check --fix` asks for it when the file does not set it:
+[questions](check.md#questions-at-a-terminal)):
 
 | Request from DjangoLux | `all` (default) | `inline` | `none` |
 | --- | --- | --- | --- |

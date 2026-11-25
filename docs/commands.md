@@ -192,7 +192,9 @@ Pass `-y`/`--yes` (or set `COMPOSER_ASSUME_YES=1`) to confirm up front. The guar
 fails **closed**: when stdin is not a terminal (CI, cron, a piped script) and neither
 the flag nor the variable is set, the run is refused instead of silently proceeding.
 `composer check --fix` and `check --beta`/`--stable` ask the same way before they
-apply. The variable reaches a native `python -m composer` run only: the
+apply. At a terminal, `check --fix` also asks a few short operator-choice questions
+first ([questions](check.md#questions-at-a-terminal)); with `-y`,
+`COMPOSER_ASSUME_YES` or no terminal it asks none. The variable reaches a native `python -m composer` run only: the
 `start.sh`/`start.ps1` wrappers do not pass it into the deployer container, so a
 non-interactive run through them needs the flag (`./start.sh check --fix -y`).
 

@@ -48,10 +48,12 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    its fixes may have stopped halfway, and this run checked everything again. Where
    `flock` is unsupported, that record decides: a holder on this host whose process
    is gone, or one older than two hours, is stale.
-1. **Plan and ask.** `--fix` plans every repair, prints what each will change, which
-   services it will stop and remove, which it expects to recreate and their restart
-   window, and asks once before applying (`-y` answers in advance; a non-terminal
-   without `-y` is refused). Declining reports `fix` WARN "Changes declined."
+1. **Plan and ask.** At a terminal, `--fix` first asks the operator-choice questions
+   ([questions](#questions-at-a-terminal)). It then plans every repair, prints what
+   each will change, which services it will stop and remove, which it expects to
+   recreate and their restart window, and asks once before applying (`-y` answers in
+   advance; a non-terminal without `-y` is refused). Declining reports `fix` WARN
+   "Changes declined."
 2. **Validate first.** Every repair validates its result with `docker compose config`
    before writing; a changed proxy file mounted by Caddy or Nginx is validated as
    well, in a throwaway container.
@@ -128,6 +130,42 @@ Each step reports itself as a fix: `fix:remove-services`, `fix:recreate` and
 naming `./start.sh logs <service>`; the files stay changed (their originals are
 archived) and the resident pair is left as it is. Every remaining step is a
 `./start.sh` command.
+
+### Questions at a terminal
+
+Some findings are the operator's choice rather than a defect. With a terminal on
+stdin and without `-y`, `COMPOSER_ASSUME_YES` or `--json`, `check --fix` asks them as
+short questions before it plans, each with the recommended answer as the default
+(Enter) and `s` to skip. A script, the resident pair and an Operations panel apply
+are never asked: they keep the WARN and its advice, as without the questions.
+
+| Question | Asked when | Answer |
+| --- | --- | --- |
+| How do users reach this server? | [`front-proxy`](#front-proxy) is a WARN because `DLUX_FRONT_PROXY` is unset, and the stack is generated (or `--fix` makes it so) | `1` a front proxy: its addresses or CIDR ranges, space-separated, checked as Caddy would; `2` directly: empty (Caddy trusts no proxy); `3` (default) keep trusting every private network: `private_ranges` |
+| Which updates may the app request? | the secrets file does not set `DLUX_UPDATE_POLICY`, or sets an unknown value | `all`, `inline` or `none`; the default is the policy in force (`all` when unset) |
+| Switch Redis to snapshots? | [`redis-persistence`](#redis-persistence) is a WARN and Redis is not crash-looping on a damaged file | `y` (default) rewrites its command; `n` keeps the append-only file |
+
+An answer that sets a value adds it to the plan: the confirmation lists the line, and
+after it the line is written to the secrets file in place, before any other repair,
+so the front-proxy repair validates Caddy with it. Only that line changes (it is added
+at the end when missing), the file keeps its owner, mode and line endings, and it is
+not copied to the archive (`fix:secrets`). The services that read the value are then
+recreated with it ([after the repairs](#after-the-repairs)). A value with a quote,
+`#`, a backslash or a line break is refused. A skipped question changes nothing and
+is asked again next time.
+
+### The summary
+
+A `--fix` run that prints text ends with three lists, each shown only when it has
+entries:
+
+- **Healthy now:** the findings its repairs fixed, and the findings that were not OK
+  before and are now.
+- **Still needs you:** every finding and fix that is still not OK, each with one
+  `./start.sh` command: the one its advice names (`./start.sh logs <service>` for a
+  service that keeps restarting), else `./start.sh check --fix` when that repairs it,
+  else `./start.sh check` once its advice is followed.
+- **Skipped by your choice:** the questions you skipped.
 
 ## Findings
 
@@ -363,8 +401,9 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   `caddy` service with its own value). **WARN** unset; the stack cannot be told yet
   (pending `--fix`); or the config cannot be read. **FAIL** an invalid or quoted value.
 - **`--fix`:** rewrites an unmodified generated stack to read `DLUX_FRONT_PROXY`;
-  refuses while the value is invalid or quoted. Details:
-  [trusted front proxies](proxy.md#trusted-front-proxies).
+  refuses while the value is invalid or quoted. At a terminal, it first asks how users
+  reach the server and writes the answer ([questions](#questions-at-a-terminal)).
+  Details: [trusted front proxies](proxy.md#trusted-front-proxies).
 
 #### `relay-env`
 
@@ -410,7 +449,9 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 - **`--fix`:** adds `DLUX_UPDATE_POLICY: "${DLUX_UPDATE_POLICY:-all}"` to the
   `x-environment` block and to both resident services, and archives the original
   under `.xclude/composer-check/<UTC>/update-policy/`. The services that read it
-  are then recreated ([after the repairs](#after-the-repairs)). Details:
+  are then recreated ([after the repairs](#after-the-repairs)). At a terminal, it
+  asks for the policy when the secrets file does not set one
+  ([questions](#questions-at-a-terminal)). Details:
   [what the application may request](updates.md#what-the-application-may-request).
 
 #### `redis-persistence`
@@ -422,7 +463,8 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   alone. **WARN** `--appendonly yes`: a hard power-off or a killed Docker can leave
   the append-only file half-written, and Redis then refuses to start and restarts in
   a loop ([`redis-aof-corrupt`](#redis-aof-corrupt)).
-- **Fix:** `check --fix`.
+- **Fix:** `check --fix`; at a terminal it asks first, and `n` keeps the append-only
+  file.
 - **`--fix`:** rewrites the `redis` command in the Compose file that sets it, in that
   file's own style (flow list, block list or string): `--appendonly no`, then
   `--save 60 1` unless the command already has a `--save`, `--appendfsync` dropped and
