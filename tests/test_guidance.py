@@ -334,6 +334,44 @@ class SummaryTests(unittest.TestCase):
         })
         self.assertEqual(report["skipped"], [("update-policy", "./start.sh check --fix asks again")])
 
+    def test_a_repair_whose_finding_still_warns_is_not_healthy(self):
+        from composer.guidance import summary
+
+        results = [{"level": WARN, "name": "front-proxy", "message": "unset",
+                    "fix": "Set DLUX_FRONT_PROXY, then apply it with './start.sh'."}]
+        report = summary(results, [{"level": OK, "name": "fix:front-proxy", "message": "files migrated"}], [],
+                         before={"front-proxy": WARN})
+
+        self.assertEqual(report["healthy"], [])
+        self.assertEqual(report["still"], [("front-proxy", "./start.sh")])
+
+    def test_a_confirmed_fix_rechecks_the_warnings_it_may_have_cleared(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "caddy"]
+        launcher._fix_confirmed = True
+        results = [
+            {"level": WARN, "name": "front-proxy", "message": "pending"},
+            {"level": WARN, "name": "update-policy", "message": "not passed"},
+            {"level": WARN, "name": "fetch-metadata", "message": "not a repair"},
+        ]
+        with patch.object(launcher, "_check_front_proxy", return_value={"level": OK, "name": "front-proxy", "message": "ok"}), \
+                patch.object(launcher, "_check_update_policy", return_value={"level": OK, "name": "update-policy", "message": "ok"}), \
+                patch.object(launcher, "_check_fetch_metadata", side_effect=AssertionError("not re-run")), \
+                patch.object(launcher, "_check_pending_recreate", return_value=None):
+            launcher._recheck_after_fix(results)
+
+        self.assertEqual([r["level"] for r in results], [OK, OK, WARN])
+
+    def test_warnings_are_not_rechecked_when_nothing_was_applied(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web"]
+        launcher._fix_confirmed = False
+        results = [{"level": WARN, "name": "front-proxy", "message": "pending"}]
+        with patch.object(launcher, "_check_front_proxy", side_effect=AssertionError("not re-run")):
+            launcher._recheck_after_fix(results)
+
+        self.assertEqual(results[0]["level"], WARN)
+
     def test_it_prints_after_a_text_fix_run_only(self):
         launcher = DockerComposeLauncher()
         launcher._fix_summary = {"healthy": ["front-proxy"], "still": [("registry-login", "./start.sh")],

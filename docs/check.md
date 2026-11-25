@@ -74,7 +74,11 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
 6. **Re-check.** After a repair the services are discovered again. `resident-commands`,
    `docker-proxy`, `stored-files`, `stack-schema`, `task-worker`, `services` and
    `redis-aof-corrupt` are checked again when they failed, and `app-permissions`
-   (deep) and `redis-persistence` always are; the new results replace the old.
+   (deep) and `redis-persistence` always are. After a run that applied repairs,
+   `front-proxy`, `update-policy`, `relay-env`, `removed-services`, `proxy-routes`
+   and `topology` are checked again when they were not OK, and so is
+   `pending-recreate`. The new results replace the old, so the summary reports what
+   is healthy now.
 
 The obsolete-services cleanup stops and removes only the detected obsolete
 containers with a targeted `docker compose rm -sf`, applies the service and route
@@ -159,8 +163,8 @@ is asked again next time.
 A `--fix` run that prints text ends with three lists, each shown only when it has
 entries:
 
-- **Healthy now:** the findings its repairs fixed, and the findings that were not OK
-  before and are now.
+- **Healthy now:** the findings its repairs fixed (a repair whose finding still warns
+  is not counted), and the findings that were not OK before and are now.
 - **Still needs you:** every finding and fix that is still not OK, each with one
   `./start.sh` command: the one its advice names (`./start.sh logs <service>` for a
   service that keeps restarting), else `./start.sh check --fix` when that repairs it,

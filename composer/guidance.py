@@ -257,10 +257,12 @@ def summary(
 ) -> Dict[str, List]:
     """``{"healthy": [name], "still": [(name, command)], "skipped": [(name, command)]}`` for a ``--fix`` run."""
     before = before or {}
+    now = {entry.get("name"): entry.get("level") for entry in results}
+    # A repair counts once its finding reads OK (or has gone); one that still warns still needs you.
     healthy = [
         str(entry["name"])[len("fix:"):] for entry in fixes
         if entry.get("level") == "ok" and str(entry.get("name", "")).startswith("fix:")
-        and entry["name"] not in _LIFECYCLE
+        and entry["name"] not in _LIFECYCLE and now.get(str(entry["name"])[len("fix:"):], "ok") == "ok"
     ]
     healthy += [
         str(entry["name"]) for entry in results

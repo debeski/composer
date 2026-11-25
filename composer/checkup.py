@@ -1706,36 +1706,59 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             # The fixes may have added or removed services.
             self.discover_services(silent=True)
         if args.fix:
-            # A repaired finding must not fail the run: report the file as it now stands.
-            rechecks = {
-                "resident-commands": self._check_resident_commands,
-                "docker-proxy": self._check_docker_proxy,
-                # A successful fix:stored-files must not leave the stale SECURITY
-                # FAIL behind, or `check --fix` exits 1 after fixing it.
-                "stored-files": self._check_media_privacy,
-                "app-permissions": lambda: self._check_app_permissions(deep=True),
-                "stack-schema": self._check_stack_schema,
-                "task-worker": self._check_task_worker,
-                "services": self._check_service_states,
-                "redis-aof-corrupt": lambda: self._check_redis_aof(report_ok=True),
-                "redis-persistence": self._check_redis_persistence,
-            }
-            always = ("app-permissions", "redis-persistence")
-            for index, result in enumerate(results):
-                if result["name"] in rechecks and (result["level"] == FAIL or result["name"] in always):
-                    rechecked = rechecks[result["name"]]()
-                    if rechecked is not None:
-                        results[index] = rechecked
-            if self._fix_confirmed and self.services:
-                # The lifecycle step may have replaced the containers a record named, or left new ones behind.
-                pending = self._check_pending_recreate()
-                results[:] = [result for result in results if result["name"] != "pending-recreate"]
-                if pending is not None:
-                    at = next((i for i, r in enumerate(results) if r["name"] == "versions"), len(results))
-                    results.insert(at, pending)
+            self._recheck_after_fix(results)
             self._fix_summary = guidance.summary(results, fixed, self._skipped_questions, before=before)
 
         return results, fixed
+
+    def _recheck_after_fix(self, results: List[Dict[str, Any]]) -> None:
+        """Report, in place, what the repairs changed as it now stands.
+
+        A repaired FAIL must not fail the run. After a confirmed run the WARNs a
+        repair clears by rewriting files are read again too, so the summary says
+        what is healthy now rather than what was.
+        """
+        rechecks = {
+            "resident-commands": self._check_resident_commands,
+            "docker-proxy": self._check_docker_proxy,
+            # A successful fix:stored-files must not leave the stale SECURITY
+            # FAIL behind, or `check --fix` exits 1 after fixing it.
+            "stored-files": self._check_media_privacy,
+            "app-permissions": lambda: self._check_app_permissions(deep=True),
+            "stack-schema": self._check_stack_schema,
+            "task-worker": self._check_task_worker,
+            "services": self._check_service_states,
+            "redis-aof-corrupt": lambda: self._check_redis_aof(report_ok=True),
+            "redis-persistence": self._check_redis_persistence,
+        }
+        always = ("app-permissions", "redis-persistence")
+        confirmed = bool(getattr(self, "_fix_confirmed", False))
+        refreshed = {
+            "front-proxy": self._check_front_proxy,
+            "update-policy": self._check_update_policy,
+            "relay-env": self._check_relay_env,
+            "removed-services": self._check_removed_services,
+            "proxy-routes": self._check_proxy_routes,
+            "topology": self._check_topology,
+        } if confirmed else {}
+        for index, result in enumerate(results):
+            name, level = result.get("name"), result.get("level")
+            if name in rechecks and (level == FAIL or name in always):
+                check = rechecks[name]
+            elif name in refreshed and level != OK:
+                check = refreshed[name]
+            else:
+                continue
+            rechecked = check()
+            if rechecked is not None:
+                results[index] = rechecked
+        if confirmed and self.services:
+            # The lifecycle step may have replaced the containers a record named, or left new ones behind.
+            pending = self._check_pending_recreate()
+            results[:] = [result for result in results if result.get("name") != "pending-recreate"]
+            if pending is not None:
+                at = next((i for i, r in enumerate(results) if r.get("name") == "versions"), len(results))
+                results.insert(at, pending)
 
     def run_checkup(self, args) -> int:
         results, fixed = self.collect_checkup(args)
@@ -3088,6 +3111,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         logs = f"./start.sh logs {' '.join(waited)}"
         if services:
             ok, out, err = self.recreate_containers(list(services))
+            finish = getattr(self, "finish_progress_line", None)
+            if finish is not None:
+                finish()
             if not ok:
                 detail = (str(err or out or "").strip().splitlines() or ["Compose gave no reason"])[-1][:500]
                 return False, _result(
