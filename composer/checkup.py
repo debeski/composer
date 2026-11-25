@@ -1011,6 +1011,38 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return _result(FAIL, "fix:app-permissions", f"{detail}. {counts['errors']} entries could not be changed.")
         return _result(OK, "fix:app-permissions", detail + ".")
 
+    def _check_update_policy(self) -> Dict[str, Any]:
+        """Which update paths the deployment allows, and whether every reader receives the policy."""
+        from . import update_policy, update_policy_env
+
+        name = "update-policy"
+        raw = self._compose_env_with_secrets().get(update_policy.ENV_KEY, "")
+        policy, valid = update_policy.normalize(raw)
+        allowed = {
+            update_policy.ALL: "every update path is allowed",
+            update_policy.INLINE: "DjangoLux inline updates only; application image and Composer updates "
+            "are refused unless run from this shell",
+            update_policy.NONE: "updates are refused unless run from this shell; checks and rollbacks still run",
+        }[policy]
+        detail = f"Update policy {policy}: {allowed}."
+        missing = update_policy_env.missing_services(self.compose_config_json() or {})
+        if missing:
+            return _result(
+                WARN, name,
+                f"{detail} The stack does not pass {update_policy.ENV_KEY} to {', '.join(missing)}, so "
+                + ("the resident pair cannot enforce it." if set(missing) & set(update_policy_env.RESIDENTS)
+                   else "DjangoLux cannot show or apply it."),
+                fix=f"Run 'composer check --fix': it passes {update_policy.ENV_KEY} to web, worker, composer-agent "
+                "and composer-executor. Then run './start.sh' to recreate them.",
+            )
+        if not valid:
+            return _result(
+                WARN, name,
+                f"{detail} {update_policy.ENV_KEY} has an unknown value in the secrets file, so it counts as none.",
+                fix=f"Set {update_policy.ENV_KEY} to all, inline or none in the secrets file, then run './start.sh'.",
+            )
+        return _result(OK, name, detail)
+
     def _check_relay_env(self) -> Dict[str, Any]:
         """Can DjangoLux's Email step see the SMTP relay's settings (all but the password)?"""
         name = "relay-env"
@@ -1614,6 +1646,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             registry_check = self._check_registry_login()
             if registry_check is not None:
                 results.append(registry_check)
+            results.append(self._check_update_policy())
             permissions = self._check_app_permissions(deep=bool(args.deep or args.fix))
             if permissions is not None:
                 results.append(permissions)
@@ -1892,6 +1925,13 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             relay_env_files = relay_env.inspect(Path("."), self._maintenance_compose_files())["files"]
         except (OSError, ValueError):
             relay_env_files = []
+        from . import update_policy_env
+        from .stack_cleanup import StackCleanupError
+
+        try:
+            update_policy_files = update_policy_env.preview(".", self._maintenance_compose_files())["files"]
+        except (OSError, ValueError, StackCleanupError):
+            update_policy_files = []
         grant_access = getattr(self, "_app_permissions_state", None) or {}
         if not (grant_access.get("wrong") or grant_access.get("missing")):
             grant_access = {}
@@ -1909,6 +1949,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 and not maintenance_legacy and not maintenance_unpublished and not needs_install and not needs_init_containers
                 and not needs_restart_labels and not needs_dev_override_migration and not media_exposed
                 and not needs_worker and not front_proxy_files and not relay_env_files and not grant_access
+                and not update_policy_files
                 and not stamp_repair["files"] and not retire_celery):
             return fixes
         consequences = []
@@ -1944,6 +1985,13 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "smtp-relay; web only learns whether one is set. The Compose configuration is validated, the "
                 "original archived under .xclude/composer-check/ and running web, worker and smtp-relay "
                 "recreated."
+            )
+        if update_policy_files:
+            consequences.append(
+                "Pass DLUX_UPDATE_POLICY from the secrets file to web, worker, composer-agent and "
+                "composer-executor (" + ", ".join(update_policy_files) + "), so the resident pair enforces "
+                "the deployment update policy. The original is archived under .xclude/composer-check/; "
+                "run './start.sh' afterwards to recreate the services."
             )
         if grant_access:
             consequences.append(
@@ -2206,6 +2254,22 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 fixes.append(_result(OK, "fix:front-proxy", f"{detail}. Backup: {outcome['backup_root']}"))
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:front-proxy", str(exc)))
+
+        if update_policy_files:
+            from . import update_policy_env
+            from .stack_cleanup import StackCleanupError
+
+            try:
+                outcome = update_policy_env.migrate(".", self._maintenance_compose_files())
+                if outcome["applied"]:
+                    fixes.append(_result(
+                        OK, "fix:update-policy",
+                        "web, worker, composer-agent and composer-executor read DLUX_UPDATE_POLICY: "
+                        + ", ".join(outcome["files"])
+                        + ". Run './start.sh' to recreate them. Backup: " + outcome["backup_root"],
+                    ))
+            except (OSError, ValueError, StackCleanupError) as exc:
+                fixes.append(_result(FAIL, "fix:update-policy", str(exc)))
 
         if relay_env_files:
             from .stack_cleanup import StackCleanupError

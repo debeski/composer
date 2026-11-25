@@ -205,6 +205,7 @@ def _dry_run_repairs(launcher, args):
     repairs.extend(_maintenance_repair(launcher))
     repairs.extend(_front_proxy_repair(launcher))
     repairs.extend(_relay_env_repair(launcher))
+    repairs.extend(_update_policy_repair(launcher))
     repairs.extend(_worker_repair(launcher))
     repairs.extend(_celery_repair(launcher))
     repairs.extend(_stamp_repair(launcher))
@@ -263,6 +264,25 @@ def _relay_env_repair(launcher):
         return []
     return [{
         "name": "relay-env",
+        "files": outcome["files"],
+        "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
+        "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
+    }]
+
+
+def _update_policy_repair(launcher):
+    """DLUX_UPDATE_POLICY passed to web, worker and the resident pair, which `check --fix` sets up."""
+    from . import update_policy_env
+
+    try:
+        outcome = update_policy_env.preview(".", launcher._maintenance_compose_files())
+    except Exception as exc:
+        return [{"name": "update-policy", "files": [], "diff": "",
+                 "note": redact_text(str(exc))[:MAX_MESSAGE_CHARS]}]
+    if not outcome["files"]:
+        return []
+    return [{
+        "name": "update-policy",
         "files": outcome["files"],
         "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
         "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
@@ -520,6 +540,10 @@ def _update_resident_pair(runtime, request, self_request_path=None) -> dict:
     """
     from . import executor_client
 
+    from . import update_policy
+
+    if not update_policy.allows(update_policy.COMPOSER_UPDATE):
+        raise ValueError(update_policy.refusal(update_policy.COMPOSER_UPDATE))
     token = str(request.get("token") or "")
     resident = _resident_update_status(runtime)
     if resident["checked"] and not resident["update_available"]:

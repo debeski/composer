@@ -51,6 +51,10 @@ executor answers with bare fields
 ([the agent's reads](executor-hardening.md#the-agents-reads)). The generated Compose block starts it; it is not for
 interactive use.
 
+Both halves read `DLUX_UPDATE_POLICY` from their own environment and refuse the
+update requests it does not allow, the executor even when the agent asks for them
+([what the application may request](updates.md#what-the-application-may-request)).
+
 ## `agent watch`
 
 `composer agent watch --trigger-file PATH [--interval N]` is the plain watcher that

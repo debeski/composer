@@ -16,6 +16,7 @@ import sys
 from typing import Dict, Tuple
 
 from . import executor_protocol as proto
+from . import update_policy
 from .service_selection import (
     PROTECTED_LIFECYCLE_SERVICES,
     PROTECTED_RESTART_SERVICES,
@@ -400,6 +401,23 @@ def _read_image_digests(operation_id: str, image: str) -> Dict:
     return result
 
 
+#: Executor ops the deployment update policy can refuse, and what each one is.
+#: The executor is the Docker authority, so it refuses on its own reading of the
+#: policy even when the agent asking it has been compromised.
+_POLICY_OPS = {
+    "recovery_deploy": update_policy.IMAGE_UPDATE,
+    "agent_update": update_policy.COMPOSER_UPDATE,
+    "dlux_package_apply": update_policy.INLINE_UPDATE,
+}
+
+
+def _policy_refusal(op: str) -> str:
+    kind = _POLICY_OPS.get(op)
+    if kind and not update_policy.allows(kind):
+        return update_policy.refusal(kind)
+    return ""
+
+
 def default_operation_handler(request: Dict) -> Dict:
     """Map a validated executor request to a redacted typed result."""
     operation_id = request["operation_id"]
@@ -419,6 +437,9 @@ def default_operation_handler(request: Dict) -> Dict:
         from .ops import _run_check_local
 
         return _fit_check_result(operation_id, _run_check_local(runtime))
+    refused = _policy_refusal(op)
+    if refused:
+        return proto.build_result(operation_id, "rejected", exit_code=update_policy.REFUSED_EXIT, detail=refused)
     if op in ("start", "stop"):
         exit_code, detail = _run_service_lifecycle(operation_id, payload["service"], op)
     elif op == "restart":

@@ -350,6 +350,20 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   (resident-block repair); nothing for the other outcomes. Details:
   [private registry](private-registry.md#the-registry-login-finding).
 
+#### `update-policy`
+
+- **Checks:** which update requests the deployment allows (`DLUX_UPDATE_POLICY`
+  in the secrets file), and that the resolved stack passes it to `web`, `worker`,
+  `composer-agent` and `composer-executor`.
+- **OK** names the policy. **WARN** a reader does not receive it (the resident pair
+  cannot enforce it, or DjangoLux cannot show it); an unknown value, which counts
+  as `none`.
+- **`--fix`:** adds `DLUX_UPDATE_POLICY: "${DLUX_UPDATE_POLICY:-all}"` to the
+  `x-environment` block and to both resident services, and archives the original
+  under `.xclude/composer-check/<UTC>/update-policy/`. It recreates nothing: run
+  `./start.sh` afterwards. Details:
+  [what the application may request](updates.md#what-the-application-may-request).
+
 #### `app-permissions`
 
 - **Checks:** that the uid the app image runs as can use the data its services mount

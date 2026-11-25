@@ -567,7 +567,7 @@ class MaintenanceRepairPreviewTests(unittest.TestCase):
                 patch("composer.agent_installer.migrate_dlux_updater", return_value={"files": []}), \
                 patch("composer.agent_installer.normalize_restart_labels", return_value={"files": []}):
             repairs, digest = _dry_run_repairs(self.launcher, SimpleNamespace(file=None))
-        self.assertEqual([r["name"] for r in repairs], ["maintenance-page", "front-proxy", "relay-env"])
+        self.assertEqual([r["name"] for r in repairs], ["maintenance-page", "front-proxy", "relay-env", "update-policy"])
         self.assertEqual(repairs[0]["files"], [".proxy/Caddyfile", "compose.yml"])
         self.assertIn("/_dlux/maintenance/", repairs[0]["diff"])
         self.assertEqual(repairs[1]["files"], [".proxy/Caddyfile", "compose.yml"])

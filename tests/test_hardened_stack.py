@@ -148,8 +148,8 @@ class DropDockerProxyTests(unittest.TestCase):
         self.contents = f"name: decrees\nservices:\n  web:\n    image: x\n\n{self.block}\n\nvolumes:\n  dlux_runtime:\n"
         old = self.block.replace(COMPOSER_AGENT_START + "\n", COMPOSER_AGENT_START + "\n" + self.PROXY, 1)
         old = old.replace(
-            '    environment:\n      WEB_IMAGE: "debeski/decrees:latest"\n      COMPOSER_REGISTRY_USERNAME: "${COMPOSER_REGISTRY_USERNAME:-}"\n      COMPOSER_REGISTRY_PASSWORD: "${COMPOSER_REGISTRY_PASSWORD:-}"\n      COMPOSER_REGISTRY_HOST: "${COMPOSER_REGISTRY_HOST:-}"\n      COMPOSER_CONTROL_URL',
-            '    environment:\n      DOCKER_HOST: "tcp://docker-socket-proxy:2375"\n      WEB_IMAGE: "debeski/decrees:latest"\n      COMPOSER_REGISTRY_USERNAME: "${COMPOSER_REGISTRY_USERNAME:-}"\n      COMPOSER_REGISTRY_PASSWORD: "${COMPOSER_REGISTRY_PASSWORD:-}"\n      COMPOSER_REGISTRY_HOST: "${COMPOSER_REGISTRY_HOST:-}"\n      COMPOSER_CONTROL_URL', 1)
+            '    environment:\n      WEB_IMAGE: "debeski/decrees:latest"\n      COMPOSER_REGISTRY_USERNAME: "${COMPOSER_REGISTRY_USERNAME:-}"\n      COMPOSER_REGISTRY_PASSWORD: "${COMPOSER_REGISTRY_PASSWORD:-}"\n      COMPOSER_REGISTRY_HOST: "${COMPOSER_REGISTRY_HOST:-}"\n      DLUX_UPDATE_POLICY: "${DLUX_UPDATE_POLICY:-all}"\n      COMPOSER_CONTROL_URL',
+            '    environment:\n      DOCKER_HOST: "tcp://docker-socket-proxy:2375"\n      WEB_IMAGE: "debeski/decrees:latest"\n      COMPOSER_REGISTRY_USERNAME: "${COMPOSER_REGISTRY_USERNAME:-}"\n      COMPOSER_REGISTRY_PASSWORD: "${COMPOSER_REGISTRY_PASSWORD:-}"\n      COMPOSER_REGISTRY_HOST: "${COMPOSER_REGISTRY_HOST:-}"\n      DLUX_UPDATE_POLICY: "${DLUX_UPDATE_POLICY:-all}"\n      COMPOSER_CONTROL_URL', 1)
         old = old.replace(
             "    depends_on:\n      composer-executor:",
             "    depends_on:\n      docker-socket-proxy:\n        condition: service_started\n      composer-executor:", 1)

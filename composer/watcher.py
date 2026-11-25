@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .agent_protocol import redact_text
-from . import registry_login, safe_files
+from . import registry_login, safe_files, update_policy
 from .registry import (
     DEFAULT_VERSION_LABEL,
     LOGIN_REQUIRED,
@@ -736,7 +736,12 @@ class WatchRuntime:
         label = f"{mode} {version}".strip()
         print(f"⟳ dlux package update {token} — {label}", flush=True)
         run = runner or self.run_package_child
-        exit_code, launch_error = run(mode, version, token, operation_id)
+        if mode == "apply" and not update_policy.allows(update_policy.INLINE_UPDATE):
+            exit_code = update_policy.REFUSED_EXIT
+            launch_error = update_policy.refusal(update_policy.INLINE_UPDATE)
+            print(f"✖ {launch_error}", flush=True)
+        else:
+            exit_code, launch_error = run(mode, version, token, operation_id)
         if exit_code != 0:
             fallback = launch_error or (
                 f"Composer dlux {mode} exited with status {exit_code}."
@@ -795,11 +800,17 @@ class WatchRuntime:
         if operation_id:
             child_env["COMPOSER_OPERATION_ID"] = operation_id
         launch_error = ""
-        try:
-            exit_code = subprocess.run(self.child, env=child_env).returncode
-        except (OSError, subprocess.SubprocessError) as exc:
-            exit_code = 127
-            launch_error = f"Composer update process could not start: {exc}"
+        if not update_policy.allows(update_policy.IMAGE_UPDATE):
+            # Answered like a failed run, so DjangoLux leaves maintenance and says why.
+            exit_code = update_policy.REFUSED_EXIT
+            launch_error = update_policy.refusal(update_policy.IMAGE_UPDATE)
+            print(f"✖ {launch_error}", flush=True)
+        else:
+            try:
+                exit_code = subprocess.run(self.child, env=child_env).returncode
+            except (OSError, subprocess.SubprocessError) as exc:
+                exit_code = 127
+                launch_error = f"Composer update process could not start: {exc}"
         if exit_code != 0:
             fallback_error = launch_error or f"Composer update process exited with status {exit_code}."
             if self.args.status_file:
