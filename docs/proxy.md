@@ -88,7 +88,8 @@ The trusted range is the optional `DLUX_FRONT_PROXY` line in the secrets file
 | anything else (`none`, comma-separated lists) | Caddy does not start | FAIL, naming the entries |
 | a quoted value (`"10.0.0.5 10.0.0.6"`) | `./start.sh` passes the quotes to Caddy, which does not start with a quoted list | FAIL |
 
-The WARN names three ways out:
+The WARN names three ways out (at a terminal, `check --fix` asks which one applies
+and writes the answer: [questions](check.md#questions-at-a-terminal)):
 
 - set `DLUX_FRONT_PROXY` to the front proxy's address(es);
 - set it empty when users reach the server directly;

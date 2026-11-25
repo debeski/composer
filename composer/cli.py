@@ -33,10 +33,11 @@ def parse_args():
             "      -v/--volumes and -p/--purge are destructive and ask for\n"
             "      confirmation unless -y/--yes is given (alias: composer down).\n"
             "      Run 'composer stop --help' for details.\n"
-            "  check [--fix] [-y] [--deep] [--json] [--beta|--stable] [-f FILE] [-d]\n"
+            "  check [--fix] [-y] [--no-recreate] [--deep] [--json] [--beta|--stable] [-f FILE] [-d]\n"
             "      Doctor: verify Docker, compose config, secrets, required env,\n"
-            "      topology, and version drift; --fix applies safe migrations,\n"
-            "      --deep relays the in-container checks. Run 'composer check --help'.\n"
+            "      topology, and version drift; --fix applies safe migrations and\n"
+            "      recreates what they change, --deep relays the in-container checks.\n"
+            "      Run 'composer check --help'.\n"
             "  agent check [--json] [--availability-file PATH] [IMAGE ...]\n"
             "      Compare remote tag digests with locally pulled images without\n"
             "      pulling or deploying. Defaults to COMPOSER_CHECK_IMAGE,\n"
@@ -306,7 +307,8 @@ def parse_check_args(argv):
         help=(
             "Apply guarded safe fixes (remove obsolete pgadmin/db-backup services "
             "and their legacy proxy routes, and migrate a legacy "
-            "composer-updater topology)"
+            "composer-updater topology), then stop and remove the services they "
+            "drop and recreate the running services they change"
         ),
     )
     parser.add_argument(
@@ -315,6 +317,17 @@ def parse_check_args(argv):
         action="store_true",
         help="Confirm --fix actions up front instead of being prompted",
     )
+    parser.add_argument(
+        "--no-recreate",
+        action="store_true",
+        help=(
+            "With --fix, change the files only: running services keep their definition until "
+            "'./start.sh' recreates them (dropped services are still removed)"
+        ),
+    )
+    # An Operations panel apply runs inside the resident pair (the executor
+    # starts it with this flag): it must not recreate the pair under itself.
+    parser.add_argument("--resident-apply", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--deep",
         action="store_true",

@@ -105,8 +105,10 @@ because `worker` could not start. The fix:
   it once the rest is done.
 
 The merged configuration is validated with `docker compose config` before anything
-is written, the originals are archived under `.xclude/composer-check/`, and nothing
-is recreated: the next deploy (`./start.sh`, or `./start.sh -d -b`) starts `worker`.
+is written and the originals are archived under `.xclude/composer-check/`. On a
+running stack the same `check --fix` then starts `worker` and recreates the services
+whose definition changed ([after the repairs](check.md#after-the-repairs)); in
+development, `./start.sh -d -b` builds and starts it.
 The step runs after the others, so a stack still on the old layout (`dlux-updater`,
 `tools.dlux_runtime_supervisor`, the project's maintenance page) reaches schema 5 in
 one `check --fix`.
@@ -174,9 +176,11 @@ topology, and `check --fix` runs whichever migration applies:
 | legacy `composer-updater` | replaces it with the hardened pair and removes the proxy's container |
 | agent-only (`composer-agent` with a write-enabled proxy) | hardens it: adds `composer-executor`, removes the proxy and its container |
 | hardened pair with a leftover `docker-socket-proxy` | removes the proxy, its container, the agent's `DOCKER_HOST` and its `depends_on` entry ([no Docker proxy](executor-hardening.md#no-docker-proxy)) |
-| no Composer service at all | installs `composer-executor` and `composer-agent`, and prints the command that starts them |
+| no Composer service at all | installs `composer-executor` and `composer-agent`, and starts them when the stack is running |
 | `composer-agent` and `composer-updater` together | fails closed |
 
+Each migration stops and removes the containers of the services it drops before it
+writes, and the same run recreates the pair ([after the repairs](check.md#after-the-repairs)).
 Legacy `composer-updater` stacks still deploy until then.
 
 ### By hand: `agent enable` and `executor enable`
@@ -204,9 +208,12 @@ Both commands use the same guardrails:
 
 - the default is a dry run that prints the exact Compose diff;
 - apply accepts only a recognized DLUX-generated block, validates the candidate with
-  `docker compose config` before writing, preserves the original under
+  `docker compose config` before writing, stops and removes the containers of the
+  services it drops (`composer-updater`, `docker-socket-proxy`) while the file still
+  names them, preserves the original under
   `.xclude/dlux-agent-bootstrap/<timestamp>/`, and replaces it atomically; re-runs
-  are idempotent;
+  are idempotent. It recreates nothing itself and prints `./start.sh` as the step
+  that does;
 - the replacement keeps the deployment's own topology: the networks attached to the
   outgoing `docker-socket-proxy` (carried to `composer-executor`) and
   `composer-updater` services, that block's
@@ -239,6 +246,13 @@ Besides the schema steps and topologies, `check --fix`:
 - with `-d`, validates and normalizes `compose.dev.yml` against the merged base/dev
   config: it removes dev `dlux-updater` overrides, keeps the runtime mount of
   `worker` and `celery` writable, and disables inline updates in dev containers.
+- switches Redis from an append-only file to RDB snapshots (`--appendonly no
+  --save 60 1`, its other flags kept), which DjangoLux scaffolds: a hard stop can
+  leave a half-written append-only file Redis refuses to start from, while a snapshot
+  is renamed into place only when complete
+  ([`redis-persistence`](check.md#redis-persistence)). A Redis already restarting on
+  a damaged file has the files moved aside on its own volume first
+  ([`redis-aof-corrupt`](check.md#redis-aof-corrupt)).
 
 Proxy, permission, relay and registry repairs are listed per finding in the
 [`check` reference](check.md).

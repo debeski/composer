@@ -110,10 +110,12 @@ and `--since`/`--until` bound the window. `composer logs` is an alias.
 
 ### `check`
 
-`composer check [--fix] [-y] [--deep] [--deep-service S] [--deep-command CMD] [--json] [--beta|--stable] [--allow-unverified-composer] [-f FILE] [-d]`
+`composer check [--fix] [-y] [--no-recreate] [--deep] [--deep-service S] [--deep-command CMD] [--json] [--beta|--stable] [--allow-unverified-composer] [-f FILE] [-d]`
 
-Diagnoses the outside of a stack, and with `--fix` repairs it. Reference, with every
-finding: [`composer check`](check.md).
+Diagnoses the outside of a stack, and with `--fix` repairs it, then stops and removes
+the services the repairs drop and recreates the running services they change
+(`--no-recreate` leaves that to `./start.sh`). Reference, with every finding:
+[`composer check`](check.md).
 
 ### `app-permissions revert`
 
@@ -190,7 +192,9 @@ Pass `-y`/`--yes` (or set `COMPOSER_ASSUME_YES=1`) to confirm up front. The guar
 fails **closed**: when stdin is not a terminal (CI, cron, a piped script) and neither
 the flag nor the variable is set, the run is refused instead of silently proceeding.
 `composer check --fix` and `check --beta`/`--stable` ask the same way before they
-apply. The variable reaches a native `python -m composer` run only: the
+apply. At a terminal, `check --fix` also asks a few short operator-choice questions
+first ([questions](check.md#questions-at-a-terminal)); with `-y`,
+`COMPOSER_ASSUME_YES` or no terminal it asks none. The variable reaches a native `python -m composer` run only: the
 `start.sh`/`start.ps1` wrappers do not pass it into the deployer container, so a
 non-interactive run through them needs the flag (`./start.sh check --fix -y`).
 

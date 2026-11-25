@@ -63,6 +63,11 @@ Composer resolves secrets automatically. It looks for a plaintext env file
 (`.env`, `secrets/.env`, then `.secrets/.env`) and uses the first one that supplies
 every variable the compose file requires.
 
+`check --fix` writes to that file only when an operator at a terminal answers one
+of its questions (`DLUX_FRONT_PROXY`, `DLUX_UPDATE_POLICY`): the one line is set in
+place, the file keeps its owner, mode and line endings, and it is never copied
+([questions](check.md#questions-at-a-terminal)).
+
 ### The resident pair keeps the values
 
 A resident `composer-agent` must retain the same values for later image-update

@@ -208,7 +208,7 @@ def _run_check_fix(operation_id: str, payload: Dict) -> Tuple[int, str]:
         "-v", "/var/run/docker.sock:/var/run/docker.sock",
         "-w", project_dir,
         *secret_flags(project_dir=project_dir),
-        self_image(_capture), "check", "--fix", "-y",
+        self_image(_capture), "check", "--fix", "-y", "--resident-apply",
     ]
     return _run(argv, _op_env(operation_id))
 

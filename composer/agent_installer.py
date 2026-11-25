@@ -12,6 +12,7 @@ from typing import Any, Dict
 
 from .constants import DEFAULT_MIGRATOR_COMMAND, POST_START_LABEL
 from .registry_login import KEYS as REGISTRY_LOGIN_KEYS, REGISTRY_ROLES as REGISTRY_LOGIN_ROLES
+from .stack_lifecycle import APPLY_COMMAND
 
 
 COMPOSER_UPDATER_START = "  # Composer-as-updater start"
@@ -1174,8 +1175,9 @@ def _apply_stack_migration(
         detail = str(validation.stderr or "").strip()[:1000]
         suffix = f": {detail}" if detail else ""
         raise AgentInstallError(f"docker compose config failed; no project files were changed{suffix}")
-    if changed and DOCKER_SOCKET_PROXY in _service_names(contents) and DOCKER_SOCKET_PROXY not in _service_names(updated):
-        _remove_proxy_container(project_root, compose_path, name_match.group(1), command_runner)
+    dropped = sorted(_service_names(contents) - _service_names(updated)) if changed else []
+    if dropped:
+        _remove_service_containers(project_root, compose_path, name_match.group(1), dropped, command_runner)
     if changed:
         backup_root = _backup_root(project_root)
         backup_path = backup_root / compose_path.relative_to(project_root)
@@ -1187,17 +1189,20 @@ def _apply_stack_migration(
     return result
 
 
-def _remove_proxy_container(project_root: Path, compose_path: Path, project: str, command_runner) -> None:
-    """Stop and remove docker-socket-proxy's container before its service leaves the file.
+def _remove_service_containers(
+    project_root: Path, compose_path: Path, project: str, services, command_runner
+) -> None:
+    """Stop and remove the containers of services the transform drops, before the file loses them.
 
-    A deploy does not remove orphans, so a proxy left running would stay
-    reachable from the agent on docker_proxy, docker.sock and all. Removed while
-    the file still defines it, as Compose can only name a service it knows; on
-    failure nothing is written.
+    A deploy does not remove orphans: a docker-socket-proxy left running would
+    stay reachable from the agent on docker_proxy, docker.sock and all, and a
+    retired dlux-updater or composer-updater would keep running its old loop.
+    Removed while the file still defines them, as Compose can only name a
+    service it knows; volumes are kept. On failure nothing is written.
     """
     removal = command_runner(
         ["docker", "compose", "--project-directory", str(project_root), "-p", project,
-         "-f", str(compose_path), "rm", "-s", "-f", DOCKER_SOCKET_PROXY],
+         "-f", str(compose_path), "rm", "-s", "-f", *services],
         cwd=str(project_root),
         check=False,
         capture_output=True,
@@ -1206,8 +1211,9 @@ def _remove_proxy_container(project_root: Path, compose_path: Path, project: str
     if removal.returncode != 0:
         detail = str(removal.stderr or removal.stdout or "").strip()[:500]
         suffix = f": {detail}" if detail else ""
+        noun = "container" if len(services) == 1 else "containers"
         raise AgentInstallError(
-            f"Could not remove the docker-socket-proxy container; no project files were changed{suffix}"
+            f"Could not remove the {', '.join(services)} {noun}; no project files were changed{suffix}"
         )
 
 
@@ -1233,7 +1239,7 @@ def _apply_dev_override_migration(
     result: Dict[str, Any] = {
         "applied": False,
         "files": changed,
-        "command": "docker compose -f compose.yml -f compose.dev.yml up -d" if changed else "",
+        "command": "./start.sh -d" if changed else "",
         "backup_root": "",
         "warnings": [],
     }
@@ -1298,9 +1304,7 @@ def enable_agent(
         project_dir,
         compose_file=compose_file,
         transform=_transform_compose,
-        redeploy_command=(
-            "docker compose up -d --force-recreate composer-executor composer-agent"
-        ),
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1324,7 +1328,7 @@ def migrate_dlux_init_containers(
         project_dir,
         compose_file=compose_file,
         transform=_transform_to_init_containers,
-        redeploy_command=f"docker compose up -d --force-recreate {host} web",
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1370,9 +1374,7 @@ def install_composer_stack(
         project_dir,
         compose_file=compose_file,
         transform=_transform_to_installed,
-        redeploy_command=(
-            "docker compose up -d composer-executor composer-agent"
-        ),
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1393,9 +1395,7 @@ def enable_executor(
         project_dir,
         compose_file=compose_file,
         transform=_transform_to_hardened,
-        redeploy_command=(
-            "docker compose up -d --force-recreate composer-executor composer-agent"
-        ),
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1416,7 +1416,7 @@ def enable_post_start_label(
         project_dir,
         compose_file=compose_file,
         transform=_transform_post_start_to_label,
-        redeploy_command="docker compose up -d --force-recreate web",
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1482,7 +1482,7 @@ def migrate_dlux_updater(
         project_dir,
         compose_file=compose_file,
         transform=_migrate_dlux_updater_command,
-        redeploy_command="docker compose up -d --force-recreate dlux-updater",
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1504,7 +1504,7 @@ def normalize_restart_labels(
         project_dir,
         compose_file=compose_file,
         transform=_ensure_restart_labels,
-        redeploy_command="docker compose up -d",
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1657,9 +1657,7 @@ def switch_composer_channel(
         project_dir,
         compose_file=compose_file,
         transform=lambda contents, _slug: retag_composer_image(contents, image),
-        redeploy_command=(
-            "docker compose up -d --force-recreate " + " ".join(CHANNEL_SWITCH_SERVICES)
-        ),
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1711,9 +1709,7 @@ def pin_composer_image(
             project_dir,
             compose_file=compose_file,
             transform=lambda contents, _slug: retag_composer_image(contents, pin.ref),
-            redeploy_command=(
-                "docker compose up -d --force-recreate " + " ".join(CHANNEL_SWITCH_SERVICES)
-            ),
+            redeploy_command=APPLY_COMMAND,
             apply=apply,
             allow_unverified_dlux=True,
             include_diff=include_diff,

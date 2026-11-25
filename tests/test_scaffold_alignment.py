@@ -58,6 +58,23 @@ class ScaffoldAlignmentTests(unittest.TestCase):
 
         self.assertTrue(any("stack-schema" in problem for problem in problems), problems)
 
+    def test_a_fresh_project_keeps_redis_snapshots(self):
+        results = {r["name"]: r for r in self.gate.inspect(self.project)["results"]}
+
+        self.assertEqual(results["redis-persistence"]["level"], "ok", results.get("redis-persistence"))
+
+    def test_an_append_only_redis_is_caught(self):
+        compose = self.project / "compose.yml"
+        text = compose.read_text(encoding="utf-8")
+        old = '"--appendonly", "no", "--save", "60", "1"'
+        self.assertIn(old, text)
+        compose.write_text(text.replace(old, '"--appendonly", "yes", "--appendfsync", "everysec"'), encoding="utf-8")
+
+        problems = self.gate.verdict(self.gate.inspect(self.project))
+
+        self.assertTrue(any(p.startswith("WARN redis-persistence") for p in problems), problems)
+        self.assertTrue(any(p.startswith("REPAIR redis-persistence") for p in problems), problems)
+
     def test_a_stale_wrapper_is_caught(self):
         wrapper = self.project / "start.sh"
         wrapper.write_text(wrapper.read_text(encoding="utf-8") + "# stale\n", encoding="utf-8")
