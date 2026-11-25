@@ -1,0 +1,15 @@
+# Accepted findings for `trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL`.
+# Each entry names why it is accepted and expires, so the gate fails again and the
+# finding is rechecked. See docs/RELEASING.md#image-vulnerability-scan.
+
+# docker-buildx-plugin 0.39.1 (newest release; buildx master still pins it):
+# github.com/moby/go-archive v0.2.0, link following during tar extraction.
+# Composer reaches buildx only to build the project's own source (`-b`, `-d`);
+# deploy hosts and the resident pair pull images and never build.
+CVE-2026-17106 exp:2027-01-31
+
+# docker-compose-plugin 5.8.0 (newest release; compose main still pins it):
+# golang.org/x/net v0.60.0, denial of service on crafted HTML.
+# Compose parses no untrusted HTML in Composer's use (it reads compose files,
+# registry JSON and build output).
+CVE-2026-78661 exp:2027-01-31

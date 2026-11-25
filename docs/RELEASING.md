@@ -113,6 +113,29 @@ refuse the exact Composer the pair was tested against — which may not exist ye
 smoke-tests the CLI, builds the Docker image (no push) to catch `Dockerfile`
 breakage before a release, and runs `scripts/smoke-test.sh` against that image.
 
+## Image vulnerability scan
+
+Before a release, scan the built image with the same gate the Composer image has
+been held to since 1.10.3:
+
+```bash
+trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 \
+  --ignorefile .trivyignore debeski/composer:vX.Y.Z
+```
+
+It is a manual step: neither workflow runs Trivy. `.trivyignore` lists the findings
+accepted for now, each with its reason and an expiry date (`exp:`). After that date
+the gate fails on it again, and the finding is rechecked: drop the entry once Docker
+ships a fixed plugin, or renew it with the reason still true.
+
+| CVE | Where | Why it is accepted | Expires |
+| --- | --- | --- | --- |
+| CVE-2026-17106 | `docker-buildx-plugin` 0.39.1 (`moby/go-archive` v0.2.0, link following in tar extraction) | buildx runs only to build the project's own source (`-b`, `-d`); deploy hosts and the resident pair never build. It is kept because without it `--build` falls back to the deprecated classic builder. | 2027-01-31 |
+| CVE-2026-78661 | `docker-compose-plugin` 5.8.0 (`golang.org/x/net` v0.60.0, denial of service on crafted HTML) | Compose parses no untrusted HTML in Composer's use. | 2027-01-31 |
+
+Both plugins were the newest upstream releases when the exceptions were recorded
+(2026-11-25), and neither upstream main branch had bumped the library yet.
+
 ## Versioning note
 
 Versions `v0.1.0`–`v0.1.13` are the pre-CI history (the old `Decrypter`/manual
