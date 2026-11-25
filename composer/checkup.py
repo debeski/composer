@@ -16,6 +16,7 @@ from . import (
     maintenance_migration,
     maintenance_page,
     media_migration,
+    redis_persistence,
     relay_env,
     stack_layout,
     stack_lifecycle,
@@ -1657,6 +1658,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             if registry_check is not None:
                 results.append(registry_check)
             results.append(self._check_update_policy())
+            redis = self._check_redis_persistence()
+            if redis is not None:
+                results.append(redis)
             permissions = self._check_app_permissions(deep=bool(args.deep or args.fix))
             if permissions is not None:
                 results.append(permissions)
@@ -1669,6 +1673,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             states = self._check_service_states()
             if states is not None:
                 results.append(states)
+            corrupt = self._check_redis_aof()
+            if corrupt is not None:
+                results.append(corrupt)
             pending = self._check_pending_recreate()
             if pending is not None:
                 results.append(pending)
@@ -1702,9 +1709,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "stack-schema": self._check_stack_schema,
                 "task-worker": self._check_task_worker,
                 "services": self._check_service_states,
+                "redis-aof-corrupt": lambda: self._check_redis_aof(report_ok=True),
+                "redis-persistence": self._check_redis_persistence,
             }
+            always = ("app-permissions", "redis-persistence")
             for index, result in enumerate(results):
-                if result["name"] in rechecks and (result["level"] == FAIL or result["name"] == "app-permissions"):
+                if result["name"] in rechecks and (result["level"] == FAIL or result["name"] in always):
                     rechecked = rechecks[result["name"]]()
                     if rechecked is not None:
                         results[index] = rechecked
@@ -1959,6 +1969,18 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             update_policy_files = update_policy_env.preview(".", self._maintenance_compose_files())["files"]
         except (OSError, ValueError, StackCleanupError):
             update_policy_files = []
+        redis_files: List[str] = []
+        if redis_persistence.SERVICE in set(self.services):
+            try:
+                redis_plan = redis_persistence.preview(".", self._maintenance_compose_files())
+            except (OSError, ValueError, StackCleanupError) as exc:
+                redis_plan = {"files": [], "note": f"Cannot plan the redis command rewrite: {exc}"}
+            redis_files = redis_plan["files"]
+            if not redis_files and redis_plan["note"]:
+                fixes.append(_result(WARN, "redis-persistence", redis_plan["note"]))
+        redis_corrupt = any(
+            result.get("name") == "redis-aof-corrupt" and result.get("level") == FAIL for result in results
+        )
         grant_access = getattr(self, "_app_permissions_state", None) or {}
         if not (grant_access.get("wrong") or grant_access.get("missing")):
             grant_access = {}
@@ -1998,6 +2020,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             update_policy_files=update_policy_files,
             grant_access=grant_access,
             stamp_repair=stamp_repair,
+            redis_files=redis_files,
+            redis_corrupt=redis_corrupt,
         )
         plan["pending"] = bool(
             legacy or obsolete or proxy_routes or needs_hardening or needs_agent_block_migration
@@ -2005,7 +2029,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             or maintenance_legacy or maintenance_unpublished or needs_install or needs_init_containers
             or needs_restart_labels or needs_dev_override_migration or media_exposed or needs_worker
             or front_proxy_files or relay_env_files or grant_access or update_policy_files
-            or stamp_repair["files"] or retire_celery
+            or stamp_repair["files"] or retire_celery or redis_files or redis_corrupt
         )
         return plan
 
@@ -2039,6 +2063,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         update_policy_files = plan["update_policy_files"]
         grant_access = plan["grant_access"]
         stamp_repair = plan["stamp_repair"]
+        redis_files = plan["redis_files"]
+        redis_corrupt = plan["redis_corrupt"]
         consequences = []
         if maintenance_legacy:
             consequences.append(
@@ -2072,6 +2098,20 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "smtp-relay; web only learns whether one is set. The Compose configuration is validated, the "
                 "original archived under .xclude/composer-check/ and running web, worker and smtp-relay "
                 "recreated."
+            )
+        if redis_corrupt:
+            consequences.append(
+                "Recover Redis from its damaged append-only file: stop redis, move the append-only files on its "
+                "volume aside into aof-archive/<UTC time>/ on the same volume (kept, not deleted) with a one-off "
+                "container that has no network, switch it to snapshots and recreate it. Users sign in once more."
+            )
+        if redis_files:
+            consequences.append(
+                "Switch Redis from an append-only file to RDB snapshots (" + ", ".join(redis_files) + "): "
+                "--appendonly no --save 60 1, its other flags kept. A hard stop can leave a half-written "
+                "append-only file Redis refuses to start from; a snapshot is renamed into place only when "
+                "complete. Up to about a minute of cache and sessions can be lost after a crash. The original is "
+                "archived under .xclude/composer-check/ and redis is recreated."
             )
         if update_policy_files:
             consequences.append(
@@ -2384,6 +2424,24 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             except (OSError, ValueError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:relay-env", str(exc)))
 
+        if redis_corrupt:
+            fixes.append(self._recover_redis_aof())
+        if redis_files:
+            from .stack_cleanup import StackCleanupError
+
+            try:
+                outcome = redis_persistence.migrate(
+                    ".", self._maintenance_compose_files(), environment=self._compose_env_with_secrets()
+                )
+                if outcome["applied"]:
+                    fixes.append(_result(
+                        OK, "fix:redis-persistence",
+                        "Redis keeps RDB snapshots (--appendonly no --save 60 1, its other flags kept): "
+                        + ", ".join(outcome["files"]) + f". Backup: {outcome['backup_root']}",
+                    ))
+            except (OSError, StackCleanupError) as exc:
+                fixes.append(_result(FAIL, "fix:redis-persistence", str(exc)))
+
         if obsolete or proxy_routes:
             from .stack_cleanup import StackCleanupError, remove_obsolete_services
 
@@ -2643,6 +2701,123 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:stack-schema", str(exc)))
         return fixes
+
+    # --- Redis persistence -------------------------------------------------------
+
+    def _redis_definition(self) -> Optional[Dict[str, Any]]:
+        if redis_persistence.SERVICE not in set(self.services):
+            return None
+        config = self.compose_config_json() or {}
+        services = config.get("services") if isinstance(config.get("services"), dict) else {}
+        definition = services.get(redis_persistence.SERVICE)
+        return definition if isinstance(definition, dict) else None
+
+    def _check_redis_persistence(self) -> Optional[Dict[str, Any]]:
+        """Does Redis keep RDB snapshots, which a hard stop cannot leave half-written?"""
+        definition = self._redis_definition()
+        if definition is None:
+            return None
+        name = "redis-persistence"
+        state = redis_persistence.classify(definition.get("command"))
+        if state == redis_persistence.AOF:
+            return _result(
+                WARN, name,
+                "Redis keeps its data in an append-only file (--appendonly yes). A hard power-off or a killed Docker "
+                "can leave that file half-written, and Redis then refuses to start: it restarts in a loop and the "
+                "app loses its cache and sessions until someone repairs the file.",
+                fix="Run 'composer check --fix': it switches Redis to RDB snapshots (--appendonly no --save 60 1, "
+                "its other flags kept), archives the Compose file and recreates redis. A snapshot is renamed into "
+                "place only when complete; after a crash up to about a minute of cache and sessions is lost, so a "
+                "few users sign in again.",
+            )
+        if state == redis_persistence.CUSTOM:
+            return _result(
+                OK, name,
+                "Redis runs its own configuration file or command; Composer leaves its persistence alone.",
+            )
+        return _result(
+            OK, name,
+            "Redis keeps RDB snapshots, not an append-only file: a hard stop leaves the last complete snapshot.",
+        )
+
+    def _check_redis_aof(self, report_ok: bool = False) -> Optional[Dict[str, Any]]:
+        """Is redis crash-looping on an append-only file it cannot read?"""
+        name = "redis-aof-corrupt"
+        service = redis_persistence.SERVICE
+        if service not in set(self.services):
+            return None
+        rows = [row for row in self._container_states() if row["service"] == service]
+        down = [row for row in rows if self._crash_looping(row) or row["state"] in ("exited", "dead")]
+        quiet = _result(OK, name, "Redis is not restarting on a damaged append-only file.") if report_ok else None
+        if not down:
+            return quiet
+        ok, out, err = self.run_docker_compose(["logs", "--no-color", "--tail", "60", service], timeout=20)
+        text = f"{out or ''}\n{err or ''}"
+        match = redis_persistence.AOF_ERROR.search(text)
+        if not match:
+            return quiet
+        line = next((line for line in text.splitlines() if redis_persistence.AOF_ERROR.search(line)), match.group(0))
+        return _result(
+            FAIL, name,
+            "Redis cannot start: its append-only file is damaged, most likely by a hard stop while it was "
+            f"writing, so it restarts in a loop and the app cannot reach its cache or sessions. Redis says: "
+            f"{line.split('|', 1)[-1].strip()[:240]}",
+            fix="Run 'composer check --fix': it stops redis, moves the append-only files aside into aof-archive/ "
+            "on the same volume (kept, not deleted) with a one-off container that has no network, switches Redis "
+            "to RDB snapshots and recreates it. Redis starts from its last snapshot, or empty, so users sign in "
+            "once more.",
+        )
+
+    def _recover_redis_aof(self) -> Dict[str, Any]:
+        """Stop redis and move its append-only files aside on its own volume; redis is then recreated."""
+        from datetime import datetime, timezone
+
+        name = "fix:redis-aof-corrupt"
+        service = redis_persistence.SERVICE
+        forced = getattr(self, "_fix_force_recreate", None)
+        if forced is None:
+            forced = self._fix_force_recreate = set()
+        # Switching to snapshots alone ends the loop, since Redis then ignores the
+        # damaged files: redis is recreated even if they cannot be moved aside.
+        forced.add(service)
+        with self._deployment_environment():
+            model = self.compose_config_json() or {}
+            services = model.get("services") if isinstance(model.get("services"), dict) else {}
+            redis = services.get(service) if isinstance(services.get(service), dict) else {}
+            self.run_docker_compose(["stop", service], timeout=60)
+            volume, target = redis_persistence.data_volume(model, redis.get("command"))
+            image = str(redis.get("image") or "")
+            if not volume or not image:
+                return _result(
+                    WARN, name,
+                    "redis keeps no named volume at its data directory, so there are no append-only files to move "
+                    "aside; it is recreated on snapshots.",
+                )
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            try:
+                argv = redis_persistence.move_aside_argv(volume, image, stamp, target, redis.get("command"))
+            except redis_persistence.RedisPersistenceError as exc:
+                return _result(FAIL, name, f"{exc} redis is recreated on snapshots, which ignore them.")
+            ok, out, err = self.run_command(argv, timeout=120)
+        archive = f"{redis_persistence.ARCHIVE_DIR}/{stamp}/"
+        if not ok:
+            detail = (str(err or out or "").strip().splitlines() or ["no reason given"])[-1][:300]
+            return _result(
+                FAIL, name,
+                f"Could not move the append-only files on {volume} aside ({detail}). redis is recreated on "
+                "snapshots, which ignore them.",
+            )
+        moved = redis_persistence.moved_names(out)
+        if not moved:
+            return _result(
+                OK, name,
+                f"No append-only file was left on {volume}; redis is recreated on snapshots.",
+            )
+        return _result(
+            OK, name,
+            f"Moved {', '.join(moved)} aside into {archive} on the {volume} volume (kept, not deleted). Redis "
+            "starts from its last snapshot, or empty, so users sign in once more.",
+        )
 
     # --- After the repairs: the running stack follows the files ------------------
 

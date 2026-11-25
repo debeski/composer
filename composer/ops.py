@@ -211,6 +211,7 @@ def _dry_run_repairs(launcher, args, results=None):
     repairs.extend(_front_proxy_repair(launcher))
     repairs.extend(_relay_env_repair(launcher))
     repairs.extend(_update_policy_repair(launcher))
+    repairs.extend(_redis_repairs(launcher, results))
     repairs.extend(_worker_repair(launcher))
     repairs.extend(_celery_repair(launcher))
     repairs.extend(_stamp_repair(launcher))
@@ -305,6 +306,34 @@ def _update_policy_repair(launcher):
         "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
         "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
     }]
+
+
+def _redis_repairs(launcher, results=None):
+    """Redis on RDB snapshots, and the recovery of a damaged append-only file, which `check --fix` applies."""
+    from . import redis_persistence
+
+    entries = []
+    if any(isinstance(r, dict) and r.get("name") == "redis-aof-corrupt" and r.get("level") == "fail"
+           for r in results or []):
+        entries.append({
+            "name": "redis-aof-corrupt", "files": [], "diff": "",
+            "note": "Stops redis and moves its damaged append-only files aside into aof-archive/<UTC time>/ on "
+            "its own volume (kept, not deleted), with a one-off container that has no network; redis is then "
+            "recreated on snapshots. Users sign in once more.",
+        })
+    try:
+        outcome = redis_persistence.preview(".", launcher._maintenance_compose_files())
+    except Exception as exc:
+        return entries + [{"name": "redis-persistence", "files": [], "diff": "",
+                           "note": redact_text(str(exc))[:MAX_MESSAGE_CHARS]}]
+    if outcome["files"] or outcome["note"]:
+        entries.append({
+            "name": "redis-persistence",
+            "files": outcome["files"],
+            "diff": redact_text(outcome["diff"])[:MAX_DIFF_CHARS],
+            "note": redact_text(outcome["note"])[:MAX_MESSAGE_CHARS],
+        })
+    return entries
 
 
 def _worker_repair(launcher):

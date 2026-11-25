@@ -246,6 +246,13 @@ Besides the schema steps and topologies, `check --fix`:
 - with `-d`, validates and normalizes `compose.dev.yml` against the merged base/dev
   config: it removes dev `dlux-updater` overrides, keeps the runtime mount of
   `worker` and `celery` writable, and disables inline updates in dev containers.
+- switches Redis from an append-only file to RDB snapshots (`--appendonly no
+  --save 60 1`, its other flags kept), which DjangoLux scaffolds: a hard stop can
+  leave a half-written append-only file Redis refuses to start from, while a snapshot
+  is renamed into place only when complete
+  ([`redis-persistence`](check.md#redis-persistence)). A Redis already restarting on
+  a damaged file has the files moved aside on its own volume first
+  ([`redis-aof-corrupt`](check.md#redis-aof-corrupt)).
 
 Proxy, permission, relay and registry repairs are listed per finding in the
 [`check` reference](check.md).

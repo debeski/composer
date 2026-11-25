@@ -62,16 +62,17 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    cannot write stops the repair before anything is validated, archived or written,
    with a message naming the file and the `chmod`/`chown` that fixes it.
 4. **Apply in a fixed order:** wrappers, maintenance page, stored files, front proxy,
-   relay settings, obsolete services and routes, init containers, dev compose,
+   update policy, relay settings, Redis recovery, Redis snapshots, obsolete services
+   and routes, init containers, dev compose,
    Composer install, `agent enable`, `executor enable`, resident block, updater
    runtime, post-start label, restart labels, app permissions, task worker,
    `celery` removal, stamp repair. A failed obsolete-services cleanup stops there.
 5. **Finish what changed.** The stack is brought to the files the repairs wrote, in the
    same run ([after the repairs](#after-the-repairs)).
 6. **Re-check.** After a repair the services are discovered again. `resident-commands`,
-   `docker-proxy`, `stored-files`, `stack-schema`, `task-worker` and `services` are
-   checked again when they failed, and `app-permissions` always is (deep); the new
-   results replace the old.
+   `docker-proxy`, `stored-files`, `stack-schema`, `task-worker`, `services` and
+   `redis-aof-corrupt` are checked again when they failed, and `app-permissions`
+   (deep) and `redis-persistence` always are; the new results replace the old.
 
 The obsolete-services cleanup stops and removes only the detected obsolete
 containers with a targeted `docker compose rm -sf`, applies the service and route
@@ -412,6 +413,29 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   are then recreated ([after the repairs](#after-the-repairs)). Details:
   [what the application may request](updates.md#what-the-application-may-request).
 
+#### `redis-persistence`
+
+- **Checks:** how the resolved `redis` service keeps its data, from its command. No
+  finding when the stack has no `redis` service.
+- **OK** RDB snapshots: `--appendonly no`, or no `--appendonly` (Redis's default),
+  or a command or configuration file of the project's own, which Composer leaves
+  alone. **WARN** `--appendonly yes`: a hard power-off or a killed Docker can leave
+  the append-only file half-written, and Redis then refuses to start and restarts in
+  a loop ([`redis-aof-corrupt`](#redis-aof-corrupt)).
+- **Fix:** `check --fix`.
+- **`--fix`:** rewrites the `redis` command in the Compose file that sets it, in that
+  file's own style (flow list, block list or string): `--appendonly no`, then
+  `--save 60 1` unless the command already has a `--save`, `--appendfsync` dropped and
+  every other flag kept, so the previous scaffold's line becomes
+  `["redis-server", "--appendonly", "no", "--save", "60", "1", "--maxmemory", "500mb", "--maxmemory-policy", "allkeys-lru"]`.
+  It validates the result with `docker compose config`, refuses when another file
+  still turns the append-only file on, archives the original under
+  `.xclude/composer-check/<UTC>/redis-persistence/`, and `redis` is recreated
+  ([after the repairs](#after-the-repairs)). A snapshot is written to a temporary
+  file and renamed only when complete, so a crash leaves the previous good one; up to
+  about a minute of cache and sessions can be lost, so a few users sign in again.
+  Application data is in Postgres. With `-y` the rewrite applies.
+
 #### `app-permissions`
 
 - **Checks:** that the uid the app image runs as can use the data its services mount
@@ -463,6 +487,26 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 - **Fix:** read the service's log (`./start.sh logs <service>`) and fix the cause;
   for celery in an image without Celery, `check --fix` ([`celery`](#celery)).
 - **`--fix`:** nothing for this finding; re-checked after the repairs.
+
+#### `redis-aof-corrupt`
+
+- **Checks:** when `redis` is restarting, crash-looping (as for [`services`](#services))
+  or exited, the last 60 lines of its log, for Redis's own words about an append-only
+  file it cannot load ("Bad file format reading the append only file", "Unrecoverable
+  error reading the append only file", an invalid AOF manifest, a `redis-check-aof`
+  hint). No finding otherwise.
+- **FAIL** Redis refuses its damaged append-only file, so the app cannot reach its
+  cache or sessions. The message quotes Redis's line.
+- **Fix:** `check --fix`.
+- **`--fix`:** stops `redis`, then moves the append-only files (`appendonlydir/` and
+  `appendonly.aof`, or the names `--appenddirname`/`--appendfilename` give) into
+  `aof-archive/<UTC time>/` on the same volume, with a one-off container from the
+  redis image (`docker run --rm --network none --pull never`) that mounts only that
+  volume: nothing is deleted. It switches Redis to snapshots
+  ([`redis-persistence`](#redis-persistence)) and recreates `redis` even with
+  `--no-recreate`, since it is down until then. Redis starts from its last snapshot,
+  or empty, so users sign in once more. When the files cannot be moved, `redis` is
+  still recreated on snapshots, which ignore them.
 
 #### `pending-recreate`
 
