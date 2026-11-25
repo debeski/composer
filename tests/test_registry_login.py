@@ -326,7 +326,6 @@ RESIDENT = '''services:
   composer-agent:
     image: debeski/composer:latest
     environment:
-      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
       WEB_IMAGE: "${WEB_IMAGE:-example/app:latest}"
       COMPOSER_REGISTRY_HOST: "registry.office.test"
   # DjangoLux Composer agent end
@@ -352,7 +351,7 @@ class StackLinesTests(unittest.TestCase):
         block = agent_installer._hardened_stack("demo", {"web"}, {
             "web_image": "${WEB_IMAGE:-example/app:latest}",
             "version_label": "org.demo.dlux_baked_version",
-            "proxy_networks": [], "agent_networks": [],
+            "executor_networks": [], "agent_networks": [],
         })
         self.assertEqual(agent_installer._ensure_registry_login(block), block)
         for key in registry_login.KEYS:

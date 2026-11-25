@@ -310,20 +310,110 @@ def _fit_check_result(operation_id: str, report: Dict) -> Dict:
     return result
 
 
+# How many RepoDigests an image read returns, and how long each may be.
+_MAX_REPO_DIGESTS = 32
+_MAX_REPO_DIGEST_CHARS = 300
+
+
+def _compose_runtime(payload: Dict):
+    """The runtime a read or check uses, or None when its file leaves the project."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    filename = payload.get("file") or None
+    if filename and Path(filename).resolve().parent != Path.cwd().resolve():
+        return None
+    return SimpleNamespace(args=SimpleNamespace(file=filename, dev=payload.get("dev", False)))
+
+
+def _read_services_state(operation_id: str, runtime) -> Dict:
+    from .ops import _service_states, _stack_launcher
+
+    result = proto.build_result(operation_id, "succeeded")
+    result["services"] = _service_states(_stack_launcher(runtime))
+    return result
+
+
+def _fit_logs_result(operation_id: str, text: str) -> Dict:
+    """A ``logs_tail`` result whose oldest lines give way until it fits one frame.
+
+    JSON escapes non-ASCII text to six bytes a character, so a tail that is under
+    the character cap can still be over the frame limit.
+    """
+    result = proto.build_result(operation_id, "succeeded")
+    result["logs"] = text
+    while text:
+        excess = proto.encoded_size(result) - proto.MAX_EXECUTOR_MESSAGE_BYTES
+        if excess <= 0:
+            break
+        text = text[max(1, excess // 6 + 1):]
+        newline = text.find("\n")
+        text = text[newline + 1:] if newline >= 0 else ""
+        result["logs"] = text
+    return result
+
+
+def _read_logs_tail(operation_id: str, runtime, payload: Dict) -> Dict:
+    from .ops import _read_logs, _service_states, _stack_launcher
+
+    launcher = _stack_launcher(runtime)
+    service = payload["service"]
+    if service and service not in {row["name"] for row in _service_states(launcher)}:
+        return proto.build_result(operation_id, "rejected", exit_code=2,
+                                  detail=f"'{service}' is not a service of this deployment.")
+    return _fit_logs_result(operation_id, _read_logs(launcher, service, payload["lines"]))
+
+
+def _readable_images() -> set:
+    """The images whose local digest the agent may ask for: the ones it checks."""
+    return {
+        value.strip()
+        for value in (os.environ.get("WEB_IMAGE"), os.environ.get("COMPOSER_CHECK_IMAGE"))
+        if value and value.strip()
+    }
+
+
+def _compose_images() -> set:
+    from .watcher import _compose_check_images
+
+    try:
+        return set(_compose_check_images(""))
+    except Exception:
+        return set()
+
+
+def _read_image_digests(operation_id: str, image: str) -> Dict:
+    from .watcher import _docker_repo_digests
+
+    if image not in _readable_images() and image not in _compose_images():
+        return proto.build_result(operation_id, "rejected", exit_code=2,
+                                  detail="That image is not one this deployment checks for updates.")
+    digests = _docker_repo_digests(image)
+    result = proto.build_result(operation_id, "succeeded")
+    result["repo_digests"] = None if digests is None else [
+        str(entry)[:_MAX_REPO_DIGEST_CHARS] for entry in digests[:_MAX_REPO_DIGESTS]
+    ]
+    return result
+
+
 def default_operation_handler(request: Dict) -> Dict:
     """Map a validated executor request to a redacted typed result."""
     operation_id = request["operation_id"]
     op = request["op"]
     payload = request.get("payload", {})
-    if op == 'deployment_check':
-        from types import SimpleNamespace
-        from pathlib import Path
+    if op == "image_digests":
+        return _read_image_digests(operation_id, payload["image"])
+    if op in ("deployment_check", "services_state", "logs_tail"):
+        runtime = _compose_runtime(payload)
+        if runtime is None:
+            return proto.build_result(operation_id, "rejected", exit_code=2,
+                                      detail="Compose file must stay within the project directory.")
+        if op == "services_state":
+            return _read_services_state(operation_id, runtime)
+        if op == "logs_tail":
+            return _read_logs_tail(operation_id, runtime, payload)
         from .ops import _run_check_local
 
-        filename = payload.get('file') or None
-        if filename and Path(filename).resolve().parent != Path.cwd().resolve():
-            return proto.build_result(operation_id, 'rejected', exit_code=2, detail='Compose file must stay within the project directory.')
-        runtime = SimpleNamespace(args=SimpleNamespace(file=filename, dev=payload['dev']))
         return _fit_check_result(operation_id, _run_check_local(runtime))
     if op in ("start", "stop"):
         exit_code, detail = _run_service_lifecycle(operation_id, payload["service"], op)

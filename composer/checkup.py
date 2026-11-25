@@ -284,11 +284,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 # Hardened: Docker authority is isolated in the executor; the
                 # network-facing agent has none. The proxy, if present, is the
                 # agent's read-only path (health/availability).
-                note = "Hardened topology: composer-executor holds Docker authority; composer-agent has none."
-                if has_proxy:
-                    note += " docker-socket-proxy provides the agent's read-only Docker access."
-                else:
-                    note += " No docker-socket-proxy (agent performs no Docker reads)."
+                note = (
+                    "Hardened topology: composer-executor holds Docker authority and answers "
+                    "composer-agent's reads; composer-agent has no Docker access."
+                )
                 return _result(OK, "topology", note)
             # Legacy-agent: valid and supported (backwards compatible, so this
             # never FAILs), but the network-facing agent still drives Docker
@@ -307,7 +306,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 fix=(
                     "Harden with 'composer check --fix' (runs executor enable) or "
                     "'composer executor enable --apply': moves Docker authority off the network-facing "
-                    "agent into composer-executor and demotes docker-socket-proxy to read-only. "
+                    "agent into composer-executor and removes docker-socket-proxy. "
                     "See docs/executor-hardening.md."
                 ),
             )
@@ -325,8 +324,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "updates to Composer, so a Composer service is part of the deployment — not "
             "only the deploying machine. This stack has no update path.",
             fix=(
-                "Run 'composer check --fix' to install docker-socket-proxy, "
-                "composer-executor and composer-agent."
+                "Run 'composer check --fix' to install composer-executor and composer-agent."
             ),
         )
 
@@ -371,7 +369,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
     PROXY_WRITE_SWITCHES = ("POST", "EXEC")
 
     def _check_docker_proxy(self) -> Optional[Dict[str, Any]]:
-        """FAIL when docker-socket-proxy accepts writes. None when unreadable."""
+        """FAIL when docker-socket-proxy accepts writes; WARN when it is only a leftover
+        beside composer-executor. None when there is none, or it is unreadable."""
         if "docker-socket-proxy" not in set(self.services):
             return None
         ok, out, _err = self.run_docker_compose(["config", "--format", "json"], timeout=20)
@@ -389,8 +388,24 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             if str(environment.get(name, "0")).strip().strip("'\"").lower()
             not in {"0", "false", "no", "off", ""}
         ]
-        if not enabled:
-            return _result(OK, "docker-proxy", "docker-socket-proxy is read-only (POST and EXEC off).")
+        if enabled:
+            return self._writable_proxy(enabled)
+        if "composer-executor" in set(self.services):
+            return _result(
+                WARN,
+                "docker-proxy",
+                "docker-socket-proxy lets composer-agent read every container's environment "
+                "(database password, SECRET_KEY) and files. composer-agent no longer uses it: "
+                "composer-executor answers its Docker reads.",
+                fix=(
+                    "Run 'composer check --fix': it removes the proxy's container and its service "
+                    "from the generated Composer block. A proxy outside that block must be removed "
+                    "by hand."
+                ),
+            )
+        return _result(OK, "docker-proxy", "docker-socket-proxy is read-only (POST and EXEC off).")
+
+    def _writable_proxy(self, enabled) -> Dict[str, Any]:
         return _result(
             FAIL,
             "docker-proxy",
@@ -399,7 +414,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "on this host.",
             fix=(
                 "Run 'composer check --fix': it hardens the stack so composer-executor holds "
-                "Docker authority and the proxy stays read-only. A proxy outside the generated "
+                "Docker authority and removes the proxy. A proxy outside the generated "
                 "Composer block must be edited by hand."
             ),
         )
@@ -1868,9 +1883,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if legacy:
             consequences.extend(
                 [
-                    "Migrate composer-updater to the hardened topology: composer-agent, "
-                    "composer-executor (sole Docker-write authority) and a read-only, "
-                    "digest-pinned docker-socket-proxy.",
+                    "Migrate composer-updater to the hardened topology: composer-agent and "
+                    "composer-executor (sole Docker authority). The docker-socket-proxy "
+                    "container is removed.",
                 ]
             )
         if needs_init_containers:
@@ -1918,8 +1933,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         if needs_install:
             consequences.append(
-                "Install the Composer services this stack is missing (docker-socket-proxy, "
-                "composer-executor, composer-agent) plus their volumes and the docker_proxy "
+                "Install the Composer services this stack is missing (composer-executor, "
+                "composer-agent) plus their volumes and the docker_proxy "
                 "network. DjangoLux 1.8.0 hands inline updates to Composer, so without them "
                 "this deployment has no update path."
             )
@@ -1927,9 +1942,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             consequences.extend(
                 [
                     "Harden composer-agent into the executor topology: add composer-executor "
-                    "(sole Docker-write authority), demote docker-socket-proxy to read-only, and "
-                    "keep the agent read-only.",
-                    "Recreate docker-socket-proxy, composer-executor, and composer-agent.",
+                    "(sole Docker authority) and remove docker-socket-proxy, its container "
+                    "included.",
+                    "Recreate composer-executor and composer-agent.",
                 ]
             )
         if needs_agent_block_migration:
@@ -1937,8 +1952,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "Normalize the generated Composer resident block: use nested "
                 "agent/executor run commands; give composer-executor cap_add: "
                 "DAC_OVERRIDE (replacing DAC_READ_SEARCH) so it can read the project's "
-                "0600 .secrets/.env to deploy; pin docker-socket-proxy by digest and "
-                "switch off its write endpoints; pass the private-registry login "
+                "0600 .secrets/.env to deploy; remove docker-socket-proxy (its container, "
+                "service, composer-agent's DOCKER_HOST and depends_on entry), which would let "
+                "composer-agent read every container's environment; pass the private-registry login "
                 "(COMPOSER_REGISTRY_USERNAME, COMPOSER_REGISTRY_PASSWORD, COMPOSER_REGISTRY_HOST) "
                 "to composer-agent and composer-executor."
             )
@@ -2209,7 +2225,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 outcome = install_composer_stack(".", compose_file=args.file or "", apply=True)
                 fixes.append(_result(
                     OK, "fix:install-composer",
-                    "Installed docker-socket-proxy, composer-executor and composer-agent. "
+                    "Installed composer-executor and composer-agent. "
                     f"Start them with '{outcome.get('command')}'. Backup: "
                     + (outcome.get("backup_root") or "n/a"),
                 ))
@@ -2255,10 +2271,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         OK,
                         "fix:resident-block",
                         "Normalized the Composer resident block: nested 'agent run'/'executor run' "
-                        "commands, DAC_OVERRIDE as composer-executor's only added capability, a "
-                        "digest-pinned read-only docker-socket-proxy, and the registry login passed to "
-                        "composer-agent and composer-executor. Recreate docker-socket-proxy, "
-                        "composer-executor and composer-agent to apply. Backup: "
+                        "commands, DAC_OVERRIDE as composer-executor's only added capability, no "
+                        "docker-socket-proxy (its container removed), and the registry login passed to "
+                        "composer-agent and composer-executor. Recreate composer-executor and "
+                        "composer-agent to apply. Backup: "
                         + (outcome.get("backup_root") or "n/a"),
                     )
                 )

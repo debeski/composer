@@ -560,12 +560,12 @@ def _parse_ps(text: str) -> dict:
     return states
 
 
-def _service_table(runtime=None, *, launcher=None) -> list:
-    """Every Compose service, its state, and whether a request may restart it."""
-    from .executor_ops import _restart_policy
-    from .service_selection import PROTECTED_LIFECYCLE_SERVICES
+def _service_states(launcher) -> list:
+    """Each Compose service with its state, health, status and restart label.
 
-    launcher = launcher or _stack_launcher(runtime)
+    The Docker half of the services table, run where the Docker socket is: in
+    the executor of an executor deployment. Only these fields leave it.
+    """
     ok, out, err = launcher.run_docker_compose(["config", "--format", "json"], timeout=60)
     if not ok:
         raise ValueError(redact_text(err or out or "docker compose config failed.")[:MAX_MESSAGE_CHARS])
@@ -575,22 +575,67 @@ def _service_table(runtime=None, *, launcher=None) -> list:
         raise ValueError("docker compose config returned invalid JSON.")
     _ok, ps_out, _err = launcher.run_docker_compose(["ps", "--all", "--format", "json"], timeout=60)
     states = _parse_ps(ps_out)
-    protected, allowed = _restart_policy(os.environ)
-    table = []
+    rows = []
     for name in sorted(services):
         labels = (services[name] or {}).get("labels") or {}
         label = str(labels.get("org.dlux.restart") or "") if isinstance(labels, dict) else ""
         state = states.get(name, {"state": "absent", "health": "", "status": ""})
+        rows.append({"name": name, **state, "restart_label": label})
+    return rows
+
+
+def _compose_target(runtime) -> dict:
+    """Which Compose files of the project a read is about (the executor's payload)."""
+    return {
+        "dev": bool(getattr(runtime.args, "dev", False)),
+        "file": getattr(runtime.args, "file", None) or "",
+    }
+
+
+def _clean_state_row(row) -> Optional[dict]:
+    if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"]:
+        return None
+    return {
+        "name": row["name"][:200],
+        "state": str(row.get("state") or "")[:32],
+        "health": str(row.get("health") or "")[:32],
+        "status": str(row.get("status") or "")[:120],
+        "restart_label": str(row.get("restart_label") or "")[:32],
+    }
+
+
+def _executor_service_states(runtime) -> list:
+    from . import executor_client
+
+    result = executor_client.read("services_state", _compose_target(runtime))
+    rows = result.get("services")
+    if not isinstance(rows, list):
+        raise ValueError("composer-executor returned no services table.")
+    return [row for row in (_clean_state_row(item) for item in rows) if row]
+
+
+def _service_table(runtime=None, *, launcher=None) -> list:
+    """Every Compose service, its state, and whether a request may restart it."""
+    from . import executor_client
+    from .executor_ops import _restart_policy
+    from .service_selection import PROTECTED_LIFECYCLE_SERVICES
+
+    if launcher is None and executor_client.reads_via_executor():
+        states = _executor_service_states(runtime)
+    else:
+        states = _service_states(launcher or _stack_launcher(runtime))
+    protected, allowed = _restart_policy(os.environ)
+    table = []
+    for row in states:
+        name, label = row["name"], row["restart_label"]
         can_restart = name in allowed and name not in protected and label != "protected"
         can_lifecycle = can_restart and name not in PROTECTED_LIFECYCLE_SERVICES
         table.append({
-            "name": name,
-            **state,
-            "restart_label": label,
+            **row,
             "can_restart": can_restart,
             "can_lifecycle": can_lifecycle,
-            "can_start": can_lifecycle and state["state"] in ("created", "exited", "stopped"),
-            "can_stop": can_lifecycle and state["state"] in ("running", "restarting", "paused"),
+            "can_start": can_lifecycle and row["state"] in ("created", "exited", "stopped"),
+            "can_stop": can_lifecycle and row["state"] in ("running", "restarting", "paused"),
         })
     return table
 
@@ -651,8 +696,24 @@ def _merge_logs(text: str, lines: int) -> str:
     return "\n".join(f"{service.ljust(width)} | {message}" for _stamp, service, message in entries[-lines:])
 
 
+def _read_logs(launcher, service: str, lines: int) -> str:
+    """The redacted tail of one service's logs, or of all of them merged; capped.
+
+    The Docker half of ``logs-tail``, run where the Docker socket is.
+    """
+    args = (["logs", "--no-color", "--no-log-prefix", "--tail", str(lines), service] if service
+            else ["logs", "--no-color", "--timestamps", "--tail", str(lines)])
+    ok, out, err = launcher.run_docker_compose(args, timeout=60)
+    if not ok:
+        raise ValueError(redact_text(err or out or "Could not read the logs.")[:MAX_MESSAGE_CHARS])
+    text = redact_text((out or "") if service else _merge_logs(out, lines))
+    return text[-MAX_LOG_CHARS:] if len(text) > MAX_LOG_CHARS else text
+
+
 def _tail_logs(runtime, request) -> dict:
     """The last lines of one service's logs, or of all of them merged in time order."""
+    from . import executor_client
+
     every = not str(request.get("service") or "").strip()
     service = "" if every else _requested_service(runtime, request, restartable=False)
     try:
@@ -660,15 +721,11 @@ def _tail_logs(runtime, request) -> dict:
     except (TypeError, ValueError):
         lines = LOG_LINES_DEFAULT
     lines = max(1, min(LOG_LINES_MAX, lines))
-    launcher = _stack_launcher(runtime)
-    args = (["logs", "--no-color", "--timestamps", "--tail", str(lines)] if every
-            else ["logs", "--no-color", "--no-log-prefix", "--tail", str(lines), service])
-    ok, out, err = launcher.run_docker_compose(args, timeout=60)
-    if not ok:
-        raise ValueError(redact_text(err or out or "Could not read the logs.")[:MAX_MESSAGE_CHARS])
-    text = redact_text(_merge_logs(out, lines) if every else (out or ""))
-    if len(text) > MAX_LOG_CHARS:
-        text = text[-MAX_LOG_CHARS:]
+    if executor_client.reads_via_executor():
+        result = executor_client.read("logs_tail", {**_compose_target(runtime), "service": service, "lines": lines})
+        text = redact_text(str(result.get("logs") or ""))[-MAX_LOG_CHARS:]
+    else:
+        text = _read_logs(_stack_launcher(runtime), service, lines)
     return {"exit_code": 0, "service": service, "lines": lines, "logs": text, "findings": []}
 
 

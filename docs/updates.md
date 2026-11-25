@@ -308,8 +308,8 @@ moves both halves together: the persisted `.composer-channel` file that the wrap
 read before any Composer code runs, and the image the resident
 `composer-agent`/`composer-executor` pair run inside the stack, because a deployer on
 `:beta` talking to an agent on `:latest` is a configuration nobody chose. The retag is
-scoped to `debeski/composer:*` images inside the generated block, so the third-party
-socket proxy and anything outside the markers are untouched.
+scoped to `debeski/composer:*` images inside the generated block, so anything else in
+the block and anything outside the markers is untouched.
 
 Both flags are confirmation-gated (`-y` honoured), mutually exclusive, and dry-run
 first: the channel file is written only after the Compose edit validates. Plain

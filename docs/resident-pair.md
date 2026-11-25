@@ -45,9 +45,10 @@ revoked. Protocol: [Agent Protocol v1](agent-protocol-v1.md#transport-and-authen
 `composer executor run` runs the privileged half. The executor is the sole holder of
 Docker write authority: it owns the real `docker.sock`, runs the trigger-watched
 image-update loop, and serves typed operations to the agent over a private Unix
-socket (`COMPOSER_EXECUTOR_SOCKET`). The network-facing `composer-agent` keeps only
-read-only Docker access through a `docker-socket-proxy` with POST and exec disabled,
-and delegates every write. The generated Compose block starts it; it is not for
+socket (`COMPOSER_EXECUTOR_SOCKET`). The network-facing `composer-agent` has no
+Docker access: it asks the executor for every write and for its few reads, which the
+executor answers with bare fields
+([the agent's reads](executor-hardening.md#the-agents-reads)). The generated Compose block starts it; it is not for
 interactive use.
 
 ## `agent watch`
@@ -77,9 +78,9 @@ the update:
   `composer-agent`; setting it (also to `""`) replaces that list, and the generated
   block sets it to each role's own name (`composer-agent`, `composer-executor`);
 - `COMPOSER_EXCLUDE_SERVICES` adds exclusions and never replaces them. The generated
-  block lists `composer-agent`, `composer-executor`, `docker-socket-proxy` and the
-  protected services the stack defines, and the executor always excludes the
-  Composer services and the socket proxy.
+  block lists `composer-agent`, `composer-executor` and the protected services the
+  stack defines, and the executor always excludes the Composer services and a
+  leftover `docker-socket-proxy`.
 
 ## Lifecycle commands
 
