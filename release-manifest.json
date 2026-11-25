@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "1.10.4b1",
+  "version": "1.10.4",
   "summary": "Follow-ups to Composer 1.10.3. A deployment check whose result is too large for the executor's 64 KiB frame now reaches the agent as a failed result naming the size, and the check shortens long repair diffs so its report fits, instead of the agent seeing only a closed connection. The unused `executor run --package-trigger-file` flag is removed, and the help names the resident pair the agent commands act on. No stack or wrapper changes.",
   "highlights": [
     "A deployment check result over the executor's 64 KiB frame limit is reported as a failure that names the size, not a dropped connection.",
@@ -8,5 +8,5 @@
     "`executor run --package-trigger-file` is removed; no generated stack ever passed it.",
     "No stack, wrapper or DjangoLux changes: works with DjangoLux 1.16."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.4b1"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.4"
 }
