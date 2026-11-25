@@ -179,13 +179,13 @@ FAIL, the fix, and what `--fix` does.
 
 | Stack has | Level | `--fix` |
 | --- | --- | --- |
-| `composer-agent` + `composer-executor` (hardened) | OK | nothing |
+| `composer-agent` + `composer-executor` (hardened) | OK | nothing (a leftover proxy is the `docker-proxy` finding) |
 | `composer-agent` + a proxy, no executor (agent-only) | WARN | hardens it (`executor enable`) |
 | `composer-agent`, no executor, no proxy | WARN | attempts the hardening, which fails without `docker-socket-proxy` |
 | `composer-executor` without `composer-agent` | WARN | nothing: recreate the pair |
-| legacy `composer-updater` | WARN | migrates it to the hardened trio (`agent enable`) |
+| legacy `composer-updater` | WARN | migrates it to the hardened pair (`agent enable`) |
 | `composer-agent` and `composer-updater` together | FAIL | nothing: review by hand |
-| no Composer service | FAIL | installs `docker-socket-proxy`, `composer-executor` and `composer-agent` |
+| no Composer service | FAIL | installs `composer-executor` and `composer-agent` |
 
 Details: [topology migrations](stack-migrations.md#topology-migrations).
 
@@ -198,13 +198,16 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 
 #### `docker-proxy`
 
-- **Checks:** that `docker-socket-proxy` grants no write endpoint. No finding without
-  a proxy.
-- **OK** read-only. **FAIL** `POST` or `EXEC` is enabled.
-- **`--fix`:** switches the write endpoints off and repins the image in the generated
-  block (resident-block repair or `executor enable`), then re-checks. A proxy outside
-  the generated block is edited by hand. Why:
-  [the proxy is read-only and pinned](executor-hardening.md#the-proxy-is-read-only-and-pinned).
+- **Checks:** whether the stack still runs a `docker-socket-proxy`. No finding without
+  one.
+- **OK** a read-only proxy on a stack without `composer-executor` (a legacy agent
+  reads through it). **WARN** a read-only proxy beside `composer-executor`: it lets
+  `composer-agent` read every container's environment and files, and the agent does
+  not use it. **FAIL** `POST` or `EXEC` is enabled.
+- **`--fix`:** removes the proxy from the generated block, its container first
+  (resident-block repair or `executor enable`), then re-checks. A proxy outside the
+  generated block is removed by hand. Why:
+  [no Docker proxy](executor-hardening.md#no-docker-proxy).
 
 #### `removed-services`
 
@@ -419,6 +422,6 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 | updater runtime | rewrites retired local `tools.*` commands to package modules and drops `tools/` mounts, gated on the image's DjangoLux (a `dlux-updater-runtime` WARN when blocked) |
 | post-start label | installs or normalizes the `org.dlux.post-start` migrator label |
 | restart labels | adds missing `org.dlux.restart` labels |
-| resident block | normalizes the generated resident block: nested commands, `DAC_OVERRIDE`, a digest-pinned read-only proxy, the registry login keys |
+| resident block | normalizes the generated resident block: nested commands, `DAC_OVERRIDE`, no Docker proxy (its container removed), the registry login keys |
 
 What each one changes: [retired wiring](stack-migrations.md#retired-wiring-check---fix-normalizes).

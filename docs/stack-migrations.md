@@ -165,15 +165,16 @@ names both routes. The `stored-files` finding and its refusal give the same advi
 ## Topology migrations
 
 New deployments run the hardened resident pair: `composer-agent` (`agent run`) plus
-`composer-executor` (`executor run`), with a read-only `docker-socket-proxy` (see
+`composer-executor` (`executor run`), and no Docker proxy (see
 [executor hardening](executor-hardening.md)). `composer check` reports any other
 topology, and `check --fix` runs whichever migration applies:
 
 | Topology `check` finds | `check --fix` |
 | --- | --- |
-| legacy `composer-updater` | replaces it with the hardened trio |
-| agent-only (`composer-agent` with a write-enabled proxy) | hardens it: adds `composer-executor`, demotes the proxy to read-only |
-| no Composer service at all | installs `docker-socket-proxy`, `composer-executor` and `composer-agent`, and prints the command that starts them |
+| legacy `composer-updater` | replaces it with the hardened pair and removes the proxy's container |
+| agent-only (`composer-agent` with a write-enabled proxy) | hardens it: adds `composer-executor`, removes the proxy and its container |
+| hardened pair with a leftover `docker-socket-proxy` | removes the proxy, its container, the agent's `DOCKER_HOST` and its `depends_on` entry ([no Docker proxy](executor-hardening.md#no-docker-proxy)) |
+| no Composer service at all | installs `composer-executor` and `composer-agent`, and prints the command that starts them |
 | `composer-agent` and `composer-updater` together | fails closed |
 
 Legacy `composer-updater` stacks still deploy until then.
@@ -190,10 +191,11 @@ wrapper still accepts:
 ./start.sh agent enable --apply
 ```
 
-`agent enable` writes the hardened trio directly, from a legacy `composer-updater`
+`agent enable` writes the hardened pair directly, from a legacy `composer-updater`
 block or from an agent-only block. `executor enable` (`--apply` to write) hardens an
-agent-only stack the same way; on a stack that is already hardened both change
-nothing. A locally installed binary may instead run `composer agent enable
+agent-only stack the same way; on a stack that is already hardened both only
+normalize the resident block, a leftover proxy included, and change nothing on a
+current one. A locally installed binary may instead run `composer agent enable
 --project-dir /path/to/project` (or `executor enable --project-dir …`). Composer
 owns the only Compose transformer; DjangoLux's `agent enable` command only forwards
 to it.
@@ -206,7 +208,8 @@ Both commands use the same guardrails:
   `.xclude/dlux-agent-bootstrap/<timestamp>/`, and replaces it atomically; re-runs
   are idempotent;
 - the replacement keeps the deployment's own topology: the networks attached to the
-  outgoing `docker-socket-proxy`/`composer-updater` services, that block's
+  outgoing `docker-socket-proxy` (carried to `composer-executor`) and
+  `composer-updater` services, that block's
   `COMPOSER_VERSION_LABEL`, and its `WEB_IMAGE` reference are carried forward
   verbatim, so projects generated before the DjangoLux 1.5 scaffold (`egress` /
   `docker_proxy`) migrate without renaming networks or losing the baked-version

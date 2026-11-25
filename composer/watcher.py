@@ -129,10 +129,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _local_repo_digest(image: str) -> Optional[str]:
-    """The digest the local image for `image` was pulled at (its RepoDigest),
-    via `docker image inspect` (honors DOCKER_HOST). None if not present."""
-    repo = str(image).split("@", 1)[0].rsplit(":", 1)[0]
+def _docker_repo_digests(image: str) -> Optional[list]:
+    """`docker image inspect`'s RepoDigests for `image` (honors DOCKER_HOST).
+
+    None when the image is not present or Docker cannot say.
+    """
     try:
         proc = subprocess.run(
             ["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
@@ -146,10 +147,34 @@ def _local_repo_digest(image: str) -> Optional[str]:
         digests = json.loads(proc.stdout.strip() or "[]")
     except ValueError:
         return None
+    return digests if isinstance(digests, list) else None
+
+
+def _repo_digests(image: str) -> Optional[list]:
+    """RepoDigests of the local `image`: from the executor in an executor
+    deployment (the agent has no Docker API), otherwise from Docker itself."""
+    from . import executor_client
+
+    if not executor_client.reads_via_executor():
+        return _docker_repo_digests(image)
+    try:
+        digests = executor_client.read("image_digests", {"image": image}).get("repo_digests")
+    except ValueError:
+        return None
+    return digests if isinstance(digests, list) else None
+
+
+def _local_repo_digest(image: str) -> Optional[str]:
+    """The digest the local image for `image` was pulled at (its RepoDigest).
+    None if not present."""
+    repo = str(image).split("@", 1)[0].rsplit(":", 1)[0]
+    digests = _repo_digests(image)
+    if not digests:
+        return None
     for entry in digests:
         if isinstance(entry, str) and entry.startswith(f"{repo}@"):
             return entry.split("@", 1)[1]
-    if digests and isinstance(digests[0], str) and "@" in digests[0]:
+    if isinstance(digests[0], str) and "@" in digests[0]:
         return digests[0].split("@", 1)[1]
     return None
 

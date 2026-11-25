@@ -12,11 +12,13 @@ import uuid
 from typing import Dict, Optional, Tuple
 
 from . import executor_protocol as proto
-from .executor import EXECUTOR_SOCKET_ENV, resolve_socket_path
+from .executor import EXECUTOR_ROLE_ENV, EXECUTOR_SOCKET_ENV, resolve_socket_path
 
 # How long to wait for a synchronous op result. Recovery shells a full update, so
 # allow a generous ceiling; override with COMPOSER_EXECUTOR_TIMEOUT.
 _DEFAULT_TIMEOUT = 1800.0
+# A read runs `docker compose` with a 60 s timeout of its own.
+READ_TIMEOUT = 120.0
 
 
 class ExecutorClientError(RuntimeError):
@@ -26,6 +28,14 @@ class ExecutorClientError(RuntimeError):
 def executor_configured() -> bool:
     """True when this deployment routes Docker mutations through an executor."""
     return bool(str(os.environ.get(EXECUTOR_SOCKET_ENV) or "").strip())
+
+
+def reads_via_executor() -> bool:
+    """True in the agent of an executor deployment: its Docker reads go to the executor.
+
+    False in the executor itself (and its children), which reads Docker directly.
+    """
+    return executor_configured() and not os.environ.get(EXECUTOR_ROLE_ENV)
 
 
 def _timeout() -> float:
@@ -52,7 +62,8 @@ def _recv_exactly(conn: socket.socket):
     return reader
 
 
-def send_request(op: str, payload: Dict, *, operation_id: Optional[str] = None, socket_path: Optional[str] = None) -> Dict:
+def send_request(op: str, payload: Dict, *, operation_id: Optional[str] = None, socket_path: Optional[str] = None,
+                 timeout: Optional[float] = None) -> Dict:
     request = {
         "protocol_version": proto.EXECUTOR_PROTOCOL_VERSION,
         "operation_id": operation_id or str(uuid.uuid4()),
@@ -63,7 +74,7 @@ def send_request(op: str, payload: Dict, *, operation_id: Optional[str] = None, 
     request = proto.validate_executor_request(request)
     path = socket_path or resolve_socket_path()
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.settimeout(_timeout())
+    conn.settimeout(timeout or _timeout())
     try:
         conn.connect(path)
         conn.sendall(proto.encode_frame(request))
@@ -90,3 +101,20 @@ def run_operation(op: str, payload: Dict, operation_id: str) -> Tuple[int, str]:
     if state == "rejected":
         return int(result.get("exit_code", 2) or 2), detail or "executor rejected the operation."
     return int(result.get("exit_code", 1) or 1), detail or "executor operation failed."
+
+
+def read(op: str, payload: Dict) -> Dict:
+    """Ask the executor for one of its reads; the result, or ``ValueError`` saying why not."""
+    try:
+        result = send_request(op, payload, timeout=READ_TIMEOUT)
+    except ExecutorClientError as exc:
+        raise ValueError(f"composer-executor could not be reached: {exc}") from exc
+    if result.get("state") == "succeeded":
+        return result
+    detail = str(result.get("detail") or "")
+    if "Unsupported executor op" in detail:
+        raise ValueError(
+            "composer-executor does not serve this read yet. "
+            "Update both Composer resident services and retry."
+        )
+    raise ValueError(detail or f"composer-executor could not answer {op}.")
