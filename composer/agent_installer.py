@@ -1057,9 +1057,12 @@ def _backup_root(project_root: Path) -> Path:
 
 
 def _atomic_write(path: Path, contents: str):
+    from .stack_schema import line_ending
+
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     mode = stat.S_IMODE(path.stat().st_mode)
-    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+    # The file's own line endings: a CRLF compose.yml stays CRLF.
+    with temporary.open("w", encoding="utf-8", newline=line_ending(path)) as stream:
         stream.write(contents)
         stream.flush()
         os.fsync(stream.fileno())

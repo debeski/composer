@@ -22,7 +22,7 @@ import yaml
 
 from composer import agent_installer, maintenance_migration, media_migration
 from composer import worker_migration as wm
-from composer.checkup import OK, WARN
+from composer.checkup import FAIL, OK, WARN
 from composer.launcher import DockerComposeLauncher
 from composer.stack_schema import read_stamp
 
@@ -611,9 +611,11 @@ class TaskWorkerCheckTests(unittest.TestCase):
     def test_a_schema_5_stack_is_fine(self):
         self.assertEqual(self._check(["web", "worker"], (1, 16, 0))["level"], OK)
 
-    def test_dlux_1_16_without_worker_warns(self):
+    def test_dlux_1_16_without_worker_fails(self):
+        # Finding #5 (break-it 2026-11-25): its tasks are queued and never run,
+        # so scheduled backups and jobs stop. That blocks a deploy, not a warning.
         result = self._check(["web", "celery"], (1, 16, 0))
-        self.assertEqual(result["level"], WARN)
+        self.assertEqual(result["level"], FAIL)
         self.assertIn("check --fix", result["fix"])
 
     def test_dlux_1_15_on_celery_is_fine(self):
