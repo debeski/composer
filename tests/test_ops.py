@@ -69,6 +69,26 @@ class OpsResponderTests(unittest.TestCase):
         self.assertEqual(self._ack()["token"], "run-1")
         self.assertEqual(self._ack()["error"], "")
 
+    def test_what_the_panel_shows_as_text_carries_no_terminal_controls(self):
+        # O3: composer output read back for the Operations panel kept its ESC[2K and colours.
+        self._request()
+        with patch.dict("composer.ops.HANDLERS", {"check": lambda runtime, request: {
+            "exit_code": 0, "findings": [{"level": "warn", "name": "x", "message": "\x1b[33mwarned\x1b[0m"}],
+            "repairs": [{"name": "r", "files": [], "diff": "", "note": "\x1b[2Knote"}],
+            "logs": "\x1b[2Kline\r\n",
+        }}):
+            self.responder.answer()
+        result = self._result()
+        self.assertEqual(result["findings"][0]["message"], "warned")
+        self.assertEqual(result["repairs"][0]["note"], "note")
+        self.assertEqual(result["logs"], "line\n")
+        self._request(token="run-2")
+        with patch.dict("composer.ops.HANDLERS", {"check": lambda runtime, request: (_ for _ in ()).throw(
+                ValueError("\x1b[31mrefused\x1b[0m"))}):
+            self.responder.answer()
+        self.assertEqual(self._result()["error"], "refused")
+        self.assertEqual(self._ack()["error"], "refused")
+
     def test_a_check_that_finds_problems_still_answers(self):
         self._request()
         with self._findings([{"level": "fail", "name": "topology", "message": "none"}], exit_code=1):

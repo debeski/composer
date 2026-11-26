@@ -256,19 +256,30 @@ FAIL, the fix, and what `--fix` does.
 #### `composer-channel`
 
 - **Checks:** that the resident pair runs the image in `.composer-image`, or, before
-  the first pin, the tag of Composer's channel ([the Composer pin](updates.md#the-composer-pin)).
+  the first pin, the tag of Composer's channel ([the Composer pin](updates.md#the-composer-pin)):
+  the generated block's `debeski/composer` lines, and, when they name the pin, the
+  image each running `composer-agent` and `composer-executor` container was created
+  from.
 - **OK** the pair runs the pinned digest; or there is no pin yet and the pair runs the
   channel tag ("not pinned yet": the next Composer update pins it); or no Composer
   image is declared in the generated block. A `COMPOSER_SELF_IMAGE` pin is noted.
-- **WARN** the pair runs another image than the pin, or than the channel tag when
-  there is no pin; or the pin is a beta while the channel is stable.
-- **Fix:** `composer check --fix` for a pair that does not follow the pin; `composer
-  check --stable` for a beta pin on the stable channel; `--beta` or `--stable` to move
-  both halves to a channel.
+- **WARN** the block names another image than the pin, or than the channel tag when
+  there is no pin; the block names the pin but a running container of the pair was
+  created from another image (not recreated since the pin moved); the pin is a beta
+  while the channel is stable; or the pin names a release from before 1.11.0b1, which
+  cannot run a pinned stack.
+- **Fix:** `composer check --fix` for a block that does not follow the pin;
+  `./start.sh` for a pair still running the old image (it recreates both on the pin);
+  `composer check --stable` for a beta pin on the stable channel; `--beta` or
+  `--stable` to move both halves to a channel. For a pin from before 1.11.0b1:
+  `COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y`
+  ([releases before signing](updates.md#the-composer-pin)).
 - **`--fix`:** pins the generated block's `debeski/composer` lines to the existing
-  `.composer-image` (validated, original kept under `.xclude/composer-check/`). It
-  never resolves a new pin, so `check` stays offline. It preserves the channel. See
-  [channels](updates.md#channels).
+  `.composer-image` (validated, original kept under
+  `.xclude/dlux-agent-bootstrap/<UTC>/`), then [recreates the pair](#after-the-repairs).
+  It never resolves a new pin, so `check` stays offline. It preserves the channel, and
+  it never pins the block to a release from before 1.11.0b1 (`fix:composer-pin` warns
+  instead). See [channels](updates.md#channels).
 
 ### Stack
 
@@ -564,9 +575,10 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 
 #### `pending-recreate`
 
-- **Checks:** the services a `check --fix` left on the definition they were created
-  from (`--no-recreate`, the resident pair after an Operations panel apply, a
-  recreate it refused), recorded with their container in
+- **Checks:** the services a `check --fix` or a `check --beta` / `--stable` switch
+  left on the definition they were created from (`--no-recreate`, the resident pair
+  after an Operations panel apply, a recreate it refused), recorded with their
+  container in
   `.xclude/composer-check/pending-recreate.json`. No finding when there is no record,
   or once each recorded container has been replaced.
 - **WARN** a recorded container still runs: a restart keeps it, and with it the old

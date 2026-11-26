@@ -50,6 +50,14 @@ def _result(level: str, name: str, message: str, fix: str = "") -> Dict[str, Any
     return entry
 
 
+#: How a stack whose lock names a Composer from before digest pinning gets out.
+PREDATES_PIN_RECOVERY = (
+    "Switch with a deployer that can pin: 'COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y' "
+    "pins the beta channel's signed release, rewrites the lock and the block, and recreates the pair. "
+    "Stay on beta until Composer 1.11.0 stable is published. See docs/updates.md, 'Releases before signing'."
+)
+
+
 class CheckupMixin(ConfigMixin, SecretsMixin):
     """`composer check` — a doctor for the *outside* of a DLUX stack.
 
@@ -1426,7 +1434,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         freshly scaffolded stack looks exactly like that, and the next Composer
         update pins it. Pinning needs the network, which `check` never uses.
         """
-        from . import channel_config
+        from . import channel_config, image_pin
         from .agent_installer import composer_images_in_block
 
         state = channel_config.describe(".")
@@ -1438,6 +1446,15 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             declared = set(composer_images_in_block(self._compose_contents()))
         except Exception:
             declared = set()
+        if lock is not None and image_pin.predates_signing(lock.version) and not state["pinned"]:
+            return _result(
+                WARN,
+                "composer-channel",
+                f"{note}, but Composer {lock.version} predates digest pinning: the wrapper runs it from "
+                ".composer-image as the deployer, and it can neither read the pinned Composer block nor move "
+                "the pin again.",
+                fix=PREDATES_PIN_RECOVERY,
+            )
         if lock is not None and lock.prerelease and state["channel"] == channel_config.STABLE:
             return _result(
                 WARN,
@@ -1470,16 +1487,54 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 f"{note}, but the resident pair runs {', '.join(drifted)}.",
                 fix="Run 'composer check --fix' to pin the resident pair to .composer-image.",
             )
+        # The block names the pin; the containers keep the image they were created from.
+        stale = sorted(
+            f"{service} still runs {image}"
+            for service, image in self._resident_running_images().items()
+            if image and image != lock.ref
+        )
+        if stale:
+            return _result(
+                WARN,
+                "composer-channel",
+                f"{note}; the generated block names the pin, but {'; '.join(stale)}: the pair was not recreated "
+                "since the pin moved.",
+                fix=f"Run '{stack_lifecycle.APPLY_COMMAND}': it recreates composer-agent and composer-executor "
+                "on the pinned image.",
+            )
         return _result(OK, "composer-channel", f"{note}; resident pair pinned to Composer {lock.short}.")
+
+    def _resident_running_images(self) -> Dict[str, str]:
+        """``{service: image}``: the reference each running resident container was created from.
+
+        Empty when Docker cannot say, so `check` reports the block alone.
+        """
+        try:
+            ok, rows, _detail = self.get_compose_ps_entries()
+        except Exception:
+            return {}
+        return {
+            str(row.get("Service")): str(row.get("Image") or "")
+            for row in (rows if ok else [])
+            if isinstance(row, dict) and row.get("Service") in stack_lifecycle.RESIDENT_SERVICES
+            and str(row.get("State") or "").lower() == "running"
+        }
 
     def _fix_composer_pin(self, args) -> List[Dict[str, Any]]:
         """Pin the resident pair to the existing lock. Offline: never resolves a new one."""
         from .agent_installer import AgentInstallError, pin_composer_image
-        from .image_pin import read_lock
+        from .image_pin import predates_signing, read_lock
 
         lock = read_lock(".")
         if lock is None or os.environ.get("COMPOSER_SELF_IMAGE", "").strip():
             return []
+        if predates_signing(lock.version):
+            return [_result(
+                WARN, "fix:composer-pin",
+                f"The resident pair was not pinned to {lock.ref}: Composer {lock.version} predates digest "
+                "pinning and could not manage the pin from there. The project is unchanged.",
+                fix=PREDATES_PIN_RECOVERY,
+            )]
         try:
             preview = pin_composer_image(".", pin=lock, compose_file=args.file or "", apply=False)
         except AgentInstallError as exc:
@@ -1533,11 +1588,17 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 or image_pin.allow_unverified_from_env(),
             )
         except image_pin.PinError as exc:
+            if exc.way_out:
+                fix = exc.way_out
+            elif exc.unavailable:
+                fix = "Retry when GitHub is reachable, or pass --allow-unverified-composer to pin the registry digest."
+            else:
+                fix = "No flag overrides a signature or statement that does not match; report it."
             return [_result(
                 FAIL,
                 "composer-channel-switch",
                 f"The {channel} channel's Composer release could not be pinned: {exc} The project is unchanged.",
-                fix="Retry when GitHub is reachable, or pass --allow-unverified-composer to pin the registry digest.",
+                fix=fix,
             )]
         pin = resolution.pin
         image = pin.ref
@@ -1558,6 +1619,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         ):
             return [_result(WARN, "composer-channel-switch", "Channel switch declined.")]
 
+        # What runs before the write, so the lifecycle step recreates what the switch changed.
+        baseline = self._lifecycle_baseline() if preview.get("files") else None
         try:
             outcome = switch_composer_channel(
                 ".", channel=channel, compose_file=args.file or "", apply=True, pin=pin,
@@ -1575,8 +1638,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if not preview.get("files"):
             detail += " The resident pair already ran that image."
         if resolution.note and not pin.verified:
-            return [_result(WARN, "composer-channel-switch", f"{detail} {resolution.note}")]
-        return [_result(OK, "composer-channel-switch", detail)]
+            entries = [_result(WARN, "composer-channel-switch", f"{detail} {resolution.note}")]
+        else:
+            entries = [_result(OK, "composer-channel-switch", detail)]
+        if preview.get("files"):
+            # As `check --fix` does: the pair is recreated on the new pin, or, from
+            # the Operations panel, recorded as pending for './start.sh'.
+            entries.extend(self._finish_fix(args, baseline))
+        return entries
 
     def collect_checkup(self, args) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Run the checks (and any fixes ``args`` asks for) and return them.

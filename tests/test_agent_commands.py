@@ -307,6 +307,13 @@ class UpdateSelfCommandTests(unittest.TestCase):
             (["update", "self", "--file", "compose.prod.yml"], []),
             (["update", "--file=compose.prod.yml", "self", "--dev"], []),
             (["update", "self", "--help"], ["--help"]),
+            # Wrapper 7's pin step: rejected with the usage line by 1.11.0b1 (F1).
+            (["update", "self", "--pin"], ["--pin"]),
+            (["update", "self", "--allow-downgrade"], ["--allow-downgrade"]),
+            (["update", "self", "--allow-unverified-composer"], ["--allow-unverified-composer"]),
+            (["-d", "update", "self", "--pin", "--allow-downgrade"], ["--pin", "--allow-downgrade"]),
+            (["update", "--allow-unverified-composer", "self", "-f", "compose.yml", "--pin"],
+             ["--allow-unverified-composer", "--pin"]),
         ):
             with self.subTest(argv=argv):
                 launcher = DockerComposeLauncher()
@@ -327,6 +334,9 @@ class UpdateSelfCommandTests(unittest.TestCase):
             ["update", "self", "-a", "core"],
             ["update", "self", "self"],
             ["update", "-f", "self"],
+            ["update", "self", "--pin", "web"],
+            ["update", "self", "--pin", "--force"],
+            ["update", "self", "--allow-downgrade", "-b"],
         ):
             with self.subTest(argv=argv):
                 launcher = DockerComposeLauncher()
@@ -340,6 +350,15 @@ class UpdateSelfCommandTests(unittest.TestCase):
                 self.assertEqual(exit_code.exception.code, 2)
                 self.assertIn("composer update self", errors.getvalue())
                 update_self.assert_not_called()
+
+    def test_every_update_self_option_is_routed_through(self):
+        from composer.cli import parse_update_self_args, update_self_options
+
+        options = update_self_options()
+        for option in ("--pin", "--allow-downgrade", "--allow-unverified-composer", "-h", "--help"):
+            self.assertIn(option, options)
+        parsed = parse_update_self_args(["--pin", "--allow-downgrade", "--allow-unverified-composer"])
+        self.assertTrue(parsed.pin and parsed.allow_downgrade and parsed.allow_unverified_composer)
 
     def test_self_update_alias_points_to_update_self(self):
         launcher = DockerComposeLauncher()

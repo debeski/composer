@@ -181,7 +181,7 @@ while the app is being recreated and unreachable.
 ### Downgrade guard
 
 Before every `up` that (re)creates the app services, Composer compares the app
-image it is about to deploy with the newest release this deployment has run, and
+image it is about to deploy with the newest image this deployment has deployed, and
 refuses an older one. Migrations only run forwards: once a newer image's migrator
 has changed the schema, older code may fail on it or write data the newer release
 then reads wrongly. The guard is always on; it does not need the opt-in
@@ -228,6 +228,17 @@ then reads wrongly. The guard is always on; it does not need the opt-in
   pulls whatever the tag names, and labels can be set by anyone who can push it.
   Composer's own images are pinned to signed digests instead
   ([the Composer pin](updates.md#the-composer-pin)).
+
+The record's `dlux` is the baked DjangoLux of the newest image deployed, not the
+release that runs: an inline update (`dlux update`) changes what runs without a
+deploy, so after one the record still names the image's baked version (1.16.3 under
+an active 1.17.0b1, for example). The guard still holds there. DjangoLux's runtime
+supervisor serves a volume release only while it is newer than the image's baked
+package, so an image baked older than the active release keeps running the active
+release, and an image below that release's floor is refused by the check below. The
+active release stops running only through `dlux rollback`, which checks migration
+compatibility itself, or with the volume, which `down -v` removes along with the
+database.
 
 The baked DjangoLux version is also checked against the image floor of the release
 the runtime volume has active: `requires.baked_image` (legacy `image_baseline`) in
