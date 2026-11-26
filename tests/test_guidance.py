@@ -522,3 +522,38 @@ class DevOverrideNoteTests(unittest.TestCase):
         from composer import worker_migration
 
         self.assertIn(worker_migration.DEV_WAITS_NOTE, self._fixes(["compose.yml"]))
+
+
+class NextStepOrderTests(unittest.TestCase):
+    """The summary names the first step a finding's text asks for."""
+
+    def test_a_repair_before_a_restart_names_the_repair(self):
+        from composer.guidance import next_command
+
+        entry = {
+            "level": WARN, "name": "update-policy", "message": "The stack does not pass DLUX_UPDATE_POLICY.",
+            "fix": "Run 'composer check --fix': it passes DLUX_UPDATE_POLICY to web, worker, composer-agent "
+                   "and composer-executor. Then run './start.sh' to recreate them.",
+        }
+        self.assertEqual(next_command(entry), "./start.sh check --fix")
+
+    def test_a_restart_named_first_stays_the_restart(self):
+        from composer.guidance import next_command
+
+        entry = {"level": WARN, "name": "front-proxy", "message": "unset",
+                 "fix": "Set DLUX_FRONT_PROXY, then apply it with './start.sh'; 'check --fix' is not needed."}
+        self.assertEqual(next_command(entry), "./start.sh")
+
+
+class ComposeConfigRecheckTests(unittest.TestCase):
+    def test_a_confirmed_fix_rereads_the_service_count(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "worker"]
+        launcher._fix_confirmed = True
+        results = [{"level": OK, "name": "compose-config", "message": "Compose config resolves (10 service(s))."}]
+        with patch.object(launcher, "_check_compose_parses",
+                          return_value={"level": OK, "name": "compose-config", "message": "Compose config resolves (8 service(s))."}), \
+                patch.object(launcher, "_check_pending_recreate", return_value=None):
+            launcher._recheck_after_fix(results)
+
+        self.assertEqual(results[0]["message"], "Compose config resolves (8 service(s)).")

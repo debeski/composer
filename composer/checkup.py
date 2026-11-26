@@ -1745,6 +1745,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "removed-services": self._check_removed_services,
             "proxy-routes": self._check_proxy_routes,
             "topology": self._check_topology,
+            "compose-config": self._check_compose_parses,
             "celery": self._check_celery,
         } if confirmed else {}
         wrappers_now = {entry["name"]: entry for entry in self._check_wrappers()} if confirmed else {}
