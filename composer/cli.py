@@ -262,7 +262,7 @@ def _add_pin_options(parser):
     )
 
 
-def parse_update_self_args(argv):
+def _update_self_parser():
     parser = argparse.ArgumentParser(
         prog="composer update self",
         description=(
@@ -281,7 +281,18 @@ def parse_update_self_args(argv):
         help="Accept a release older than the current pin",
     )
     _add_pin_options(parser)
-    return parser.parse_args(argv)
+    return parser
+
+
+def update_self_options():
+    """Every option string `update self` accepts (wrapper 7 passes ``--pin``)."""
+    return frozenset(
+        option for action in _update_self_parser()._actions for option in action.option_strings
+    )
+
+
+def parse_update_self_args(argv):
+    return _update_self_parser().parse_args(argv)
 
 
 def parse_check_args(argv):

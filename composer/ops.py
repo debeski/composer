@@ -24,6 +24,7 @@ from typing import Optional
 
 from . import safe_files
 from .agent_protocol import redact_text
+from .output_utils import strip_terminal_controls
 
 REQUEST_FILENAME = "ops-request.json"
 ACK_FILENAME = f"{REQUEST_FILENAME}.ack"
@@ -51,6 +52,17 @@ def _read_json(path: Path) -> dict:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _plain(value):
+    """Every string in a result as plain text: the panel shows them as text, not a terminal."""
+    if isinstance(value, str):
+        return strip_terminal_controls(value)
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    return value
 
 
 def _trim(findings) -> list:
@@ -830,7 +842,10 @@ def _read_logs(launcher, service: str, lines: int) -> str:
         ok, out, err = launcher.run_docker_compose(args, timeout=60)
     if not ok:
         raise ValueError(redact_text(err or out or "Could not read the logs.")[:MAX_MESSAGE_CHARS])
-    text = redact_text((out or "") if service else _merge_logs(out, lines))
+    # `--no-color` drops Compose's own colours, not what a service printed (the
+    # resident pair's progress lines erase and redraw with ESC[2K).
+    out = strip_terminal_controls(out)
+    text = redact_text(out if service else _merge_logs(out, lines))
     return text[-MAX_LOG_CHARS:] if len(text) > MAX_LOG_CHARS else text
 
 
@@ -847,7 +862,7 @@ def _tail_logs(runtime, request) -> dict:
     lines = max(1, min(LOG_LINES_MAX, lines))
     if executor_client.reads_via_executor():
         result = executor_client.read("logs_tail", {**_compose_target(runtime), "service": service, "lines": lines})
-        text = redact_text(str(result.get("logs") or ""))[-MAX_LOG_CHARS:]
+        text = redact_text(strip_terminal_controls(result.get("logs")))[-MAX_LOG_CHARS:]
     else:
         text = _read_logs(_stack_launcher(runtime), service, lines)
     return {"exit_code": 0, "service": service, "lines": lines, "logs": text, "findings": []}
@@ -923,13 +938,14 @@ class OpsResponder:
             # loop does not start it twice while it runs.
             self.last_token = token
             return token
+        error = strip_terminal_controls(error)
         payload = {
             "schema_version": 1,
             "token": token,
             "operation": operation,
             "finished_at": _now(),
             "error": error,
-            **result,
+            **_plain(result),
         }
         # Result first, then the ack: DjangoLux reads the result only after it
         # sees the ack, so an ack can never point at a result that is not there.

@@ -15,7 +15,8 @@ it but cannot create, delete or rename anything; it reaches the data through gro
 A plain `check` looks at the top two levels of every mount; `--deep` and `--fix`
 walk everything. The mounts come from the merged compose config: every bind
 directory and named volume a service on the app image mounts, so a project's own
-mounts are included. Missing named volumes are left for Docker to create.
+mounts are included. A named volume that does not exist yet is not checked; before
+a start Composer has Compose create it first ([before every start](#before-every-start-of-the-app)).
 
 The app image is the one `web` (or else `worker`) runs, and the app services are
 every service running that image. In development mode (`-d`) the dev compose file
@@ -63,6 +64,13 @@ Composer reads the app image's `Config.User`:
   section, as `up --build` would), so the uid comes from the image about to run.
   This holds in development mode too: the stack's own build is built and read, and
   a `USER 10001:0` dev image gets its data granted before `up`, as in production;
+- for a non-root uid, when a named volume an app service mounts does not exist yet
+  (a fresh install), Compose creates the app services' containers without starting
+  them (`up --no-start --no-deps --no-recreate` for those services; an existing
+  container is left as it is). Docker fills each new volume
+  from the image and gives its root the owner and mode of the image's mount point,
+  which for a plain `USER 10001:0` image is root `0755`; the volumes carry Compose's
+  own labels. The grant then reaches them, and `up` starts the same containers;
 - for a non-root uid it scans and, when something is missing, grants access first;
 - when the image cannot be read or the grant fails, it reports `failed` and
   recreates nothing, so the running stack keeps serving;

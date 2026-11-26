@@ -68,16 +68,16 @@
   - [x] v1.3.11: staged releases order numerically (`1.8.10` sorted below `1.8.9` as a string), and a rollback target must be strictly below the active release — it could roll forward onto the release just left.
   - [x] v1.3.10: inline updates work end to end — agent stages the verified wheel and the executor swaps it offline over `dlux_package_apply` (`dlux_package_stage.py`), `verify_release` accepts schema-2 manifests, `dlux update` from the project root re-runs itself with the runtime volume attached (`dlux_runtime_access.py`), and the image ships `pypi-attestations`. +47 tests.
   - [x] v1.3.9: `check --fix` normalizes retired local DLUX tools wiring, restart labels, one-pass legacy hardening, native post_start stripping, and `-d` dev overrides.
-  - [x] v1.3.8 released: schema-2 DjangoLux manifests enforce inline install safety, migration rollback compatibility, supported service requirements, and the Composer version floor.
+  - [x] 2026-11-26 `1.11/b2_fixes` (local, for 1.11.0b2; no version bump): F1 `update self --pin` routing, F2/O6 no pin before 1.11.0b1 + recovery, fresh non-root volumes created before the grant, O4 switch recreates the pair, O3 plain-text panel reads, O1/O5 docs. No wrapper change.
 ### One-line info about last verified Tests:
-- 2026-11-23: `1.10/code_followups` with `pkg-django-lux/main/.venv`: suite 1,232 OK (9 skips); log `code_followups/.xclude/validation/suite-2026-11-23.log`. Unit tests only, no image or live run.
+- 2026-11-26: `1.11/b2_fixes`: suite 1,684 OK (9 skips), alignment `aligned`, candidate smoke PASS (new `update self` wrapper step; b1 fails it); live fresh install (throwaway `composer-fresh-nonroot`, DjangoLux main scaffold + plain `USER 10001:0`, empty volumes): candidate `7784dadb` 9/9 healthy, web/worker/ocr uid 10001, Compose-labelled volumes; control `v1.11.0b1` exits 78 (static root 0755). Logs `b2_fixes/.xclude/validation/`.
 - 2026-11-23: `1.10/non_root_app` review fixes in the scratch venv (CI's set): suite 1173 OK (17 skips; the DjangoLux contract mirror passes against `pkg-django-lux/non_root_app`), compileall OK; unit tests only. 2026-11-19 smoke test + live run PASS.
 - 2026-11-23: `1.10/release_1_10_3` `99e1ee1`: suite 1,206 OK (18 skips), compileall; image smoke incl. no pip; contract mirror checked by hand against DjangoLux `1.16/release_1_16_3`.
 - 2026-11-26: `1.11/live_proof_fixes_2` (live proof D-G: N-2, N-4, N-6, F4/N-8, N-9) with `pkg-django-lux/main/.venv`, `DLUX_CHECKOUT` = `release_1_17_0`: suite 1,666 OK (9 skips); each new test fails against the pre-fix sources; alignment gate `aligned`. Unit tests only; `scripts/smoke-test.sh` change not run (needs an image).
 - Host Python cannot run the suite (no cryptography/packaging/yaml): use a venv with CI's set (`PyYAML==6.0.3 "packaging>=23.2" "cryptography>=42"`), or run it in the built image with `pip install PyYAML==6.0.3` and `~/Desktop/depy` mounted at `/depy`, so the sibling `pkg-django-lux` comparisons run.
 ### One-line info about last time edited Docs:
 - 2026-11-23: `1.10/docs_reorg`: README cut to a front page; topics moved to `docs/` (index `docs/README.md`, `check.md` one entry per finding); `executor-hardening.md` rewritten present-tense; doc claims fixed to match code; CHANGELOG `## Unreleased` (1 entry). Pre-rewrite copies in that checkout's `.xclude/`.
-- 2026-11-23: `1.10/code_followups`: `executor-hardening.md` Framing (oversize result → `failed`), `agent-protocol-v1.md` deployment checks (shortened diffs); CHANGELOG `## Unreleased` (3 entries).
+- 2026-11-26: `1.11/b2_fixes`: `updates.md` (b1 moves on with `agent update`, releases before signing + recovery, switch recreates), `check.md` (`composer-channel`, `pending-recreate`), `app-permissions.md`, `deploying.md` (record wording), `agent-protocol-v1.md`, `executor-hardening.md`; CHANGELOG `## v1.11.0b2` (7 entries).
 - 2026-11-26: `1.11/live_proof_fixes_2`: `updates.md` (image updates, the Composer pin), `check.md` (plan, re-check), `resident-pair.md`, `commands.md`, `agent-protocol-v1.md`, `executor-hardening.md` (`logs_tail`); CHANGELOG `## v1.11.0b1` (+5 entries).
 
 ## Part 2: Global
@@ -89,7 +89,7 @@
 - Preserve unrelated worktree changes; never delete files; keep `tracker.md` below 100 lines.
 
 ### Agent Handoff Rules:
-- 1.10.3 stable: `1.10/stable_1_10_3` (`~/Desktop/depy/app-composer/stable_1_10_3`); push, PR and tag only on the owner's OK.
+- `1.11/b2_fixes` (`~/Desktop/depy/app-composer/b2_fixes`) is local only: the coordinator assembles 1.11.0b2 (version bump, push, PR, tag on the owner's OK).
 - Docs: each subject has one topic doc under `docs/` (`docs/README.md` lists them); new docs go there, never back into README.
 - Re-run syntax/tests after edits; latest generated caches moved to `.xclude/test-cache-20260905-nested-commands/`.
 - `1.10/update_guards` (`~/Desktop/depy/app-composer/update_guards`, 3 commits on 757384f) is local only: no push, PR, tag or version change until the owner's testbed acceptance passes. Its `tracker.md` will conflict with `1.10/record_1_10_0b3`; merge that first, then rebase this one.

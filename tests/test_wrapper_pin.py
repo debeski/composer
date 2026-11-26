@@ -166,6 +166,101 @@ class WrapperPinTests(unittest.TestCase):
         self.assertIn("-e COMPOSER_ALLOW_UNVERIFIED_COMPOSER", pin)
 
 
+# The deployer half of `docker run`: the real launcher, with the arguments the
+# wrapper put after the image. Only resolving the pin is faked (no network): it
+# writes $NEW_LOCK, as a verified update would.
+LAUNCHER_HARNESS = r"""
+import os, sys
+from unittest import mock
+
+sys.path.insert(0, os.environ["COMPOSER_REPO"])
+from composer import image_pin
+from composer.launcher import DockerComposeLauncher
+
+argv = sys.argv[1:]
+rest = argv[argv.index("/var/run/docker.sock:/var/run/docker.sock") + 2:]
+
+
+def update_pin(project_dir=".", **kwargs):
+    pin = image_pin.parse_ref(os.environ["NEW_LOCK"])
+    image_pin.write_lock(pin, project_dir)
+    return image_pin.Resolution(pin=pin, current=None, changed=True), {"files": [], "lock_changed": True}
+
+
+with mock.patch("composer.image_pin.update_pin", update_pin):
+    sys.argv = ["composer", *rest]
+    DockerComposeLauncher().run()
+"""
+
+# `docker run … update self --pin` runs LAUNCHER_HARNESS; everything else as FAKE_DOCKER.
+REAL_PIN_DOCKER = r"""#!/bin/sh
+printf "%s\n" "$*" >> "$DOCKER_CALLS_FILE"
+last=""
+for arg in "$@"; do last="$arg"; done
+case "$1" in
+  image)
+    case "$*" in
+      *image-pin*) echo 1; exit 0 ;;
+    esac
+    case " $LOCAL_IMAGES " in *" $last "*) echo sha256:id-$last; exit 0 ;; esac
+    exit 1 ;;
+  run)
+    case "$*" in
+      *" update self"*) cd "$PROJECT_DIR" && exec "$HARNESS_PYTHON" "$HARNESS" "$@" ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+"""
+
+
+@unittest.skipIf(os.name == "nt", "Bash wrapper test")
+class WrapperPinRealLauncherTests(unittest.TestCase):
+    """Wrapper 7's own `update self --pin` reaches the launcher's update self (F1).
+
+    The published 1.11.0b1 answered it with the usage line and exit 2, so every
+    `./start.sh update self` failed. The fake-docker tests above never ran the
+    launcher, and the live proof set COMPOSER_SELF_IMAGE, which skips the step.
+    """
+
+    def test_the_command_line_wrapper_7_builds_is_accepted(self):
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, fake_bin = root / "project", root / "bin"
+            project.mkdir()
+            fake_bin.mkdir()
+            shutil.copy2(repo_root / "start.sh", project / "start.sh")
+            (project / ".composer-image").write_text(LOCK_OLD + "\n", encoding="utf-8")
+            (root / "harness.py").write_text(LAUNCHER_HARNESS, encoding="utf-8")
+            docker = fake_bin / "docker"
+            docker.write_text(REAL_PIN_DOCKER, encoding="utf-8")
+            docker.chmod(0o755)
+            env = os.environ.copy()
+            env.pop("COMPOSER_SELF_IMAGE", None)
+            env.update({
+                "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+                "DOCKER_CALLS_FILE": str(root / "calls"),
+                "PROJECT_DIR": str(project),
+                "LOCAL_IMAGES": LOCK_OLD,
+                "NEW_LOCK": LOCK_NEW,
+                "HARNESS": str(root / "harness.py"),
+                "HARNESS_PYTHON": sys.executable,
+                "COMPOSER_REPO": str(repo_root),
+            })
+            result = subprocess.run(["bash", str(project / "start.sh"), "update", "self"], cwd=project, env=env,
+                                    capture_output=True, text=True, check=False)
+            calls = (root / "calls").read_text(encoding="utf-8").splitlines()
+            lock = (project / ".composer-image").read_text(encoding="utf-8").strip()
+        self.assertNotIn("Usage: composer update self", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(any(call.endswith(f"{LOCK_OLD} update self --pin") for call in calls), calls)
+        self.assertEqual(lock, LOCK_NEW)
+        self.assertIn(f"pull {LOCK_NEW}", calls)
+
+
 class WrapperPinParityTests(unittest.TestCase):
     """Both wrappers and image_pin accept exactly the same lock text."""
 
