@@ -52,8 +52,9 @@ def _result(level: str, name: str, message: str, fix: str = "") -> Dict[str, Any
 
 #: How a stack whose lock names a Composer from before digest pinning gets out.
 PREDATES_PIN_RECOVERY = (
-    "Switch with a deployer that can pin: 'COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y' "
-    "pins the beta channel's signed release, rewrites the lock and the block, and recreates the pair. "
+    "Switch with a deployer that can pin: 'docker pull debeski/composer:beta', then "
+    "'COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y' pins the beta channel's signed "
+    "release, rewrites the lock and the block, and recreates the pair. "
     "Stay on beta until Composer 1.11.0 stable is published. See docs/updates.md, 'Releases before signing'."
 )
 
@@ -1636,7 +1637,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )]
         detail = f"Composer channel set to {channel} ({image})."
         if not preview.get("files"):
-            detail += " The resident pair already ran that image."
+            detail += " The generated block already named that image."
         if resolution.note and not pin.verified:
             entries = [_result(WARN, "composer-channel-switch", f"{detail} {resolution.note}")]
         else:

@@ -204,11 +204,13 @@ while stable was 1.10.4) runs that release as its deployer, which cannot get it 
 Run the switch with a deployer that can, once:
 
 ```bash
+docker pull debeski/composer:beta
 COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y
 ```
 
-The wrapper runs the image `COMPOSER_SELF_IMAGE` names instead of the lock, trusting
-the beta tag once as a first pin does. That deployer verifies the beta channel's
+The wrapper runs the image `COMPOSER_SELF_IMAGE` names instead of the lock (and does
+not pull one it already has, hence the pull), trusting the beta tag once as a first
+pin does. That deployer verifies the beta channel's
 signed release, writes it to `.composer-image` and `.composer-channel`, rewrites the
 block and recreates the pair. Plain `./start.sh` commands then run the new pin.
 `check` reports the trapped state under [`composer-channel`](check.md#composer-channel)

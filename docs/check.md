@@ -272,6 +272,7 @@ FAIL, the fix, and what `--fix` does.
   `./start.sh` for a pair still running the old image (it recreates both on the pin);
   `composer check --stable` for a beta pin on the stable channel; `--beta` or
   `--stable` to move both halves to a channel. For a pin from before 1.11.0b1:
+  `docker pull debeski/composer:beta`, then
   `COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y`
   ([releases before signing](updates.md#the-composer-pin)).
 - **`--fix`:** pins the generated block's `debeski/composer` lines to the existing
