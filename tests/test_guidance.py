@@ -6,6 +6,7 @@ the default. They appear only with a terminal on stdin and without `-y` /
 advice. A skipped question changes nothing and is listed in the summary.
 """
 
+import copy
 import io
 import os
 import unittest
@@ -362,6 +363,84 @@ class SummaryTests(unittest.TestCase):
 
         self.assertEqual([r["level"] for r in results], [OK, OK, WARN])
 
+    def test_a_confirmed_fix_rereads_every_check_a_repair_can_change(self):
+        """A removed docker-socket-proxy (a WARN) and a restamped schema (an OK) are read again."""
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "worker"]
+        launcher._fix_confirmed = True
+        results = [
+            {"level": WARN, "name": "docker-proxy", "message": "lets composer-agent read every environment"},
+            {"level": OK, "name": "stack-schema", "message": "compose.yml declares stack schema 3."},
+            {"level": OK, "name": "services", "message": "No service is crash-looping (10 running)."},
+        ]
+        with patch.object(launcher, "_check_docker_proxy", return_value={"level": OK, "name": "docker-proxy", "message": "gone"}), \
+                patch.object(launcher, "_check_stack_schema", return_value={"level": OK, "name": "stack-schema", "message": "schema 4"}), \
+                patch.object(launcher, "_check_service_states", return_value={"level": OK, "name": "services", "message": "9 running"}), \
+                patch.object(launcher, "_check_pending_recreate", return_value=None):
+            launcher._recheck_after_fix(results)
+
+        self.assertEqual([r["message"] for r in results], ["gone", "schema 4", "9 running"])
+
+    def test_an_unconfirmed_run_rereads_only_its_failures(self):
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web"]
+        launcher._fix_confirmed = False
+        results = [
+            {"level": WARN, "name": "docker-proxy", "message": "pending"},
+            {"level": OK, "name": "stack-schema", "message": "schema 3"},
+            {"level": FAIL, "name": "services", "message": "celery crash-loops"},
+        ]
+        with patch.object(launcher, "_check_docker_proxy", side_effect=AssertionError("not re-run")), \
+                patch.object(launcher, "_check_stack_schema", side_effect=AssertionError("not re-run")), \
+                patch.object(launcher, "_check_service_states", return_value={"level": OK, "name": "services", "message": "ok"}):
+            launcher._recheck_after_fix(results)
+
+        self.assertEqual([r["level"] for r in results], [WARN, OK, OK])
+
+    def test_removed_services_and_updated_wrappers_do_not_still_need_you(self):
+        """1.11.0b1 live proof N-6: wrappers, docker-proxy and celery were listed after their fix."""
+        from composer import guidance
+
+        launcher = DockerComposeLauncher()
+        launcher._fix_confirmed = True
+        launcher.services = ["web", "worker"]  # rediscovered: the proxy and celery are gone
+        results = [
+            {"level": WARN, "name": "wrapper:start.sh", "message": "start.sh is wrapper version 6"},
+            {"level": WARN, "name": "wrapper:start.ps1", "message": "start.ps1 is wrapper version 6"},
+            {"level": WARN, "name": "docker-proxy", "message": "lets composer-agent read every environment"},
+            {"level": WARN, "name": "celery", "message": "celery cannot start"},
+        ]
+        before = {result["name"]: result["level"] for result in results}
+        fixed = [
+            {"level": OK, "name": "fix:wrappers", "message": "Updated start.sh, start.ps1"},
+            {"level": OK, "name": "fix:celery", "message": "Removed celery"},
+            {"level": OK, "name": "fix:remove-services", "message": "docker-socket-proxy and celery left"},
+        ]
+        current = [
+            {"level": OK, "name": "wrapper:start.sh", "message": "start.sh is at wrapper version 7."},
+            {"level": OK, "name": "wrapper:start.ps1", "message": "start.ps1 is at wrapper version 7."},
+        ]
+        with patch.object(launcher, "_check_wrappers", return_value=current), \
+                patch.object(launcher, "_check_pending_recreate", return_value=None):
+            launcher._recheck_after_fix(results)
+
+        self.assertEqual(results, current, "the proxy and celery findings leave with their services")
+        report = guidance.summary(results, fixed, [], before=before)
+        self.assertEqual(report["still"], [])
+        self.assertIn("wrapper:start.sh", report["healthy"])
+        self.assertIn("celery", report["healthy"])
+
+    def test_an_unreadable_recheck_keeps_a_finding_whose_service_remains(self):
+        launcher = DockerComposeLauncher()
+        launcher._fix_confirmed = True
+        launcher.services = ["web", "docker-socket-proxy"]
+        results = [{"level": WARN, "name": "docker-proxy", "message": "lets composer-agent read every environment"}]
+        with patch.object(launcher, "_check_docker_proxy", return_value=None), \
+                patch.object(launcher, "_check_wrappers", return_value=[]), \
+                patch.object(launcher, "_check_pending_recreate", return_value=None):
+            launcher._recheck_after_fix(results)
+        self.assertEqual([r["name"] for r in results], ["docker-proxy"])
+
     def test_warnings_are_not_rechecked_when_nothing_was_applied(self):
         launcher = DockerComposeLauncher()
         launcher.services = ["web"]
@@ -399,3 +478,47 @@ class SummaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DevOverrideNoteTests(unittest.TestCase):
+    """fix:task-worker's development-override note is dropped once fix:celery mirrored it."""
+
+    PLAN = dict(
+        fixes=[], refused=False, legacy=False, needs_hardening=False, needs_agent_block_migration=False,
+        needs_updater_migration=False, needs_install=False, init_host=None, needs_init_containers=False,
+        needs_dev_override_migration=False, dev_override_file="", base_compose_file="compose.yml",
+        needs_post_start_migration=False, needs_restart_labels=False, needs_worker="add", retire_celery=True,
+        stale_wrappers=[], maintenance_legacy=False, maintenance_unpublished=False, obsolete=[], proxy_routes=[],
+        media_exposed=False, front_proxy_files=[], relay_env_files=[], update_policy_files=[], grant_access={},
+        stamp_repair={"files": [], "notes": [], "schema": None}, redis_files=[], redis_corrupt=False,
+        secret_writes={}, pending=True,
+    )
+
+    def _fixes(self, celery_files):
+        from composer import worker_migration
+
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "celery"]
+        launcher.active_compose_files = ["compose.yml"]
+        migrated = {"files": ["compose.yml"], "notes": [worker_migration.DEV_WAITS_NOTE], "backup_root": "/b/w"}
+        retired = {"applied": True, "files": celery_files, "backup_root": "/b/c"}
+        with patch.object(launcher, "_fix_plan", return_value=copy.deepcopy(self.PLAN)), \
+                patch("composer.checkup.confirm", return_value=True), \
+                patch.object(launcher, "build_compose_env", return_value={}), \
+                patch("composer.worker_migration.migrate", return_value=migrated), \
+                patch("composer.worker_migration.retire_celery", return_value=retired), \
+                patch("sys.stdout", new_callable=io.StringIO):
+            fixes = launcher._maybe_fix(_args(fix=True, yes=True), [])
+        return next(entry for entry in fixes if entry["name"] == "fix:task-worker")["message"]
+
+    def test_the_note_goes_when_removing_celery_rewrote_the_override(self):
+        from composer import worker_migration
+
+        message = self._fixes(["compose.dev.yml", "compose.yml"])
+        self.assertNotIn(worker_migration.DEV_WAITS_NOTE, message)
+        self.assertIn("Added the worker service", message)
+
+    def test_the_note_stays_when_the_override_was_not_touched(self):
+        from composer import worker_migration
+
+        self.assertIn(worker_migration.DEV_WAITS_NOTE, self._fixes(["compose.yml"]))

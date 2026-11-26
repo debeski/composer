@@ -818,5 +818,73 @@ class PreviewLifecycleTests(unittest.TestCase):
         self.assertEqual(recreate["files"], [])
 
 
+
+class SharedEnvironmentExpectationTests(_InTempProject):
+    """1.11.0b1 live proof N-4: the confirmation omitted db, which merges x-environment on older stacks."""
+
+    COMPOSE = (
+        "name: demo\n"
+        "x-environment:\n"
+        "  # Database settings\n"
+        "  &de\n"
+        '  DLUX_STACK_SCHEMA: "4"\n'
+        "services:\n"
+        "  db:\n    image: postgres:17\n    environment:\n      <<: *de\n"
+        "  web:\n    image: app\n    environment:\n      <<: *de\n"
+        "  worker:\n    image: app\n    environment:\n      <<: *de\n"
+        "  smtp-relay:\n    image: app\n"
+        "  composer-agent:\n    image: debeski/composer:beta\n"
+        "  composer-executor:\n    image: debeski/composer:beta\n"
+    )
+
+    def _launcher(self):
+        Path("compose.yml").write_text(self.COMPOSE, encoding="utf-8")
+        launcher = DockerComposeLauncher()
+        launcher.resolve_active_compose_files()
+        launcher.services = ["db", "web", "worker", "smtp-relay", "composer-agent", "composer-executor"]
+        calls = []
+
+        def compose(args, timeout=None):
+            calls.append((list(args), list(launcher.active_compose_files)))
+            text = Path(launcher.active_compose_files[0]).read_text(encoding="utf-8")
+            shared = {"DLUX_STACK_SCHEMA": "4"}
+            if launcher._SHARED_PROBE_KEY in text:
+                shared[launcher._SHARED_PROBE_KEY] = "1"
+            services = {name: {"image": "app", "environment": dict(shared)} for name in ("db", "web", "worker")}
+            services.update({name: {"image": "x"} for name in ("smtp-relay", "composer-agent", "composer-executor")})
+            return True, json.dumps({"name": "demo", "services": services}), ""
+
+        return launcher, calls, compose
+
+    def test_the_x_environment_mergers_come_from_the_model(self):
+        launcher, calls, compose = self._launcher()
+        with patch.object(launcher, "run_docker_compose", side_effect=compose), \
+                patch.object(launcher, "resolve_secrets", return_value=(True, "")):
+            shared = launcher._shared_environment_services()
+        self.assertEqual(shared, {"db", "web", "worker"})
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(args[:2] == ["--project-directory", str(self.root.resolve())] for args, _ in calls))
+        self.assertEqual(launcher.active_compose_files, ["compose.yml"], "the file list is restored")
+        self.assertEqual(Path("compose.yml").read_text(encoding="utf-8"), self.COMPOSE, "the project is untouched")
+
+    def test_the_confirmation_lists_db_when_the_update_policy_line_changes_it(self):
+        launcher, _, compose = self._launcher()
+        plan = {"pending": True, "refused": False, "update_policy_files": ["compose.yml"]}
+        with patch.object(launcher, "run_docker_compose", side_effect=compose), \
+                patch.object(launcher, "resolve_secrets", return_value=(True, "")):
+            life = launcher._lifecycle_expectation(plan)
+            with patch.object(launcher, "_fix_plan", return_value=plan):
+                entries = launcher.planned_lifecycle(_args(fix=False), [])
+        self.assertEqual(life["recreate"], ["db", "web", "worker"])
+        note = [e for e in entries if e["name"] == "recreate-services"][0]["note"]
+        self.assertIn("expected: db, web and worker", note)
+
+    def test_without_a_readable_model_the_fixed_list_is_used(self):
+        launcher, _, _ = self._launcher()
+        with patch.object(launcher, "run_docker_compose", return_value=(False, "", "boom")), \
+                patch.object(launcher, "resolve_secrets", return_value=(True, "")):
+            self.assertEqual(launcher._shared_environment_services(), set(launcher._SHARED_ENVIRONMENT))
+
+
 if __name__ == "__main__":
     unittest.main()

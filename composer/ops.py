@@ -594,6 +594,12 @@ def _update_resident_pair(runtime, request, self_request_path=None) -> dict:
     token = str(request.get("token") or "")
     resident = _resident_update_status(runtime)
     if resident["checked"] and not resident["update_available"]:
+        if resident["published_version"] != resident["version"]:
+            raise ValueError(
+                f"The resident Composer is {resident['version']}, newer than the "
+                f"{resident['channel']} channel's {resident['published_version']}; a channel "
+                "tag never moves the pair backwards. Nothing to update."
+            )
         raise ValueError(
             f"The resident Composer is already {resident['version']}, the current "
             f"version on the {resident['channel']} channel. Nothing to update."
@@ -627,6 +633,10 @@ def _update_resident_pair(runtime, request, self_request_path=None) -> dict:
 LOG_LINES_DEFAULT = 200
 LOG_LINES_MAX = 1000
 MAX_LOG_CHARS = 60000
+#: Docker's answers for a container that went away between Compose listing it and reading it.
+_VANISHED_CONTAINER = ("dead or marked for removal", "no such container")
+#: Seconds before the one retry of such a read: long enough for Docker to finish the removal.
+LOGS_RETRY_DELAY = 1.0
 
 
 def _stack_launcher(runtime):
@@ -804,11 +814,20 @@ def _merge_logs(text: str, lines: int) -> str:
 def _read_logs(launcher, service: str, lines: int) -> str:
     """The redacted tail of one service's logs, or of all of them merged; capped.
 
-    The Docker half of ``logs-tail``, run where the Docker socket is.
+    The Docker half of ``logs-tail``, run where the Docker socket is. A read that
+    fails because a container vanished under it (a recreate during an update) is
+    asked once more; any other failure is reported as it is.
     """
     args = (["logs", "--no-color", "--no-log-prefix", "--tail", str(lines), service] if service
             else ["logs", "--no-color", "--timestamps", "--tail", str(lines)])
     ok, out, err = launcher.run_docker_compose(args, timeout=60)
+    if not ok and any(sign in str(err or out or "").lower() for sign in _VANISHED_CONTAINER):
+        # A recreate replaced the container Compose resolved; asking again by
+        # service resolves the one that replaced it.
+        import time
+
+        time.sleep(LOGS_RETRY_DELAY)
+        ok, out, err = launcher.run_docker_compose(args, timeout=60)
     if not ok:
         raise ValueError(redact_text(err or out or "Could not read the logs.")[:MAX_MESSAGE_CHARS])
     text = redact_text((out or "") if service else _merge_logs(out, lines))

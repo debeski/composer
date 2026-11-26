@@ -59,6 +59,7 @@
   - [ ] Drop pip/setuptools from the image AFTER the `pypi-attestations` install layer (it is now the only pip dependency; +95MB, 347->442MB) - clears 3 fixable HIGH from pip's vendor tree.
   - [ ] Add `provenance: mode=max` + `sbom: true` to the release build-push step (Scout attestation policy).
 - **Completed Recently:**
+  - [x] 2026-11-26 `1.11/live_proof_fixes_2`: an `up` no longer recreates the pair on an older Composer that wrapper 7's pre-pin pull of the channel tag left behind (`hold_older_resident_tag`); no wrapper change.
   - [x] Beta-first gate (2026-09-10): `validate_beta_first()` in `composer.release_tag` refuses a stable `vX.Y.0` without a pushed `bN`/`rcN` image of that version in history; `classify` checks out with `fetch-depth: 0`. Ships in 1.3.14b2 with the `:beta` alias fix.
   - [x] BLOCKER: `KNOWN_REQUIREMENT_KEYS` lacked `migration_baseline`, and that allow-list fails closed — **every published Composer would have refused the Dlux 1.8.14 manifest outright**, so the release was uninstallable as written. Proven by a test run against the pre-fix module (2026-09-08).
   - [x] v1.3.14b1 channels: `versions.py` (real PEP 440 via `packaging`, now a declared image dep) replaces three hand-rolled regexes that each broke on prereleases — the candidate sort tied `b2`/`b10`, `version_sort_key` tied a beta with its own final (breaking rollback and prune), and `_version_at_least` let `1.3.14b1` satisfy `>=1.3.14`. Plus `dlux_channel.py` (read-only policy + request), `channel_config.py` + wrappers at marker 3, `dlux channel`, `check --beta|--stable` as one operation over wrapper *and* resident pair, and `release_tag.py` tag classification with the `:beta`-never-moves-backwards rule (2026-09-08).
@@ -72,12 +73,12 @@
 - 2026-11-23: `1.10/code_followups` with `pkg-django-lux/main/.venv`: suite 1,232 OK (9 skips); log `code_followups/.xclude/validation/suite-2026-11-23.log`. Unit tests only, no image or live run.
 - 2026-11-23: `1.10/non_root_app` review fixes in the scratch venv (CI's set): suite 1173 OK (17 skips; the DjangoLux contract mirror passes against `pkg-django-lux/non_root_app`), compileall OK; unit tests only. 2026-11-19 smoke test + live run PASS.
 - 2026-11-23: `1.10/release_1_10_3` `99e1ee1`: suite 1,206 OK (18 skips), compileall; image smoke incl. no pip; contract mirror checked by hand against DjangoLux `1.16/release_1_16_3`.
-- 2026-11-26: `1.11/live_proof_fixes` (1.11.0b1 live proof S1-S5) with `pkg-django-lux/main/.venv`, `DLUX_CHECKOUT` = `release_1_17_0`: suite 1,634 OK + 1 expected FAIL (wrapper bytes not yet in DjangoLux), 1,635 OK (9 skips) against a copy carrying the new wrappers; alignment gate: only `WRAPPER … differs`. Unit tests only.
+- 2026-11-26: `1.11/live_proof_fixes_2` (live proof D-G: N-2, N-4, N-6, F4/N-8, N-9) with `pkg-django-lux/main/.venv`, `DLUX_CHECKOUT` = `release_1_17_0`: suite 1,666 OK (9 skips); each new test fails against the pre-fix sources; alignment gate `aligned`. Unit tests only; `scripts/smoke-test.sh` change not run (needs an image).
 - Host Python cannot run the suite (no cryptography/packaging/yaml): use a venv with CI's set (`PyYAML==6.0.3 "packaging>=23.2" "cryptography>=42"`), or run it in the built image with `pip install PyYAML==6.0.3` and `~/Desktop/depy` mounted at `/depy`, so the sibling `pkg-django-lux` comparisons run.
 ### One-line info about last time edited Docs:
 - 2026-11-23: `1.10/docs_reorg`: README cut to a front page; topics moved to `docs/` (index `docs/README.md`, `check.md` one entry per finding); `executor-hardening.md` rewritten present-tense; doc claims fixed to match code; CHANGELOG `## Unreleased` (1 entry). Pre-rewrite copies in that checkout's `.xclude/`.
 - 2026-11-23: `1.10/code_followups`: `executor-hardening.md` Framing (oversize result → `failed`), `agent-protocol-v1.md` deployment checks (shortened diffs); CHANGELOG `## Unreleased` (3 entries).
-- 2026-11-26: `1.11/live_proof_fixes`: `check.md` (after the repairs, `task-worker`), `deploying.md` (downgrade guard database record, settle window, runtime override), `stack-migrations.md` (schema 5 order, way out); CHANGELOG `## v1.11.0b1` (5 entries).
+- 2026-11-26: `1.11/live_proof_fixes_2`: `updates.md` (image updates, the Composer pin), `check.md` (plan, re-check), `resident-pair.md`, `commands.md`, `agent-protocol-v1.md`, `executor-hardening.md` (`logs_tail`); CHANGELOG `## v1.11.0b1` (+5 entries).
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

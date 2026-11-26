@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1715,9 +1716,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
     def _recheck_after_fix(self, results: List[Dict[str, Any]]) -> None:
         """Report, in place, what the repairs changed as it now stands.
 
-        A repaired FAIL must not fail the run. After a confirmed run the WARNs a
-        repair clears by rewriting files are read again too, so the summary says
-        what is healthy now rather than what was.
+        A repaired FAIL must not fail the run. After a confirmed run every check a
+        repair can change is read again, whatever it said before (a removed
+        docker-socket-proxy, a restamped schema, a dropped service's count, an
+        updated wrapper), so the report and the summary say what stands now rather
+        than what was. A check that no longer reports because the run removed its
+        service leaves the report, as it would from a fresh `check`.
         """
         rechecks = {
             "resident-commands": self._check_resident_commands,
@@ -1741,18 +1745,30 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "removed-services": self._check_removed_services,
             "proxy-routes": self._check_proxy_routes,
             "topology": self._check_topology,
+            "celery": self._check_celery,
         } if confirmed else {}
-        for index, result in enumerate(results):
+        wrappers_now = {entry["name"]: entry for entry in self._check_wrappers()} if confirmed else {}
+        # The service whose removal leaves a check with nothing to report.
+        subject = {"docker-proxy": "docker-socket-proxy", "celery": "celery"}
+        current = []
+        for result in results:
             name, level = result.get("name"), result.get("level")
-            if name in rechecks and (level == FAIL or name in always):
+            if name in wrappers_now:
+                current.append(wrappers_now[name])
+                continue
+            if name in rechecks and (level == FAIL or name in always or confirmed):
                 check = rechecks[name]
-            elif name in refreshed and level != OK:
+            elif name in refreshed:
                 check = refreshed[name]
             else:
+                current.append(result)
                 continue
             rechecked = check()
             if rechecked is not None:
-                results[index] = rechecked
+                current.append(rechecked)
+            elif not (confirmed and name in subject and subject[name] not in set(self.services)):
+                current.append(result)
+        results[:] = current
         if confirmed and self.services:
             # The lifecycle step may have replaced the containers a record named, or left new ones behind.
             pending = self._check_pending_recreate()
@@ -2762,6 +2778,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if grant_access:
             fixes.append(self._fix_app_permissions(grant_access))
         # Last: it builds on what the steps above made of an older layout.
+        worker_entry = None
         if needs_worker:
             from .stack_cleanup import StackCleanupError
 
@@ -2777,7 +2794,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     detail = f"Brought the stack to schema 5: {', '.join(outcome['files'])}."
                 if outcome["notes"]:
                     detail += " " + " ".join(outcome["notes"])
-                fixes.append(_result(OK, "fix:task-worker", f"{detail} Backup: {outcome['backup_root'] or 'n/a'}"))
+                worker_entry = _result(OK, "fix:task-worker", f"{detail} Backup: {outcome['backup_root'] or 'n/a'}")
+                fixes.append(worker_entry)
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:task-worker", str(exc)))
         if retire_celery and not any(
@@ -2795,6 +2813,11 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         f"Removed celery ({', '.join(outcome['files'])}); its container is gone and worker runs "
                         f"DjangoLux's tasks. Backup: {outcome['backup_root']}",
                     ))
+                    if worker_entry is not None and worker_migration.DEV_OVERRIDE in outcome["files"]:
+                        # Removing celery mirrored the development override onto worker.
+                        worker_entry["message"] = worker_entry["message"].replace(
+                            f" {worker_migration.DEV_WAITS_NOTE}", ""
+                        )
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:celery", str(exc)))
         # After every step that restamps: it re-reads the files they left.
@@ -3297,7 +3320,66 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
     # Services each repair changes, for the confirmation and the Operations
     # preview. What is recreated goes by the Compose model, not by this list.
     _EDGE_PROXIES = ("caddy", "nginx", "proxy")
+    # The x-environment mergers when the Compose model cannot say (see below).
     _SHARED_ENVIRONMENT = ("web", "worker", "celery", "smtp-relay")
+    _SHARED_PROBE_KEY = "COMPOSER_SHARED_ENVIRONMENT_PROBE"
+
+    def _shared_environment_services(self) -> set:
+        """The services that merge ``x-environment``, by the same model diff ``_finish_fix`` recreates by.
+
+        A scratch copy of the file that defines the block gains one probe line,
+        and the resolved models with and without it are compared one service at a
+        time: each service whose definition changes is one a repair to the block
+        recreates. Older stacks also merge it into db, which a fixed list missed.
+        Falls back to ``_SHARED_ENVIRONMENT`` when Compose cannot say.
+        """
+        import tempfile
+
+        fallback = set(self._SHARED_ENVIRONMENT)
+        files = [str(name) for name in (getattr(self, "active_compose_files", None) or [])]
+        header = re.compile(r"(?m)^x-environment:[^\n]*\n")
+        for index, name in enumerate(files):
+            try:
+                contents = Path(name).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            match = header.search(contents)
+            if match:
+                break
+        else:
+            return fallback
+        end = re.compile(r"(?m)^\S").search(contents, match.end())
+        entry = re.compile(r"(?m)^([ \t]+)[A-Za-z_][A-Za-z0-9_]*:").search(
+            contents, match.end(), end.start() if end else len(contents))
+        if not entry:
+            return fallback
+        probed = (contents[:entry.start()] + f'{entry.group(1)}{self._SHARED_PROBE_KEY}: "1"\n'
+                  + contents[entry.start():])
+        project_dir = str(Path(files[0]).resolve().parent)
+        saved_files = list(files)
+        paused = getattr(self, "_runtime_override_paused", False)
+        try:
+            with tempfile.TemporaryDirectory() as scratch, self._deployment_environment():
+                probe = Path(scratch) / Path(files[index]).name
+                probe.write_text(probed, encoding="utf-8")
+                # Without the runtime override: rewriting it for the scratch file list would touch the project.
+                self._runtime_override_paused = True
+                models = []
+                for active in (saved_files, saved_files[:index] + [str(probe)] + saved_files[index + 1:]):
+                    self.active_compose_files = active
+                    ok, out, _err = self.run_docker_compose(
+                        ["--project-directory", project_dir, "config", "--format", "json"], timeout=20)
+                    models.append(json.loads(out) if ok else None)
+        except (OSError, ValueError):
+            return fallback
+        finally:
+            self.active_compose_files = saved_files
+            self._runtime_override_paused = paused
+        if not all(isinstance(model, dict) for model in models):
+            return fallback
+        before, after = (stack_lifecycle.definitions(model) for model in models)
+        changed = set(stack_lifecycle.changes(before, after)["changed"])
+        return changed or fallback
 
     def _lifecycle_expectation(self, plan: Dict[str, Any]) -> Dict[str, List[str]]:
         """``{"remove", "recreate", "resident"}``: the services a planned run removes and recreates."""
@@ -3315,9 +3397,16 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if get("needs_init_containers"):
             remove.add("dlux-updater")
         remove &= services
-        # Services that merge x-environment, where the schema stamp and shared settings live.
-        shared = set(self._SHARED_ENVIRONMENT)
         recreate: set = set()
+        if any((
+            get("maintenance_legacy"), get("media_exposed"), get("relay_env_files"),
+            (get("stamp_repair") or {}).get("files"), get("update_policy_files"),
+            "DLUX_UPDATE_POLICY" in choices, get("needs_worker"),
+        )):
+            # Services that merge x-environment, where the schema stamp and shared settings live.
+            shared = self._shared_environment_services()
+        else:
+            shared = set()
         if get("maintenance_legacy") or get("media_exposed"):
             recreate |= set(self._EDGE_PROXIES) | shared
         if get("front_proxy_files") or "DLUX_FRONT_PROXY" in choices:

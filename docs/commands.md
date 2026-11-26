@@ -36,15 +36,17 @@ where they make sense, to the commands below.
 Updates the Composer deployer first (wrapper 5+), then pulls the latest image(s),
 recreates the affected containers, waits for health checks, and runs post-start
 tasks. Name services to scope both the pull and the recreate; naming them leaves the
-deployer as it is. `-u [service]` is the compact form. Details:
+deployer as it is. `-u [service]` is the compact form. A resident pair on a moving
+Composer tag is left out; it moves through `agent update`. Details:
 [image updates](updates.md#image-updates).
 
 ### `pull`
 
 `composer pull [--status-file PATH] [-f FILE] [-d] [service...]`
 
-Only downloads images. It never recreates containers, runs health checks, or
-executes post-start tasks. It replaces the retired `-uo` and `update -o` forms.
+Only downloads images, never a resident pair's moving Composer tag. It never
+recreates containers, runs health checks, or executes post-start tasks. It replaces
+the retired `-uo` and `update -o` forms.
 
 ### `restart`
 
@@ -128,8 +130,8 @@ Undoes a group-access grant `check --fix` made on app data, from the
 
 | Command | Does |
 | --- | --- |
-| `composer update self [--pin] [--allow-downgrade] [--allow-unverified-composer]` | pins the deployer to the channel's newest signed release (`.composer-image`), pulls it and leaves the stack alone; `--pin` only writes the pin, which the wrapper then pulls; `self update` is a deprecated alias ([the Composer pin](updates.md#the-composer-pin)) |
-| `composer agent update [--allow-downgrade] [--allow-unverified-composer]` | pins the same release, pulls the resident pair's image and recreates `composer-agent` and `composer-executor` |
+| `composer update self [--pin] [--allow-downgrade] [--allow-unverified-composer]` | pins the deployer to the channel's newest signed release (`.composer-image`), pulls it and leaves the stack alone; with nothing to pin it pulls nothing; `--pin` only writes the pin, which the wrapper then pulls; `self update` is a deprecated alias ([the Composer pin](updates.md#the-composer-pin)) |
+| `composer agent update [--allow-downgrade] [--allow-unverified-composer]` | pins the same release, pulls the resident pair's image and recreates `composer-agent` and `composer-executor`; with nothing to pin it changes nothing |
 | `composer agent restart` | restarts the pair and waits for health |
 | `composer agent off` | stops the pair |
 | `composer agent enable [--apply]` | migrates a legacy or agent-only stack to the hardened pair; dry run by default ([topology migrations](stack-migrations.md#topology-migrations)) |

@@ -478,6 +478,18 @@ class ResidentUpToDateTests(unittest.TestCase):
         ack = json.loads((self.state / "ops-request.json.ack").read_text(encoding="utf-8"))
         self.assertIn("Nothing to update", ack["error"])
 
+    def test_a_pair_ahead_of_its_channel_is_not_moved_back(self):
+        # The live proof's pair ran 1.11.0b1 while the beta tag still named 1.10.4.
+        with patch("composer.version.read_composer_version", return_value="1.11.0b1"), \
+             patch("composer.registry.remote_image_version", return_value="1.10.4"), \
+             patch("composer.executor_client.executor_configured", return_value=True), \
+             patch("composer.executor_client.run_operation") as delegated:
+            self.responder.answer()
+        delegated.assert_not_called()
+        ack = json.loads((self.state / "ops-request.json.ack").read_text(encoding="utf-8"))
+        self.assertIn("never moves the pair backwards", ack["error"])
+        self.assertNotIn("current version", ack["error"])
+
     def test_an_unreadable_registry_does_not_block_the_update(self):
         # Refusing here would strand a deployment whose registry is unreachable
         # but whose pair genuinely needs replacing.
