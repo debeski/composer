@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "version": "1.11.0b1",
-  "summary": "Composer 1.11 is a fix and security line, paired with DjangoLux 1.17. check and check --fix are honest and complete: they name the real way out of an old stack, re-stamp every schema stamp, fail on a missing worker or secrets file, run one at a time, keep line endings, and now finish the job: dropped services are removed, changed ones recreated and health-checked, with questions only at a terminal and -y for scripts. Deploys wait until every container stays healthy, keep the proxy up on failure and refuse an older image. Redis moves to crash-safe snapshots and a damaged append-only file is recovered. The agent no longer reads other containers' secrets: the executor answers its reads and docker-socket-proxy leaves the stack. Composer pins its own image to a digest its release job signs. DLUX_UPDATE_POLICY can limit which updates the app may request.",
+  "summary": "Composer 1.11 is a fix and security line, paired with DjangoLux 1.17. check and check --fix are honest and complete: they name the real way out of an old stack, re-stamp every schema stamp, fail on a missing worker or secrets file, run one at a time, keep line endings, and now finish the job: dropped services are removed, changed ones recreated and health-checked, with questions only at a terminal and -y for scripts. Deploys wait until every container stays healthy, keep the proxy up on failure and refuse an older image. Redis moves to crash-safe snapshots and a damaged append-only file is recovered. The agent no longer reads other containers' secrets: the executor answers its reads and docker-socket-proxy leaves the stack. Composer pins its own image to a digest its release job signs and never moves it backwards. DLUX_UPDATE_POLICY can limit which updates the app may request.",
   "highlights": [
     "check --fix finishes the job: removes dropped services, recreates changed ones, health-checks them.",
     "Deploys wait for stable health, keep the maintenance page up on failure, refuse older images.",
     "Redis switches to crash-safe snapshots; a damaged append-only file is recovered.",
     "The agent no longer reads container secrets; docker-socket-proxy leaves the stack.",
-    "Composer pins its own image to a signed digest; updates verify it first.",
+    "Composer pins its own image to a signed digest; updates verify it and never move back.",
     "DLUX_UPDATE_POLICY limits which updates the app may request.",
     "Pairs with DjangoLux 1.17; run ./start.sh check --fix after updating."
   ],
