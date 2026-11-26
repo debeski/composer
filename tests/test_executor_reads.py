@@ -42,6 +42,7 @@ class FakeCompose:
     def __init__(self, logs="line one\n"):
         self.calls = []
         self.logs = logs
+        self.logs_answers = []
 
     def __call__(self, launcher, args, timeout=None):
         self.calls.append(list(args))
@@ -50,7 +51,7 @@ class FakeCompose:
         if args[0] == "ps":
             return True, PS, ""
         if args[0] == "logs":
-            return True, self.logs, ""
+            return self.logs_answers.pop(0) if self.logs_answers else (True, self.logs, "")
         return False, "", "unexpected"
 
 
@@ -123,6 +124,28 @@ class ExecutorHandlerTests(unittest.TestCase):
         self.assertEqual(result["state"], "succeeded")
         self.assertIn("booting", result["logs"])
         self.assertNotIn("supersecret", result["logs"])
+
+    def test_a_container_swapped_during_the_read_is_read_again_once(self):
+        # 1.11.0b1 live proof E3 (N-9): 2 of ~70 reads during an image update failed here.
+        self.compose.logs_answers = [
+            (False, "", "Error response from daemon: can not get logs from container which is dead "
+                        "or marked for removal"),
+            (True, "after the swap\n", ""),
+        ]
+        with patch("time.sleep") as pause:
+            result = self._handle("logs_tail", {"service": "web", "lines": 5})
+        self.assertEqual(result["state"], "succeeded")
+        self.assertIn("after the swap", result["logs"])
+        self.assertEqual(sum(1 for call in self.compose.calls if call[0] == "logs"), 2)
+        pause.assert_called_once_with(ops.LOGS_RETRY_DELAY)
+
+    def test_any_other_logs_failure_is_not_retried(self):
+        self.compose.logs_answers = [(False, "", "Cannot connect to the Docker daemon")] * 2
+        with patch("time.sleep") as pause, self.assertRaises(Exception) as caught:
+            self._handle("logs_tail", {"service": "web", "lines": 5})
+        self.assertIn("Cannot connect", str(caught.exception))
+        self.assertEqual(sum(1 for call in self.compose.calls if call[0] == "logs"), 1)
+        pause.assert_not_called()
 
     def test_a_non_ascii_tail_still_fits_one_frame(self):
         # JSON escapes each of these to six bytes: 60 000 of them is ~360 KB.

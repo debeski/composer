@@ -40,6 +40,7 @@
 - A compromised networked agent can abuse the POST-enabled Docker proxy with host-root-equivalent impact.
 - Shared-volume temp paths permit symlink clobbering; spool, output, event, and command queues need effective bounds. The executor socket's peer-uid check is off unless `COMPOSER_EXECUTOR_PEER_UID` is set, which the generated block never does.
 - Version gating fails open on missing labels; mutable refs and Windows `shell=True` reconstruction widen risk.
+- Wrapper 7 `pin_deployer` pulls the channel tag before the first pin, which moves the local tag a pair block names; a later `./start.sh` then recreates the pair on it. Needs a wrapper change (DjangoLux byte copy).
 
 ### Incomplete Tasks:
 - **Priority 1:**
@@ -72,12 +73,12 @@
 - 2026-11-23: `1.10/code_followups` with `pkg-django-lux/main/.venv`: suite 1,232 OK (9 skips); log `code_followups/.xclude/validation/suite-2026-11-23.log`. Unit tests only, no image or live run.
 - 2026-11-23: `1.10/non_root_app` review fixes in the scratch venv (CI's set): suite 1173 OK (17 skips; the DjangoLux contract mirror passes against `pkg-django-lux/non_root_app`), compileall OK; unit tests only. 2026-11-19 smoke test + live run PASS.
 - 2026-11-23: `1.10/release_1_10_3` `99e1ee1`: suite 1,206 OK (18 skips), compileall; image smoke incl. no pip; contract mirror checked by hand against DjangoLux `1.16/release_1_16_3`.
-- 2026-11-26: `1.11/live_proof_fixes` (1.11.0b1 live proof S1-S5) with `pkg-django-lux/main/.venv`, `DLUX_CHECKOUT` = `release_1_17_0`: suite 1,634 OK + 1 expected FAIL (wrapper bytes not yet in DjangoLux), 1,635 OK (9 skips) against a copy carrying the new wrappers; alignment gate: only `WRAPPER … differs`. Unit tests only.
+- 2026-11-26: `1.11/live_proof_fixes_2` (live proof D-G: N-2, N-4, N-6, F4/N-8, N-9) with `pkg-django-lux/main/.venv`, `DLUX_CHECKOUT` = `release_1_17_0`: suite 1,660 OK (9 skips); each new test fails against the pre-fix sources; alignment gate `aligned`. Unit tests only; `scripts/smoke-test.sh` change not run (needs an image).
 - Host Python cannot run the suite (no cryptography/packaging/yaml): use a venv with CI's set (`PyYAML==6.0.3 "packaging>=23.2" "cryptography>=42"`), or run it in the built image with `pip install PyYAML==6.0.3` and `~/Desktop/depy` mounted at `/depy`, so the sibling `pkg-django-lux` comparisons run.
 ### One-line info about last time edited Docs:
 - 2026-11-23: `1.10/docs_reorg`: README cut to a front page; topics moved to `docs/` (index `docs/README.md`, `check.md` one entry per finding); `executor-hardening.md` rewritten present-tense; doc claims fixed to match code; CHANGELOG `## Unreleased` (1 entry). Pre-rewrite copies in that checkout's `.xclude/`.
 - 2026-11-23: `1.10/code_followups`: `executor-hardening.md` Framing (oversize result → `failed`), `agent-protocol-v1.md` deployment checks (shortened diffs); CHANGELOG `## Unreleased` (3 entries).
-- 2026-11-26: `1.11/live_proof_fixes`: `check.md` (after the repairs, `task-worker`), `deploying.md` (downgrade guard database record, settle window, runtime override), `stack-migrations.md` (schema 5 order, way out); CHANGELOG `## v1.11.0b1` (5 entries).
+- 2026-11-26: `1.11/live_proof_fixes_2`: `updates.md` (image updates, the Composer pin), `check.md` (plan, re-check), `resident-pair.md`, `commands.md`, `agent-protocol-v1.md`, `executor-hardening.md` (`logs_tail`); CHANGELOG `## v1.11.0b1` (+5 entries).
 
 ## Part 2: Global
 ### Global Standard Helpers, Shortcuts, Info, etc.:

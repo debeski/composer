@@ -118,7 +118,9 @@ assert launcher.secrets_source == "inherited launcher environment"
 '
 echo "    secrets: inherited resident environment accepted without project-file access"
 
-# 6. Dedicated lifecycle commands must target only composer-agent.
+# 6. Dedicated lifecycle commands must target only composer-agent. A candidate is
+# newer than any published release, so `agent update` has nothing to pin and must
+# leave the running container as it is: the pair moves only through its pin.
 agent_compose="$PWD/tests/fixtures/agent-lifecycle-compose.yml"
 agent_lifecycle() {
   docker run --rm \
@@ -133,7 +135,14 @@ cleanup_agent_lifecycle() {
   docker compose -f "$agent_compose" down >/dev/null 2>&1 || true
 }
 trap cleanup_agent_lifecycle EXIT
+docker compose -f "$agent_compose" up -d >/dev/null
+before="$(docker compose -f "$agent_compose" ps -q composer-agent)"
 agent_lifecycle agent update
+after="$(docker compose -f "$agent_compose" ps -q composer-agent)"
+[ -n "$before" ] && [ "$before" = "$after" ] || {
+  echo "::error::agent update with nothing to pin replaced composer-agent ($before -> $after)"
+  exit 1
+}
 agent_lifecycle agent restart
 agent_lifecycle agent off
 running="$(docker compose -f "$agent_compose" ps --status running --services)"

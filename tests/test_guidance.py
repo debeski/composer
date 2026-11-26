@@ -397,6 +397,50 @@ class SummaryTests(unittest.TestCase):
 
         self.assertEqual([r["level"] for r in results], [WARN, OK, OK])
 
+    def test_removed_services_and_updated_wrappers_do_not_still_need_you(self):
+        """1.11.0b1 live proof N-6: wrappers, docker-proxy and celery were listed after their fix."""
+        from composer import guidance
+
+        launcher = DockerComposeLauncher()
+        launcher._fix_confirmed = True
+        launcher.services = ["web", "worker"]  # rediscovered: the proxy and celery are gone
+        results = [
+            {"level": WARN, "name": "wrapper:start.sh", "message": "start.sh is wrapper version 6"},
+            {"level": WARN, "name": "wrapper:start.ps1", "message": "start.ps1 is wrapper version 6"},
+            {"level": WARN, "name": "docker-proxy", "message": "lets composer-agent read every environment"},
+            {"level": WARN, "name": "celery", "message": "celery cannot start"},
+        ]
+        before = {result["name"]: result["level"] for result in results}
+        fixed = [
+            {"level": OK, "name": "fix:wrappers", "message": "Updated start.sh, start.ps1"},
+            {"level": OK, "name": "fix:celery", "message": "Removed celery"},
+            {"level": OK, "name": "fix:remove-services", "message": "docker-socket-proxy and celery left"},
+        ]
+        current = [
+            {"level": OK, "name": "wrapper:start.sh", "message": "start.sh is at wrapper version 7."},
+            {"level": OK, "name": "wrapper:start.ps1", "message": "start.ps1 is at wrapper version 7."},
+        ]
+        with patch.object(launcher, "_check_wrappers", return_value=current), \
+                patch.object(launcher, "_check_pending_recreate", return_value=None):
+            launcher._recheck_after_fix(results)
+
+        self.assertEqual(results, current, "the proxy and celery findings leave with their services")
+        report = guidance.summary(results, fixed, [], before=before)
+        self.assertEqual(report["still"], [])
+        self.assertIn("wrapper:start.sh", report["healthy"])
+        self.assertIn("celery", report["healthy"])
+
+    def test_an_unreadable_recheck_keeps_a_finding_whose_service_remains(self):
+        launcher = DockerComposeLauncher()
+        launcher._fix_confirmed = True
+        launcher.services = ["web", "docker-socket-proxy"]
+        results = [{"level": WARN, "name": "docker-proxy", "message": "lets composer-agent read every environment"}]
+        with patch.object(launcher, "_check_docker_proxy", return_value=None), \
+                patch.object(launcher, "_check_wrappers", return_value=[]), \
+                patch.object(launcher, "_check_pending_recreate", return_value=None):
+            launcher._recheck_after_fix(results)
+        self.assertEqual([r["name"] for r in results], ["docker-proxy"])
+
     def test_warnings_are_not_rechecked_when_nothing_was_applied(self):
         launcher = DockerComposeLauncher()
         launcher.services = ["web"]

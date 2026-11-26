@@ -445,8 +445,9 @@ class AgentUpdatePinTests(unittest.TestCase):
         self.assertEqual(launcher.pin_resident, {"allow_downgrade": False, "allow_unverified": True})
         with patch("composer.image_pin.update_pin", side_effect=image_pin.PinError("older than the pinned")), \
              patch.dict(os.environ, {"COMPOSER_SELF_IMAGE": ""}):
-            ok, detail = launcher.pin_resident_pair()
+            ok, moved, detail = launcher.pin_resident_pair()
         self.assertFalse(ok)
+        self.assertFalse(moved)
         self.assertIn("older than the pinned", detail)
 
     def test_the_executor_helper_can_write_the_pin(self):
@@ -579,7 +580,7 @@ class BootstrapTests(unittest.TestCase):
 class AgentUpdateSmokeTests(unittest.TestCase):
     """scripts/smoke-test.sh's `agent update` on a candidate build: read-only fixture, no statement."""
 
-    def test_a_candidate_newer_than_its_channel_updates_the_pair_without_pinning(self):
+    def test_a_candidate_newer_than_its_channel_leaves_the_pair_alone(self):
         from composer.launcher import DockerComposeLauncher
 
         holder = tempfile.mkdtemp()
@@ -599,6 +600,117 @@ class AgentUpdateSmokeTests(unittest.TestCase):
              patch("composer.image_pin.verified_pin", side_effect=AssertionError("needs no statement")), \
              patch.dict(os.environ, {"COMPOSER_SELF_IMAGE": ""}), \
              patch("sys.stdout", new_callable=io.StringIO) as out:
-            ok, detail = launcher.pin_resident_pair()
+            ok, moved, detail = launcher.pin_resident_pair()
         self.assertTrue(ok, detail)
+        self.assertFalse(moved, "nothing to pin: the pair is neither pulled nor recreated")
         self.assertIn("nothing to pin", out.getvalue())
+
+
+class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
+    """The 1.11.0b1 live proof (N-2): the pair went 1.11.0b1 -> 1.10.4 on `agent update` and `./start.sh update`.
+
+    The resolution said "nothing to pin", then the run pulled the moving
+    `debeski/composer:beta` tag and recreated the pair on it anyway.
+    """
+
+    PAIR = ["composer-executor", "composer-agent"]
+    SERVICES = ["web", "worker", *PAIR]
+
+    def _model(self, resident_image):
+        return {"name": "demo", "services": {
+            "web": {"image": "demo-app:2.2"}, "worker": {"image": "demo-app:2.2"},
+            "composer-executor": {"image": resident_image}, "composer-agent": {"image": resident_image},
+        }}
+
+    def _run(self, argv, *, resident_image="debeski/composer:beta", resolution=None):
+        from composer.launcher import DockerComposeLauncher
+
+        launcher = DockerComposeLauncher()
+        compose_calls = []
+
+        def compose(args, **kwargs):
+            compose_calls.append(list(args))
+            return True, "", ""
+
+        resolution = resolution or image_pin.Resolution(
+            pin=None, current=None, changed=False,
+            note="This Composer (1.11.0b1) is newer than the beta channel's newest release (1.10.4); nothing to pin.",
+        )
+        from contextlib import ExitStack
+
+        steps = {
+            "_resident_pair_scope": list(self.PAIR),
+            "extract_config": None,
+            "_defined_services": (True, list(self.SERVICES), ""),
+            "sync_runtime_compose_override": True,
+            "update_service_states": True,
+            "compose_config_json": self._model(resident_image),
+            "resolve_secrets": (True, ""),
+            "render": None,
+            "preflight_version_gate": (True, ""),
+            "downgrade_guard": (True, ""),
+            "prepare_app_data": (True, ""),
+            "record_deployed_release": None,
+            "ensure_edge_proxy": ([], None),
+            "monitor_health": (True, ""),
+            "run_post_start_hooks": (True, ""),
+            "cleanup": None,
+        }
+        with ExitStack() as stack:
+            stack.enter_context(patch("sys.argv", ["composer", *argv]))
+            stack.enter_context(patch.dict(os.environ, {"COMPOSER_SELF_IMAGE": "", "COMPOSER_EXCLUDE_SERVICES": ""}))
+            stack.enter_context(patch("composer.launcher.install_hangup_guard"))
+            stack.enter_context(patch("composer.image_pin.update_pin",
+                                      return_value=(resolution, {"files": [], "lock_changed": False})))
+            for name, value in steps.items():
+                stack.enter_context(patch.object(launcher, name, return_value=value))
+            stack.enter_context(patch.object(launcher, "run_docker_compose_streaming", side_effect=compose))
+            stack.enter_context(patch.object(launcher, "run_command_streaming",
+                                             side_effect=AssertionError("no docker pull")))
+            out = stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
+            launcher.run()
+        return compose_calls, out.getvalue(), launcher
+
+    def test_agent_update_with_nothing_to_pin_pulls_and_recreates_nothing(self):
+        calls, out, _ = self._run(["agent", "update"])
+        self.assertEqual(calls, [], "no compose pull or up of debeski/composer:*")
+        self.assertIn("nothing to pin", out)
+        self.assertIn("Nothing to update", out)
+
+    def test_agent_update_with_an_unreadable_channel_pulls_and_recreates_nothing(self):
+        kept = image_pin.Resolution(pin=None, current=None, changed=False,
+                                    note="The published version could not be read. The Composer pin is unchanged.")
+        calls, _, _ = self._run(["agent", "update"], resolution=kept)
+        self.assertEqual(calls, [])
+
+    def test_agent_update_with_a_new_pin_pulls_and_recreates_the_pair(self):
+        moved = image_pin.Resolution(pin=image_pin.Pin("1.11.1", DIGEST_A), current=None, changed=True)
+        calls, _, _ = self._run(["agent", "update"], resolution=moved)
+        self.assertEqual(calls[0], ["pull", *self.PAIR])
+        self.assertEqual(calls[1], ["up", "-d", *self.PAIR])
+
+    def test_a_plain_update_leaves_a_pair_on_its_channel_tag_alone(self):
+        calls, out, launcher = self._run(["update"])
+        self.assertEqual(calls[0], ["pull", "web", "worker"])
+        self.assertEqual(calls[1], ["up", "-d", "web", "worker"])
+        self.assertTrue(all("composer-agent" not in call and "composer-executor" not in call for call in calls))
+        self.assertIn("moves only through './start.sh agent update'", out)
+
+    def test_a_pull_leaves_a_pair_on_its_channel_tag_alone(self):
+        calls, _, _ = self._run(["pull"])
+        self.assertEqual(calls, [["pull", "web", "worker"]])
+
+    def test_a_plain_update_follows_a_digest_pin(self):
+        calls, _, _ = self._run(["update"], resident_image=REF_10)
+        self.assertEqual(calls[0], ["pull"])
+        self.assertEqual(calls[1], ["up", "-d"])
+
+    def test_an_update_naming_only_the_pair_on_its_tag_is_refused(self):
+        with self.assertRaises(SystemExit) as caught:
+            self._run(["update", "composer-agent"])
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_an_update_naming_the_pair_and_others_keeps_the_others(self):
+        calls, _, _ = self._run(["update", "web", "composer-agent"])
+        self.assertEqual(calls[0], ["pull", "web"])
+        self.assertEqual(calls[1], ["up", "-d", "web"])

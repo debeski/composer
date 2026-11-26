@@ -58,6 +58,13 @@ on the new Composer; naming services skips that.
 `composer pull` only downloads images. It never recreates containers, runs health
 checks, or executes post-start tasks.
 
+Neither `update` nor `pull` touches a resident pair whose block names a moving tag
+such as `debeski/composer:beta`: the pair moves only through
+[the Composer pin](#the-composer-pin). The run leaves `composer-agent` and
+`composer-executor` out and says so. An update that names only them is refused
+(exit 2) and points to `agent update`. Once the block names a pinned digest, the
+update pulls that digest and recreates the pair when the block changed.
+
 ### Version gate
 
 When deploying through `update` or `-u`, Composer can refuse to recreate onto an
@@ -107,8 +114,8 @@ the resident `composer-agent` + `composer-executor` pair inside the stack.
 - `composer agent update` pins the same release, pulls the pair's image once and
   recreates both, without touching the application
   ([the resident pair](resident-pair.md#lifecycle-commands)).
-- Plain `./start.sh update` does both: the deployer first, then the stack and the
-  pair.
+- Plain `./start.sh update` does both: the deployer first, then the stack, and the
+  pair when its block names a pin ([image updates](#image-updates)).
 
 `composer check` reports drift between the deployer, the wrappers and the pair
 ([`versions`](check.md#versions), [`composer-channel`](check.md#composer-channel),
@@ -152,11 +159,13 @@ the pin, or, before the first pin, with the Composer doing the update:
 | an older release | Nothing changes: a channel tag never moves a pin backwards. The run says the channel is older. |
 | nothing readable (registry unreachable) | Nothing changes, and the run says so. |
 
-None of the "nothing changes" outcomes is an error. `agent update` then pulls and
-recreates the pair on the image the block already names, and the wrapper keeps the
-deployer it has. That is also why a release candidate's own smoke test, which runs
-a Composer newer than any published release, needs no statement and no network
-beyond the channel's version label.
+None of the "nothing changes" outcomes is an error. `agent update` and `update self`
+then pull and recreate nothing, say so and exit 0: before the first pin the block
+and the deployer name the channel tag, and following it could move them backwards.
+The wrapper keeps the deployer it has. `agent update` still pulls and recreates the
+pair when the block did not name the existing pin yet. That is also why a release
+candidate's own smoke test, which runs a Composer newer than any published release,
+needs no statement and no network beyond the channel's version label.
 
 A registry can point a tag at a genuine old release; following it would be a
 downgrade. Pass `--allow-downgrade` to `update self` or `agent update` to move back on

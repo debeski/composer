@@ -315,6 +315,12 @@ class DockerComposeLauncher(
                 print(f"✖ Composer was not updated: {exc}", file=sys.stderr)
                 sys.exit(1)
             self.report_pin(resolution, outcome)
+            if not self.pin_moved(resolution, outcome):
+                # Before the first pin the deployer image is the channel tag, and
+                # pulling it could move the deployer backwards.
+                if not args.pin:
+                    print("Nothing to update: the deployer keeps the image it has.")
+                return
         if args.pin:
             return
         image = resolve_self_image()
@@ -353,14 +359,25 @@ class DockerComposeLauncher(
         if outcome.get("files"):
             print(f"   The resident pair now runs it from its next recreate ({', '.join(outcome['files'])}).")
 
-    def pin_resident_pair(self) -> Tuple[bool, str]:
-        """`agent update`: move the lock and the block to the channel's signed release."""
+    @staticmethod
+    def pin_moved(resolution, outcome) -> bool:
+        """Did resolving the pin change what the deployment runs (the lock or the block)?"""
+        return bool(resolution.changed or outcome.get("files") or outcome.get("lock_changed"))
+
+    def pin_resident_pair(self) -> Tuple[bool, bool, str]:
+        """`agent update`: ``(ok, moved, detail)``. Moves the lock and the block to the channel's signed release.
+
+        The pair is pulled and recreated only when ``moved``. When the resolution
+        keeps (nothing newer, an unreadable channel, a release not verifiable
+        yet), the block may still name the moving channel tag, and following it
+        could move the pair backwards, so nothing is pulled or recreated.
+        """
         from . import image_pin
         from .agent_installer import AgentInstallError
 
         options = self.pin_resident or {}
         if os.environ.get("COMPOSER_SELF_IMAGE", "").strip():
-            return True, ""
+            return True, True, ""
         try:
             resolution, outcome = image_pin.update_pin(
                 ".",
@@ -369,9 +386,58 @@ class DockerComposeLauncher(
                 allow_unverified=options.get("allow_unverified", False),
             )
         except (image_pin.PinError, AgentInstallError) as exc:
-            return False, f"The resident Composer pair was not updated: {exc}"
+            return False, False, f"The resident Composer pair was not updated: {exc}"
         self.report_pin(resolution, outcome)
-        return True, ""
+        if self.pin_moved(resolution, outcome):
+            return True, True, ""
+        return True, False, "Nothing to update: the resident pair was not pulled or recreated."
+
+    def hold_unpinned_resident_pair(self) -> Optional[List[str]]:
+        """Leave a resident pair on a moving tag out of a plain `update` or `pull`.
+
+        The pair moves only through its pin (`agent update`, `update self`,
+        `check --beta|--stable`). Pulling the channel tag its block names can move
+        it backwards, so while the block names no digest the pair joins
+        ``exclude_services`` and leaves a named scope. Returns the services held,
+        or None when they were all the services named.
+        """
+        from .service_selection import scoped_service_list
+        from .stack_lifecycle import RESIDENT_SERVICES, images, join
+
+        excluded = set(self.exclude_services or [])
+        named = scoped_service_list(self.pull_service) or scoped_service_list(self.up_service)
+        candidates = [
+            name for name in RESIDENT_SERVICES
+            if name not in excluded and (not named or name in named)
+        ]
+        if not candidates:
+            return []
+        defined = images(self.compose_config_json())
+        held = [name for name in candidates if name in defined and "@sha256:" not in defined[name]]
+        if not held:
+            return []
+        self.exclude_services = list(self.exclude_services or []) + held
+        self.services = [name for name in (self.services or []) if name not in held]
+        for name in held:
+            self.service_state.pop(name, None)
+        if named:
+            rest = [name for name in named if name not in held]
+            if not rest:
+                return None
+            if scoped_service_list(self.pull_service):
+                self.pull_service = rest
+            if scoped_service_list(self.up_service):
+                self.up_service = rest
+        one = len(held) == 1
+        warnings = getattr(self, "deploy_warnings", None)
+        if warnings is None:
+            warnings = self.deploy_warnings = []
+        warnings.append(
+            f"{join(held)} run{'s' if one else ''} {defined[held[0]]}, a moving tag, so this update left "
+            f"{'it' if one else 'them'} as {'it was' if one else 'they were'}: the resident pair moves only "
+            "through './start.sh agent update', which pins the channel's signed release."
+        )
+        return held
 
     def configure_update(self, argv):
         """Configure `composer update [opts] [service...]` for the update pipeline."""
@@ -873,12 +939,28 @@ class DockerComposeLauncher(
                 self.write_status("pulling")
                 self.render()
                 if self.pin_resident is not None:
-                    ok, detail = self.pin_resident_pair()
+                    ok, moved, detail = self.pin_resident_pair()
                     if not ok:
                         self.sections["pull"] = ERROR
                         self.write_status("failed", error=detail)
                         self.render(detail)
                         sys.exit(1)
+                    if not moved:
+                        self.sections["pull"] = OK
+                        self.write_status("ready")
+                        self.render()
+                        print(f"\n✅ {detail}")
+                        return
+                elif self.hold_unpinned_resident_pair() is None:
+                    detail = (
+                        "The resident pair runs a moving Composer tag and moves only through "
+                        "'./start.sh agent update', which pins the channel's signed release. "
+                        "Nothing was pulled or recreated."
+                    )
+                    self.sections["pull"] = ERROR
+                    self.write_status("failed", error=detail)
+                    self.render(detail)
+                    sys.exit(2)
                 ok, out, err = self.pull_images()
                 if not ok:
                     self.sections["pull"] = ERROR

@@ -52,8 +52,11 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    ([questions](#questions-at-a-terminal)). It then plans every repair, prints what
    each will change, which services it will stop and remove, which it expects to
    recreate and their restart window, and asks once before applying (`-y` answers in
-   advance; a non-terminal without `-y` is refused). Declining reports `fix` WARN
-   "Changes declined."
+   advance; a non-terminal without `-y` is refused). A repair to the shared
+   `x-environment` block expects every service that merges it, read from the
+   resolved model the same way the recreate compares it (a scratch copy of the block
+   gains one line), so a `db` that merges it is listed too. Declining reports `fix`
+   WARN "Changes declined."
 2. **Validate first.** Every repair validates its result with `docker compose config`
    before writing; a changed proxy file mounted by Caddy or Nginx is validated as
    well, in a throwaway container.
@@ -76,9 +79,11 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    repairs, every check a repair can change is checked again, whatever it reported
    before: `resident-commands`, `docker-proxy`, `stored-files`, `stack-schema`,
    `task-worker`, `services`, `redis-aof-corrupt`, `front-proxy`, `update-policy`,
-   `relay-env`, `removed-services`, `proxy-routes`, `topology` and `pending-recreate`.
-   A run that applied nothing checks again only the first seven of those that failed.
-   The new results replace the old, so the report and the summary say what stands now.
+   `relay-env`, `removed-services`, `proxy-routes`, `topology`, `celery`, the
+   `wrapper:` findings and `pending-recreate`. A run that applied nothing checks again
+   only the first seven of those that failed. The new results replace the old, and a
+   finding whose service the run removed (`docker-socket-proxy`, `celery`) leaves the
+   report, as from a fresh `check`, so the report and the summary say what stands now.
 
 The obsolete-services cleanup stops and removes only the detected obsolete
 containers with a targeted `docker compose rm -sf`, applies the service and route

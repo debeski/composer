@@ -440,24 +440,47 @@ def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = ""):
         pass
 
 
+def _describes_request(record: dict, token: str, operation_id: str, written, since) -> bool:
+    """Is ``record`` about this request rather than an earlier run?
+
+    It is when it names the request (the child's ``request_token``, or the
+    ``run_token`` of the DjangoLux run that wrote the request), its operation, or
+    when it was written after the request began: a package child publishes its
+    result without a token.
+    """
+    if token and token in {str(record.get("request_token") or ""), str(record.get("run_token") or "")}:
+        return True
+    if operation_id and str(record.get("operation_id") or "") == operation_id:
+        return True
+    return since is not None and written is not None and written >= since
+
+
 def _publish_terminal_failure(
     status_file: str,
     token: str,
     exit_code: int,
     error: str = "",
     operation_id: str = "",
+    since: Optional[float] = None,
 ) -> bool:
     """Guarantee a terminal deploy status after a failed child process.
 
-    Preserve a detailed error already published by the child. The request token
-    also lets consumers reject a terminal record from an older update.
+    The record describes this request only. What the file already says is kept
+    when it is about this request (a detailed error the child published, the
+    DjangoLux run that handed it over); a record from an earlier run is replaced,
+    never merged. ``since`` is when the request began (``time.time()``). The
+    request token also lets consumers reject a terminal record from an older
+    update.
     """
     target = Path(status_file)
     try:
         current = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(current, dict):
             current = {}
+        written = target.stat().st_mtime
     except (OSError, ValueError, AttributeError):
+        current, written = {}, None
+    if current and not _describes_request(current, token, operation_id, written, since):
         current = {}
 
     detail = str(error or "").strip()
@@ -734,6 +757,7 @@ class WatchRuntime:
         version = str(payload.get("target_version") or request.get("target_version") or "").strip()
 
         label = f"{mode} {version}".strip()
+        started = time.time()
         print(f"⟳ dlux package update {token} — {label}", flush=True)
         run = runner or self.run_package_child
         if mode == "apply" and not update_policy.allows(update_policy.INLINE_UPDATE):
@@ -749,7 +773,7 @@ class WatchRuntime:
             if self.args.status_file:
                 _publish_terminal_failure(
                     self.args.status_file, token, exit_code,
-                    error=launch_error, operation_id=operation_id,
+                    error=launch_error, operation_id=operation_id, since=started,
                 )
             _append_terminal_failure(self.log_file, fallback)
         _write_ack(self.package_ack, token, exit_code, operation_id=operation_id)
@@ -788,6 +812,7 @@ class WatchRuntime:
     def process(self, request: dict) -> int:
         token = str(request["token"])
         operation_id = str(request.get("operation_id") or "").strip()
+        started = time.time()
         print(f"⟳ update request {token} — running `composer update`", flush=True)
         if self.log_file:
             try:
@@ -820,6 +845,7 @@ class WatchRuntime:
                     exit_code,
                     error=launch_error,
                     operation_id=operation_id,
+                    since=started,
                 )
             _append_terminal_failure(self.log_file, fallback_error)
         _write_ack(self.ack, token, exit_code, operation_id=operation_id)

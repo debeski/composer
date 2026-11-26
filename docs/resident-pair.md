@@ -67,7 +67,11 @@ recreate → health → post_start). The processed token and child exit code are
 - `--status-file PATH` has each run publish [deploy status](deploying.md#deploy-status);
   if the child exits before publishing its own terminal failure, the watcher
   guarantees a token-matched `failed` status so maintenance consumers are never left
-  waiting on a dead process.
+  waiting on a dead process. That status, a policy refusal's included, describes
+  only its request: it keeps what the file says when that names the request (its
+  `request_token`, the `run_token` of the DjangoLux run that wrote it, its
+  `operation_id`) or was written while it ran, and otherwise replaces the earlier
+  run's record instead of merging into it.
 - `--check-image`, `--availability-file` and `--check-interval` make it publish image
   availability ([image availability](updates.md#image-availability)).
 
@@ -91,7 +95,8 @@ the update:
 The resident services have three host-side lifecycle commands, run by the deployer:
 
 - `composer agent update` pins the channel's signed release
-  ([the Composer pin](updates.md#the-composer-pin)), pulls and recreates;
+  ([the Composer pin](updates.md#the-composer-pin)), pulls and recreates; with
+  nothing to pin it pulls and recreates nothing;
 - `composer agent restart` restarts and health-checks;
 - `composer agent off` stops.
 
@@ -101,7 +106,8 @@ defines `composer-executor`, all three target the `composer-agent` +
 to different versions. Legacy stacks resolve to just `composer-agent`. The dedicated
 commands ignore the resident services' normal self-exclusion only for those explicit
 targets. `agent update` does not run application version gates or post-start hooks.
-DjangoLux's Operations card offers the same update as `agent-update`; the executor
+DjangoLux's Operations card offers the same update as `agent-update`. It is refused
+unless the channel publishes a release newer than the resident one; the executor
 runs it in a helper container from its own image, with the project mounted
 read-write over the inherited read-only mount so the pin can be written.
 

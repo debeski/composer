@@ -221,6 +221,25 @@ class UpdateSelfCommandTests(unittest.TestCase):
         pull.assert_not_called()
         self.assertIn(f"Composer pinned to {_PINNED}", out.getvalue())
 
+    def test_update_self_with_nothing_to_pin_pulls_nothing(self):
+        # Before the first pin the deployer is the channel tag; pulling it when
+        # the channel is behind moved the deployer backwards (live proof N-2).
+        from composer import image_pin
+
+        kept = image_pin.Resolution(pin=None, current=None, changed=False, note="nothing to pin.")
+        self.update_pin.return_value = (kept, {"files": [], "lock_changed": False})
+        launcher = DockerComposeLauncher()
+        with (
+            patch("composer.channel_config.resolve_self_image", return_value="debeski/composer:beta"),
+            patch.object(launcher, "run_command_streaming") as pull,
+            patch.object(launcher, "run_command") as version,
+            patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            launcher.handle_update_self([])
+        pull.assert_not_called()
+        version.assert_not_called()
+        self.assertIn("Nothing to update", out.getvalue())
+
     def test_update_self_stops_when_the_release_cannot_be_verified(self):
         from composer import image_pin
 

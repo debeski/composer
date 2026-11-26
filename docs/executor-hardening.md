@@ -137,7 +137,7 @@ operation refuses payload fields it does not list
 | `check_fix` | `compose_digest` | the files must still hash to the digest the preview returned | the Operations card's `check-fix-apply` |
 | `agent_update` | `token` | starts a detached helper that replaces the resident pair | the Operations card's `agent-update` |
 | `services_state` | `dev`, `file` (as `deployment_check`) | read; returns `name`, `state`, `health`, `status` and `restart_label` per Compose service, nothing else | the Operations card's `services`, and the service check before a restart, start, stop or log tail |
-| `logs_tail` | `dev`, `file`, `service` (empty: every service, merged), `lines` (an integer, 1–1000) | read; the service must be one of the deployment's; the text is redacted in the executor, capped at 60 000 characters, and its oldest lines dropped until the result fits one frame | the Operations card's `logs-tail` |
+| `logs_tail` | `dev`, `file`, `service` (empty: every service, merged), `lines` (an integer, 1–1000) | read; the service must be one of the deployment's; the text is redacted in the executor, capped at 60 000 characters, and its oldest lines dropped until the result fits one frame. A read that fails because Docker removed the container it resolved (a recreate during an update) is asked again once, a second later; any other failure is returned as it is | the Operations card's `logs-tail` |
 | `image_digests` | `image` (an image reference) | read; the image must be `WEB_IMAGE`, `COMPOSER_CHECK_IMAGE` or a `--check-image` of the generated block; returns its `RepoDigests` only | the agent's update check and its local-digest probe |
 
 Protected services: `PROTECTED_RESTART_SERVICES` (`service_selection.py`) covers the
