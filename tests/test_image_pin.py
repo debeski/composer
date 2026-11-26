@@ -622,7 +622,7 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
             "composer-executor": {"image": resident_image}, "composer-agent": {"image": resident_image},
         }}
 
-    def _run(self, argv, *, resident_image="debeski/composer:beta", resolution=None):
+    def _run(self, argv, *, resident_image="debeski/composer:beta", resolution=None, env=None, effects=None):
         from composer.launcher import DockerComposeLauncher
 
         launcher = DockerComposeLauncher()
@@ -658,18 +658,45 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
         }
         with ExitStack() as stack:
             stack.enter_context(patch("sys.argv", ["composer", *argv]))
-            stack.enter_context(patch.dict(os.environ, {"COMPOSER_SELF_IMAGE": "", "COMPOSER_EXCLUDE_SERVICES": ""}))
+            stack.enter_context(patch.dict(os.environ, {"COMPOSER_SELF_IMAGE": "", "COMPOSER_EXCLUDE_SERVICES": "",
+                                                        **(env or {})}))
             stack.enter_context(patch("composer.launcher.install_hangup_guard"))
             stack.enter_context(patch("composer.image_pin.update_pin",
                                       return_value=(resolution, {"files": [], "lock_changed": False})))
             for name, value in steps.items():
                 stack.enter_context(patch.object(launcher, name, return_value=value))
+            for name, effect in (effects or {}).items():
+                stack.enter_context(patch.object(launcher, name, side_effect=effect))
             stack.enter_context(patch.object(launcher, "run_docker_compose_streaming", side_effect=compose))
             stack.enter_context(patch.object(launcher, "run_command_streaming",
                                              side_effect=AssertionError("no docker pull")))
             out = stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
             launcher.run()
         return compose_calls, out.getvalue(), launcher
+
+    def _start(self, *, tag_version, running_version="1.11.0b1", tag_id="sha256:tag", pair_running=True, env=None):
+        """A plain `./start.sh` after the wrapper re-pointed the local `debeski/composer:beta`."""
+        from composer.version import RELEASE_MANIFEST_LABEL
+
+        versions = {"sha256:running": running_version, tag_id: tag_version}
+        commands = []
+
+        def run_command(argv, **kwargs):
+            commands.append(list(argv))
+            if argv[:2] == ["docker", "inspect"]:
+                return True, "sha256:running\n", ""
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return (True, f"{tag_id}\n", "") if tag_id else (False, "", "No such image")
+            return False, "", "unexpected"
+
+        rows = [{"Service": name, "ID": f"c-{name}", "State": "running"} for name in self.PAIR] if pair_running else []
+        effects = {
+            "run_command": run_command,
+            "get_compose_ps_entries": lambda include_all=False: (True, rows, ""),
+            "image_labels": lambda image: {RELEASE_MANIFEST_LABEL: json.dumps({"version": versions.get(image, "")})},
+        }
+        calls, out, _ = self._run([], env=env, effects=effects)
+        return calls, out, commands
 
     def test_agent_update_with_nothing_to_pin_pulls_and_recreates_nothing(self):
         calls, out, _ = self._run(["agent", "update"])
@@ -714,3 +741,32 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
         calls, _, _ = self._run(["update", "web", "composer-agent"])
         self.assertEqual(calls[0], ["pull", "web"])
         self.assertEqual(calls[1], ["up", "-d", "web"])
+
+    def test_a_start_leaves_the_pair_off_a_tag_that_went_backwards(self):
+        calls, out, _ = self._start(tag_version="1.10.4")
+        self.assertEqual(calls, [["up", "-d", "web", "worker"]])
+        self.assertIn("Composer 1.10.4, older than the running 1.11.0b1", out)
+        self.assertIn("./start.sh agent update", out)
+
+    def test_a_start_recreates_the_pair_on_a_newer_tag(self):
+        calls, _, _ = self._start(tag_version="1.11.0")
+        self.assertEqual(calls, [["up", "-d"]])
+
+    def test_a_start_with_the_pair_stopped_behaves_as_before(self):
+        calls, _, _ = self._start(tag_version="1.10.4", pair_running=False)
+        self.assertEqual(calls, [["up", "-d"]])
+
+    def test_a_start_with_an_explicit_composer_image_behaves_as_before(self):
+        calls, _, commands = self._start(tag_version="1.10.4", env={"COMPOSER_SELF_IMAGE": "mirror/composer:1.10.4"})
+        self.assertEqual(calls, [["up", "-d"]])
+        self.assertEqual(commands, [])
+
+    def test_a_start_on_the_image_the_pair_already_runs_reads_no_versions(self):
+        calls, _, commands = self._start(tag_version="1.10.4", tag_id="sha256:running")
+        self.assertEqual(calls, [["up", "-d"]])
+        self.assertFalse(any(argv[:2] == ["docker", "run"] for argv in commands))
+
+    def test_a_start_leaves_the_pair_off_a_tag_it_cannot_read(self):
+        calls, out, _ = self._start(tag_version="", tag_id="")
+        self.assertEqual(calls, [["up", "-d", "web", "worker"]])
+        self.assertIn("cannot be read", out)

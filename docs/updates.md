@@ -196,6 +196,14 @@ keeps the tag and says so. `check` reports the unpinned state as OK, and
 `check --fix` only pins the block to a lock that already exists. It never goes to
 the network.
 
+That pull of the channel tag also moves the local tag the pair's block names. When
+it now names an older Composer than the running pair, or an image whose release
+cannot be read, `./start.sh` and every other `up` leave `composer-agent` and
+`composer-executor` as they are, warn with both versions and exit 0: move the pair
+with `agent update`, which verifies, or switch on purpose with `check --beta` /
+`check --stable`. A newer or equal release, a stopped pair and an explicit
+`COMPOSER_SELF_IMAGE` are started as the block says.
+
 Wrapper 7 is the first that reads `.composer-image`. An older wrapper keeps pulling
 the channel tag for the deployer, and `check --fix` replaces it.
 
