@@ -15,6 +15,36 @@ rules. The commands' syntax and exit codes are in the
 | see what is available | `./start.sh agent check`, `./start.sh dlux check` | [image availability](#image-availability) |
 | switch a channel | `./start.sh dlux channel beta`, `./start.sh check --beta` | [channels](#channels) |
 
+## What the application may request
+
+DjangoLux can ask the resident pair for three kinds of update: an application
+image update, an inline DjangoLux update, and a resident Composer update.
+`DLUX_UPDATE_POLICY` in the secrets file decides which of those requests the pair
+performs (at a terminal, `check --fix` asks for it when the file does not set it:
+[questions](check.md#questions-at-a-terminal)):
+
+| Request from DjangoLux | `all` (default) | `inline` | `none` |
+| --- | --- | --- | --- |
+| inline DjangoLux update (package trigger, `dlux_package_apply`) | performed | performed | refused |
+| application image update (image trigger) | performed | refused | refused |
+| resident Composer update (`agent-update`) | performed | refused | refused |
+| control-link recovery deploy (`recovery_deploy`, a full `composer update`) | performed | refused | refused |
+| inline rollback, `check`, `agent-check`, availability checks | performed | performed | performed |
+
+An empty value means `all`; any other value counts as `none`. A refused request is
+answered like a failed one, with exit code 2 and a message naming the policy, so
+DjangoLux leaves maintenance and shows why. The pair reads the policy from its own
+Compose `environment`, which `web` cannot change, so it refuses even a request a
+compromised `web` wrote straight onto the runtime volume. The agent reports the
+policy it enforces as `update_policy` in `agent-status.json`, and DjangoLux warns
+when that differs from its own.
+
+Every command in the table above still runs from this shell under every policy:
+the policy covers what the application requests, not what the operator deploys.
+The pair reads the value when it is created, so after changing it run `./start.sh`
+to recreate the pair. `composer check` reports the policy and whether every
+reader receives it ([`update-policy`](check.md#update-policy)).
+
 ## Image updates
 
 `composer update` pulls the latest application image(s), recreates the affected
@@ -28,6 +58,13 @@ on the new Composer; naming services skips that.
 `composer pull` only downloads images. It never recreates containers, runs health
 checks, or executes post-start tasks.
 
+Neither `update` nor `pull` touches a resident pair whose block names a moving tag
+such as `debeski/composer:beta`: the pair moves only through
+[the Composer pin](#the-composer-pin). The run leaves `composer-agent` and
+`composer-executor` out and says so. An update that names only them is refused
+(exit 2) and points to `agent update`. Once the block names a pinned digest, the
+update pulls that digest and recreates the pair when the block changed.
+
 ### Version gate
 
 When deploying through `update` or `-u`, Composer can refuse to recreate onto an
@@ -37,7 +74,21 @@ It is opt-in and generic: set `COMPOSER_ACTIVE_VERSION_FILE` (a JSON file, e.g. 
 runtime `active.json`) and, if needed, `COMPOSER_ACTIVE_VERSION_KEY` (default
 `version`) and `COMPOSER_VERSION_LABEL` (the image label to compare, default
 `org.opencontainers.image.version`). With no active-version source configured the
-gate is disabled. `--force` overrides a block.
+gate is disabled. Once configured it fails closed:
+
+- when no target image carries a readable version in that label, Composer cannot
+  tell whether the update is a downgrade, so it refuses ("no target image carries a
+  readable '…' label"), names the images it checked, and asks for a labelled image;
+- when the active-version file is missing, the active version is the same label on
+  the image the app container (`web`, or `COMPOSER_RUNTIME_GATE_SERVICE`) runs now.
+  DjangoLux reads a missing `active.json` as "running the release baked into the
+  image", and the gate runs before the recreate, so the container still names the
+  old image. A stack with no app container at all has nothing to downgrade and
+  passes;
+- when the file is present but unreadable, or the running image has no readable
+  label, it refuses.
+
+`--force` is the deliberate override for each refusal and for a downgrade block.
 
 An older image can also pass when the running DjangoLux deployment confirms it will
 keep its newer runtime-volume release. Composer runs `python manage.py
@@ -47,23 +98,114 @@ the active release's `requires.baked_image` floor. Only a `keep` verdict permits
 exception; an abort, unavailable service, missing command or invalid response still
 blocks. `--force` bypasses the check explicitly.
 
+Independently of this gate, every deploy runs the
+[downgrade guard](deploying.md#downgrade-guard), which needs no configuration and
+compares the app image's own version labels with what the deployment last ran.
+
 ## Composer itself
 
 Composer has two halves that update separately: the deployer the wrappers run, and
 the resident `composer-agent` + `composer-executor` pair inside the stack.
 
-- `composer update self` pulls the deployer used by `start.sh`
-  (`debeski/composer:latest`, or `:beta` on the beta channel) and leaves the stack
-  alone. `self update` remains a deprecated alias. Set `COMPOSER_SELF_IMAGE` only
-  when using a compatible Composer image mirror.
-- `composer agent update` pulls the pair's image once and recreates both, without
-  touching the application ([the resident pair](resident-pair.md#lifecycle-commands)).
-- Plain `./start.sh update` does both: the deployer first, then the stack and the
-  pair.
+- `composer update self` pins the deployer used by `start.sh` to the channel's
+  newest signed release ([the Composer pin](#the-composer-pin)), pulls it, and
+  leaves the stack alone. `self update` remains a deprecated alias. Set
+  `COMPOSER_SELF_IMAGE` only when using a compatible Composer image mirror.
+- `composer agent update` pins the same release, pulls the pair's image once and
+  recreates both, without touching the application
+  ([the resident pair](resident-pair.md#lifecycle-commands)).
+- Plain `./start.sh update` does both: the deployer first, then the stack, and the
+  pair when its block names a pin ([image updates](#image-updates)).
 
 `composer check` reports drift between the deployer, the wrappers and the pair
 ([`versions`](check.md#versions), [`composer-channel`](check.md#composer-channel),
 [wrappers](check.md#wrapperstartsh-wrapperstartps1)).
+
+### The Composer pin
+
+Both halves run `debeski/composer:vX.Y.Z@sha256:…`, never a moving tag, once a
+deployment has been updated. The digest comes from the release itself, not from the
+registry, so whoever can push to Docker Hub cannot change what a deployment runs.
+
+1. Composer reads the version label of the channel tag (`:latest`, or the newer of
+   `:beta` and `:latest` on the beta channel). That label only chooses which release
+   to look up. The stable channel refuses a prerelease.
+2. It downloads `composer-image.json` and `composer-image.json.sigstore.json` from
+   that version's GitHub Release
+   (`https://github.com/debeski/composer/releases/download/vX.Y.Z/…`). Redirects are
+   followed only to GitHub's asset hosts.
+3. It verifies the Sigstore bundle against the identity
+   `https://github.com/debeski/composer/.github/workflows/release.yml@refs/tags/vX.Y.Z`
+   (issuer `https://token.actions.githubusercontent.com`). Verification runs online
+   first, so Sigstore key rotations arrive, then offline against the trust root
+   shipped with Composer, so a Sigstore outage alone does not block an update. The
+   statement must name that exact version, tag, `debeski/composer` and a sha256
+   digest.
+4. It writes the result to `.composer-image` beside `.composer-channel`, and
+   rewrites the generated block's `debeski/composer` lines to the same reference.
+   The Compose edit is validated first and the original is kept under
+   `.xclude/composer-check/`.
+5. The wrapper then pulls that digest. A pull by digest is checked against the
+   content, so the registry cannot substitute another image.
+
+**Only when there is something to update.** The channel's version is compared with
+the pin, or, before the first pin, with the Composer doing the update:
+
+| The channel advertises | What happens |
+| --- | --- |
+| a newer release | It is verified and pinned. If it cannot be verified, the update is refused and the current pin keeps running. |
+| the pinned release | Nothing changes. |
+| the running release, with no pin yet | It is pinned if it verifies. If GitHub or Sigstore cannot be reached, or the statement is not published yet, nothing changes and the run says why. A statement that fails verification is refused. |
+| an older release | Nothing changes: a channel tag never moves a pin backwards. The run says the channel is older. |
+| nothing readable (registry unreachable) | Nothing changes, and the run says so. |
+
+None of the "nothing changes" outcomes is an error. `agent update` and `update self`
+then pull and recreate nothing, say so and exit 0: before the first pin the block
+and the deployer name the channel tag, and following it could move them backwards.
+The wrapper keeps the deployer it has. `agent update` still pulls and recreates the
+pair when the block did not name the existing pin yet. That is also why a release
+candidate's own smoke test, which runs a Composer newer than any published release,
+needs no statement and no network beyond the channel's version label.
+
+A registry can point a tag at a genuine old release; following it would be a
+downgrade. Pass `--allow-downgrade` to `update self` or `agent update` to move back on
+purpose. A channel switch (`check --stable` / `--beta`) may move back, because the
+operator chose it. Both must verify the release they move to, and fail on an
+unreadable channel.
+
+**Fail closed.** An update that cannot be verified changes nothing, and the current
+pin keeps running. When GitHub or Sigstore cannot be reached (an air-gapped host, an
+outage), `--allow-unverified-composer` on `update self`, `agent update` or
+`check --beta|--stable` pins the registry's digest for that release's own
+`:vX.Y.Z` tag instead. The wrapper forwards `COMPOSER_ALLOW_UNVERIFIED_COMPOSER=1`
+as the same switch. The output says `UNVERIFIED`. No flag accepts a signature,
+identity or statement that fails to match. A mirror is pinned with an explicit
+`COMPOSER_SELF_IMAGE=…@sha256:…`, which is never resolved over.
+
+**Releases before signing.** Releases before 1.11.0b1 have no statement. Updating
+away from them needs nothing from them. Switching to one (for example
+`check --stable` while the stable channel's newest is 1.10.4) is refused with that
+reason, unless `--allow-unverified-composer` pins its registry digest.
+
+**First pin.** A deployment with no `.composer-image` runs its channel tag. Each
+`update self`, `./start.sh update`, `agent update` or channel switch trusts that tag
+to start the deployer that does the verifying, until one of them pins: the channel's
+release verified, either newer than that deployer or the same release. A deployer
+image without the `org.dlux.composer.image-pin` label cannot pin; the wrapper then
+keeps the tag and says so. `check` reports the unpinned state as OK, and
+`check --fix` only pins the block to a lock that already exists. It never goes to
+the network.
+
+That pull of the channel tag also moves the local tag the pair's block names. When
+it now names an older Composer than the running pair, or an image whose release
+cannot be read, `./start.sh` and every other `up` leave `composer-agent` and
+`composer-executor` as they are, warn with both versions and exit 0: move the pair
+with `agent update`, which verifies, or switch on purpose with `check --beta` /
+`check --stable`. A newer or equal release, a stopped pair and an explicit
+`COMPOSER_SELF_IMAGE` are started as the block says.
+
+Wrapper 7 is the first that reads `.composer-image`. An older wrapper keeps pulling
+the channel tag for the deployer, and `check --fix` replaces it.
 
 ## Inline DjangoLux updates
 
@@ -83,15 +225,38 @@ them as `quarantined`, and a check pinned to one with `--version` publishes it w
 `inline_safe: false` and a reason that says how to retry it, so DjangoLux's Updates
 card does not offer a release that already failed here.
 
+### A lagging PyPI index
+
+For several minutes after a release is published, PyPI's CDN can still serve the
+project index (`/simple/django-lux/`, and `/pypi/django-lux/json`) without it, while
+the release's own page (`/pypi/django-lux/<version>/json`) is already fresh: the CDN
+caches each URL apart, and a query string does not bypass it. So Composer reads the
+index and tops it up from release pages:
+
+- a pinned `--version` the index lacks is read from its own release page; if that is
+  not published either, Composer re-reads both after 3, 6 and 12 seconds before
+  saying "not published";
+- an unpinned check or update also reads the release pages of the likely next
+  releases: the final of a newest beta, the next patch, minor and major, and on the
+  beta channel the next beta of each. A missing page is a cheap 404; a probe that
+  fails is ignored, never an error;
+- an unpinned update that resolves below the release the last `dlux check` offered
+  reads that release's page too, and re-reads after 3, 6 and 12 seconds before
+  settling for what it found.
+
+A release page gets the same trust as the index: an approved HTTPS host, a SHA-256
+digest, and then the same attestation and digest checks on the download. A yanked
+release is ignored. Finding a release this way does not choose it: the channel and
+the quarantine still decide.
+
 ### Applying a release: `dlux update`
 
 `composer dlux update`:
 
 1. resolves the newest wheel on the deployment's DjangoLux channel (or the pinned
-   `--version`, honoured on either channel) from PyPI. An unpinned update re-reads
-   PyPI's index a few times when it resolves an older release than the last
-   `dlux check` published for the channel, because PyPI's CDN can briefly serve an
-   index without a just-published release;
+   `--version`, honoured on either channel) from PyPI. See
+   [a lagging index](#a-lagging-pypi-index) for how it copes with PyPI's CDN right
+   after a publish;
 2. verifies its Trusted Publisher attestation and SHA-256, and honours the
    manifest's `inline_safe` ([release manifests](#release-manifests));
 3. takes a backup ([below](#backups));
@@ -184,9 +349,14 @@ A DjangoLux wheel carries a release manifest, and Composer accepts schemas 1 and
 - `requires.services.composer` is a floor on Composer itself: update both the deployer
   (`update self`) and the resident pair (`agent update`) before applying a release
   that raises it;
-- `requires.stack_schema` is the stack schema stamp in the project's `compose.yml`;
-  below it the release is reported but not installed inline, and the reason says to
-  run `check --fix` ([stack migrations](stack-migrations.md)).
+- `requires.stack_schema` is the stack schema stamp in the project's `compose.yml`
+  (its lowest, when its stamps disagree); below it the release is reported but not
+  installed inline. `dlux update`, `dlux update --dry-run`, `dlux check` and the
+  Updates card's reason then name the way forward, worked out from the release data:
+  `check --fix` first when it can reach the schema on the running DjangoLux,
+  otherwise the newest release this stack still takes inline (`dlux update --version
+  X`), and a project image for what no inline release reaches
+  ([the way out of an old stack](stack-migrations.md#the-way-out-of-an-old-stack)).
 
 ## Image availability
 
@@ -269,16 +439,19 @@ never opted in is never handed a beta because a file was missing.
 
 `composer check --beta` / `--stable` switch **Composer's own** channel. One operation
 moves both halves together: the persisted `.composer-channel` file that the wrappers
-read before any Composer code runs, and the image the resident
-`composer-agent`/`composer-executor` pair run inside the stack, because a deployer on
-`:beta` talking to an agent on `:latest` is a configuration nobody chose. The retag is
-scoped to `debeski/composer:*` images inside the generated block, so the third-party
-socket proxy and anything outside the markers are untouched.
+read before any Composer code runs, the `.composer-image` pin, and the image the
+resident `composer-agent`/`composer-executor` pair run inside the stack, because a
+deployer on `:beta` talking to an agent on `:latest` is a configuration nobody chose.
+The new channel's release is resolved and verified first
+([the Composer pin](#the-composer-pin)); a switch that cannot be verified changes
+nothing. The retag is scoped to `debeski/composer` images inside the generated block, so
+anything else in the block and anything outside the markers is untouched.
 
 Both flags are confirmation-gated (`-y` honoured), mutually exclusive, and dry-run
-first: the channel file is written only after the Compose edit validates. Plain
-`composer check` reports drift between the two halves without changing anything, and
-`check --fix` preserves the channel. An explicit `COMPOSER_SELF_IMAGE` pin always wins
-over the channel: an operator who pinned an image asked for that image.
+first: the pin and the channel file are written only after the Compose edit
+validates. Plain `composer check` reports drift between the halves without changing
+anything, and `check --fix` preserves the channel and pins the block to the existing
+lock. An explicit `COMPOSER_SELF_IMAGE` pin always wins over both: an operator who
+pinned an image asked for that image.
 
 How Composer's own releases reach each channel: [releasing](RELEASING.md#channels-stable-and-beta).

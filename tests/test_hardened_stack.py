@@ -7,7 +7,7 @@ from composer.agent_installer import (
     COMPOSER_AGENT_END,
     COMPOSER_AGENT_START,
     COMPOSER_EXEC_SOCKET_PATH,
-    DOCKER_SOCKET_PROXY_IMAGE,
+    _drop_docker_proxy,
     _hardened_stack,
 )
 
@@ -16,7 +16,7 @@ def _topology():
     return {
         "web_image": "debeski/decrees:latest",
         "version_label": "org.decrees.dlux_baked_version",
-        "proxy_networks": ["docker_proxy"],
+        "executor_networks": ["docker_proxy"],
         "agent_networks": ["egress", "docker_proxy"],
     }
 
@@ -34,23 +34,17 @@ class HardenedStackTests(unittest.TestCase):
     def setUp(self):
         self.block = _hardened_stack("decrees", {"web", "celery", "db", "redis"}, _topology())
 
-    def test_all_three_roles_present_between_markers(self):
+    def test_both_roles_present_between_markers(self):
         self.assertTrue(self.block.startswith(COMPOSER_AGENT_START))
         self.assertTrue(self.block.rstrip().endswith(COMPOSER_AGENT_END))
-        for name in ("docker-socket-proxy", "composer-executor", "composer-agent"):
+        for name in ("composer-executor", "composer-agent"):
             self.assertIn(f"  {name}:\n", self.block)
 
-    def test_proxy_is_read_only(self):
-        proxy = _section(self.block, "docker-socket-proxy")
-        self.assertIn("POST: 0", proxy)
-        self.assertIn("EXEC: 0", proxy)
-        self.assertNotIn("POST: 1", proxy)
-        self.assertNotIn("EXEC: 1", proxy)
-        # Reads the agent still needs stay enabled.
-        self.assertIn("CONTAINERS: 1", proxy)
-        self.assertIn("IMAGES: 1", proxy)
-        # Only a read-only bind of the socket.
-        self.assertIn("/var/run/docker.sock:/var/run/docker.sock:ro", proxy)
+    def test_there_is_no_docker_proxy(self):
+        """Its container inspect would hand the agent every service's environment."""
+        self.assertNotIn("docker-socket-proxy", self.block)
+        mounts = [line for line in self.block.splitlines() if "/var/run/docker.sock" in line]
+        self.assertEqual(len(mounts), 1, "only the executor mounts the socket")
 
     def test_executor_holds_the_real_socket_and_is_not_network_facing(self):
         ex = _section(self.block, "composer-executor")
@@ -85,11 +79,6 @@ class HardenedStackTests(unittest.TestCase):
             block = _hardened_stack("decrees", set(services), _topology())
             self.assertEqual(block.count(f'COMPOSER_AGENT_RESTART_SERVICES: "{expected}"'), 2, expected)
 
-    def test_proxy_image_is_pinned_by_digest(self):
-        proxy = _section(self.block, "docker-socket-proxy")
-        self.assertIn(f"image: {DOCKER_SOCKET_PROXY_IMAGE}\n", proxy)
-        self.assertRegex(DOCKER_SOCKET_PROXY_IMAGE, r"^tecnativa/docker-socket-proxy:v[\d.]+@sha256:[0-9a-f]{64}$")
-
     def test_agent_stays_read_only_without_the_file_override(self):
         # The network-facing agent never deploys, so it must NOT carry the read
         # override — least privilege for the internet-reachable role.
@@ -121,10 +110,9 @@ class HardenedStackTests(unittest.TestCase):
 
         self.assertEqual(healed, self.block)
 
-    def test_agent_keeps_readonly_proxy_and_delegates_writes(self):
+    def test_agent_has_no_docker_api_and_delegates_to_the_executor(self):
         agent = _section(self.block, "composer-agent")
-        # Reads via the (now read-only) proxy.
-        self.assertIn('DOCKER_HOST: "tcp://docker-socket-proxy:2375"', agent)
+        self.assertNotIn("DOCKER_HOST", agent)
         # No real Docker socket on the network-facing agent.
         self.assertNotIn("/var/run/docker.sock:/var/run/docker.sock", agent)
         # Delegates writes over the shared unix socket.
@@ -137,6 +125,59 @@ class HardenedStackTests(unittest.TestCase):
         self.assertIn("composer-executor", ex.split("COMPOSER_EXCLUDE_SERVICES")[1].split("\n")[0])
 
 
+class DropDockerProxyTests(unittest.TestCase):
+    """`check --fix` takes a leftover proxy out of an already-hardened block."""
+
+    PROXY = """  # Read-only Docker gateway (POST=0, EXEC=0): the agent reads container/image
+  # state through it but can never mutate. Writes go through composer-executor.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    restart: always
+    environment:
+      CONTAINERS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy
+
+"""
+
+    def setUp(self):
+        self.block = _hardened_stack("decrees", {"web", "worker", "db", "redis"}, _topology())
+        self.contents = f"name: decrees\nservices:\n  web:\n    image: x\n\n{self.block}\n\nvolumes:\n  dlux_runtime:\n"
+        old = self.block.replace(COMPOSER_AGENT_START + "\n", COMPOSER_AGENT_START + "\n" + self.PROXY, 1)
+        old = old.replace(
+            '    environment:\n      WEB_IMAGE: "debeski/decrees:latest"\n      COMPOSER_REGISTRY_USERNAME: "${COMPOSER_REGISTRY_USERNAME:-}"\n      COMPOSER_REGISTRY_PASSWORD: "${COMPOSER_REGISTRY_PASSWORD:-}"\n      COMPOSER_REGISTRY_HOST: "${COMPOSER_REGISTRY_HOST:-}"\n      DLUX_UPDATE_POLICY: "${DLUX_UPDATE_POLICY:-all}"\n      COMPOSER_CONTROL_URL',
+            '    environment:\n      DOCKER_HOST: "tcp://docker-socket-proxy:2375"\n      WEB_IMAGE: "debeski/decrees:latest"\n      COMPOSER_REGISTRY_USERNAME: "${COMPOSER_REGISTRY_USERNAME:-}"\n      COMPOSER_REGISTRY_PASSWORD: "${COMPOSER_REGISTRY_PASSWORD:-}"\n      COMPOSER_REGISTRY_HOST: "${COMPOSER_REGISTRY_HOST:-}"\n      DLUX_UPDATE_POLICY: "${DLUX_UPDATE_POLICY:-all}"\n      COMPOSER_CONTROL_URL', 1)
+        old = old.replace(
+            "    depends_on:\n      composer-executor:",
+            "    depends_on:\n      docker-socket-proxy:\n        condition: service_started\n      composer-executor:", 1)
+        self.assertIn('DOCKER_HOST: "tcp://docker-socket-proxy:2375"', old)
+        self.old = self.contents.replace(self.block, old)
+
+    def test_the_proxy_its_route_and_its_dependency_go(self):
+        self.assertEqual(_drop_docker_proxy(self.old, "decrees"), self.contents)
+
+    def test_the_proxy_leaves_the_exclusion_lists(self):
+        listed = self.old.replace(
+            'COMPOSER_EXCLUDE_SERVICES: "composer-agent,composer-executor,db,redis"',
+            'COMPOSER_EXCLUDE_SERVICES: "composer-agent,composer-executor,docker-socket-proxy,db,redis"')
+        self.assertEqual(listed.count("composer-executor,docker-socket-proxy,db"), 2)
+        self.assertEqual(_drop_docker_proxy(listed, "decrees"), self.contents)
+
+    def test_idempotent_on_a_block_without_a_proxy(self):
+        self.assertEqual(_drop_docker_proxy(self.contents, "decrees"), self.contents)
+
+    def test_a_proxy_outside_the_generated_block_is_left_alone(self):
+        outside = self.contents.replace("services:\n", "services:\n" + self.PROXY, 1)
+        self.assertEqual(_drop_docker_proxy(outside, "decrees"), outside)
+
+    def test_a_legacy_agent_without_an_executor_keeps_its_proxy(self):
+        legacy = self.old.replace("  composer-executor:\n", "  composer-executor-off:\n", 1)
+        self.assertEqual(_drop_docker_proxy(legacy, "decrees"), legacy)
+
+
 DLUX_CHECKOUT = Path(
     os.environ.get("DLUX_CHECKOUT") or Path(__file__).resolve().parents[3] / "pkg-django-lux" / "main"
 )
@@ -144,20 +185,14 @@ DLUX_COMPOSE = DLUX_CHECKOUT / "dlux" / "scaffold" / "templates" / "project" / "
 
 
 class DjangoLuxScaffoldMirrorTests(unittest.TestCase):
-    """DjangoLux's scaffold writes the socket proxy image ``check --fix`` enforces.
+    """DjangoLux's scaffold is born with the topology ``check --fix`` leaves."""
 
-    Found by the 1.16.3b1 schema audit: the scaffold shipped ``:latest``, so every
-    new project drifted on its first ``check --fix`` and ran a moving tag until then.
-    """
-
-    def test_the_scaffold_pins_the_same_socket_proxy_image(self):
+    def test_the_scaffold_has_no_docker_proxy(self):
         if not DLUX_COMPOSE.is_file():
             self.skipTest(f"No DjangoLux checkout at {DLUX_CHECKOUT}")
-        images = re.findall(
-            r"(?m)^\s*image:\s*(tecnativa/docker-socket-proxy\S*)\s*$",
-            DLUX_COMPOSE.read_text(encoding="utf-8"),
-        )
-        self.assertEqual(images, [DOCKER_SOCKET_PROXY_IMAGE])
+        text = DLUX_COMPOSE.read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"(?m)^  docker-socket-proxy:", text))
+        self.assertNotIn("DOCKER_HOST", text)
 
 
 if __name__ == "__main__":

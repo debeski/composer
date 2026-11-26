@@ -120,6 +120,93 @@ class WatcherTerminalStatusTests(unittest.TestCase):
             self.assertIn("could not start", status["error"])
 
 
+def _stale_status(path, record):
+    """An earlier run's deploy-status.json, written well before this request."""
+    import os
+    import time
+
+    Path(path).write_text(json.dumps(record), encoding="utf-8")
+    then = time.time() - 600
+    os.utime(path, (then, then))
+
+
+class TerminalStatusDescribesOnlyItsRequestTests(unittest.TestCase):
+    """1.11.0b1 live proof F4 / N-8: a refused or failed request kept the previous run's fields."""
+
+    PREVIOUS_IMAGE_RUN = {
+        "status": "ready", "updated_at": "2026-11-26T14:44:58+00:00", "request_token": "e3-run-3",
+        "active_version": "1.17.0b1", "target_version": "1.17.0b1", "composer_version": "1.11.0b1",
+        "target_images": ["testbed-dlux-app:2.2.2-dlux-1.17.0b1"], "compose_files": ["compose.yml"],
+    }
+    PREVIOUS_ROLLBACK = {
+        "status": "completed", "updated_at": "2026-11-26T15:10:00+00:00", "kind": "inline",
+        "run_token": "JYhs", "action": "rollback", "error": "",
+    }
+
+    def test_a_refused_image_request_writes_only_itself(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = watch_args(Path(temp_dir))
+            _stale_status(args.status_file, self.PREVIOUS_IMAGE_RUN)
+            Path(args.trigger_file).write_text(json.dumps({"token": "f4"}), encoding="utf-8")
+            with patch.dict(os.environ, {"DLUX_UPDATE_POLICY": "inline"}), \
+                    patch("composer.watcher.subprocess.run") as child:
+                self.assertEqual(run_watch(args), 2)
+            child.assert_not_called()
+            status = json.loads(Path(args.status_file).read_text(encoding="utf-8"))
+        self.assertEqual(set(status), {"status", "updated_at", "error", "request_token", "exit_code"})
+        self.assertEqual(status["request_token"], "f4")
+        self.assertIn("DLUX_UPDATE_POLICY=inline", status["error"])
+
+    def _package(self, previous, runner, token="f3pkg"):
+        from composer.watcher import WatchRuntime
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watch = WatchRuntime(watch_args(Path(temp_dir)))
+            if previous is not None:
+                _stale_status(watch.args.status_file, previous)
+            with patch.object(watch, "maybe_check_package_availability"):
+                code = watch.process_package({"token": token, "payload": {"mode": "apply"}}, runner=runner)
+            return code, json.loads(Path(watch.args.status_file).read_text(encoding="utf-8"))
+
+    def test_a_failed_package_request_is_not_merged_into_an_earlier_rollback(self):
+        code, status = self._package(
+            self.PREVIOUS_ROLLBACK,
+            lambda *args: (1, "Could not stage the DjangoLux release: DjangoLux 1.17.0b1 is not published."),
+        )
+        self.assertEqual(code, 1)
+        self.assertNotIn("run_token", status)
+        self.assertNotIn("action", status)
+        self.assertNotIn("kind", status)
+        self.assertEqual(status["request_token"], "f3pkg")
+        self.assertIn("not published", status["error"])
+
+    def test_the_djangolux_run_that_wrote_the_request_is_kept(self):
+        mine = dict(self.PREVIOUS_ROLLBACK, status="maintenance", run_token="run-9", action="apply")
+        _code, status = self._package(mine, lambda *args: (1, "Could not stage."), token="run-9")
+        self.assertEqual((status["kind"], status["run_token"], status["action"]), ("inline", "run-9", "apply"))
+        self.assertEqual(status["status"], "failed")
+
+    def test_what_the_child_published_during_the_request_is_kept(self):
+        from composer.watcher import WatchRuntime
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watch = WatchRuntime(watch_args(Path(temp_dir)))
+            _stale_status(watch.args.status_file, self.PREVIOUS_ROLLBACK)
+
+            def child(*args):
+                Path(watch.args.status_file).write_text(
+                    json.dumps({"ok": False, "message": "Health gate failed; rolled back."}), encoding="utf-8")
+                return 1, ""
+
+            with patch.object(watch, "maybe_check_package_availability"):
+                watch.process_package({"token": "p-2", "payload": {"mode": "apply"}}, runner=child)
+            status = json.loads(Path(watch.args.status_file).read_text(encoding="utf-8"))
+        self.assertEqual(status["message"], "Health gate failed; rolled back.")
+        self.assertNotIn("run_token", status)
+
+
 class WatcherAvailabilityTests(unittest.TestCase):
     @patch("composer.registry.remote_image_labels")
     def test_existing_remote_image_version_api_uses_shared_label_lookup(self, labels):

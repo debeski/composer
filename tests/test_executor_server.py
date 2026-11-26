@@ -172,10 +172,59 @@ class ExecutorAuthTests(unittest.TestCase):
         with patch("composer.executor._peer_uid", return_value=9999):
             self.assertFalse(ex._authorized(object()))
 
-    def test_unavailable_peercred_degrades_to_filesystem_perms(self):
+    def test_unreadable_peercred_is_refused(self):
         ex = self._executor(4242)
         with patch("composer.executor._peer_uid", return_value=None):
-            self.assertTrue(ex._authorized(object()))
+            self.assertFalse(ex._authorized(object()))
+
+
+class ExecutorPeerUidDefaultTests(unittest.TestCase):
+    """The peer-uid check ran only when COMPOSER_EXECUTOR_PEER_UID was set, and the
+    generated resident block never sets it: the check was off everywhere."""
+
+    def test_unset_means_this_processs_uid(self):
+        from composer.executor import _expected_peer_uid_from_env
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("COMPOSER_EXECUTOR_PEER_UID", None)
+            self.assertEqual(_expected_peer_uid_from_env(), os.getuid())
+
+    def test_an_explicit_uid_wins(self):
+        from composer.executor import _expected_peer_uid_from_env
+        with patch.dict(os.environ, {"COMPOSER_EXECUTOR_PEER_UID": "10001"}):
+            self.assertEqual(_expected_peer_uid_from_env(), 10001)
+
+    def test_a_bad_value_is_an_error_not_no_check(self):
+        from composer.executor import _expected_peer_uid_from_env
+        for bad in ("agent", "-1", "1.5"):
+            with patch.dict(os.environ, {"COMPOSER_EXECUTOR_PEER_UID": bad}):
+                with self.assertRaises(ValueError):
+                    _expected_peer_uid_from_env()
+
+    def test_run_executor_refuses_to_start_on_a_bad_value(self):
+        from types import SimpleNamespace
+        from composer.executor import run_executor
+        with patch.dict(os.environ, {"COMPOSER_EXECUTOR_PEER_UID": "agent"}), \
+                patch("composer.executor.Executor") as executor:
+            self.assertEqual(run_executor(SimpleNamespace(socket="/unused.sock")), 2)
+        executor.assert_not_called()
+
+    def test_run_executor_enforces_its_own_uid_by_default(self):
+        from types import SimpleNamespace
+        from composer.executor import run_executor
+        env = {k: v for k, v in os.environ.items() if k != "COMPOSER_EXECUTOR_PEER_UID"}
+        with patch.dict(os.environ, env, clear=True), \
+                patch("composer.executor.Executor") as executor, \
+                patch("os.umask"):
+            executor.return_value.serve_forever.return_value = None
+            run_executor(SimpleNamespace(socket="/unused.sock", trigger_file=None))
+        self.assertEqual(executor.call_args.kwargs["expected_peer_uid"], os.getuid())
+
+    def test_a_real_peer_is_identified(self):
+        import socket as socket_module
+        from composer.executor import _peer_uid
+        left, right = socket_module.socketpair(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+        with left, right:
+            self.assertEqual(_peer_uid(left), os.getuid())
 
 
 if __name__ == "__main__":

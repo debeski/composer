@@ -159,7 +159,27 @@ class AgentLifecycleCommandTests(unittest.TestCase):
         root_parser.assert_not_called()
 
 
+_PINNED = "debeski/composer:v1.2.9@sha256:" + "a" * 64
+
+
 class UpdateSelfCommandTests(unittest.TestCase):
+    def setUp(self):
+        # `update self` pins the channel's signed release first (image_pin); the
+        # pull and the version read below are of that pin, never the moving tag.
+        from composer import image_pin
+
+        pin = image_pin.parse_ref(_PINNED)
+        resolution = image_pin.Resolution(pin=pin, current=None, changed=True)
+        pinned = patch(
+            "composer.image_pin.update_pin",
+            return_value=(resolution, {"files": [], "command": ""}),
+        )
+        self.update_pin = pinned.start()
+        self.addCleanup(pinned.stop)
+        image = patch("composer.channel_config.resolve_self_image", return_value=_PINNED)
+        image.start()
+        self.addCleanup(image.stop)
+
     def test_update_self_pulls_and_reports_the_deployer_image(self):
         launcher = DockerComposeLauncher()
         with (
@@ -175,9 +195,8 @@ class UpdateSelfCommandTests(unittest.TestCase):
         ):
             launcher.handle_update_self([])
 
-        self.assertEqual(
-            pull.call_args.args[0], ["docker", "pull", "debeski/composer:latest"]
-        )
+        self.update_pin.assert_called_once()
+        self.assertEqual(pull.call_args.args[0], ["docker", "pull", _PINNED])
         self.assertIsNotNone(pull.call_args.kwargs["progress_callback"])
         self.assertEqual(
             version.call_args.args[0],
@@ -187,10 +206,55 @@ class UpdateSelfCommandTests(unittest.TestCase):
                 "--rm",
                 "--entrypoint",
                 "cat",
-                "debeski/composer:latest",
+                _PINNED,
                 "/app/VERSION",
             ],
         )
+
+    def test_update_self_pin_only_writes_the_pin_and_pulls_nothing(self):
+        launcher = DockerComposeLauncher()
+        with (
+            patch.object(launcher, "run_command_streaming") as pull,
+            patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            launcher.handle_update_self(["--pin"])
+        pull.assert_not_called()
+        self.assertIn(f"Composer pinned to {_PINNED}", out.getvalue())
+
+    def test_update_self_with_nothing_to_pin_pulls_nothing(self):
+        # Before the first pin the deployer is the channel tag; pulling it when
+        # the channel is behind moved the deployer backwards (live proof N-2).
+        from composer import image_pin
+
+        kept = image_pin.Resolution(pin=None, current=None, changed=False, note="nothing to pin.")
+        self.update_pin.return_value = (kept, {"files": [], "lock_changed": False})
+        launcher = DockerComposeLauncher()
+        with (
+            patch("composer.channel_config.resolve_self_image", return_value="debeski/composer:beta"),
+            patch.object(launcher, "run_command_streaming") as pull,
+            patch.object(launcher, "run_command") as version,
+            patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            launcher.handle_update_self([])
+        pull.assert_not_called()
+        version.assert_not_called()
+        self.assertIn("Nothing to update", out.getvalue())
+
+    def test_update_self_stops_when_the_release_cannot_be_verified(self):
+        from composer import image_pin
+
+        self.update_pin.side_effect = image_pin.PinError("signature does not verify")
+        launcher = DockerComposeLauncher()
+        with (
+            patch.object(launcher, "run_command_streaming") as pull,
+            patch("sys.stdout", new_callable=io.StringIO),
+            patch("sys.stderr", new_callable=io.StringIO) as errors,
+            self.assertRaises(SystemExit) as exit_code,
+        ):
+            launcher.handle_update_self([])
+        self.assertEqual(exit_code.exception.code, 1)
+        self.assertIn("signature does not verify", errors.getvalue())
+        pull.assert_not_called()
 
     def test_update_self_shows_the_pull_bar_and_stops_on_failure(self):
         launcher = DockerComposeLauncher()

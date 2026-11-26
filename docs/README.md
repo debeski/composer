@@ -22,7 +22,7 @@ Start with the [README](../README.md) for what Composer is and a quick start.
 ## The resident pair
 
 - [The resident pair](resident-pair.md): `composer-agent` and `composer-executor` at runtime, `agent watch`, lifecycle commands.
-- [Executor hardening](executor-hardening.md): the security model: who holds Docker authority, the socket operations, capabilities, the read-only proxy.
+- [Executor hardening](executor-hardening.md): the security model: who holds Docker authority, the socket operations, the agent's reads, capabilities.
 - [Agent Protocol v1](agent-protocol-v1.md): the state files DjangoLux and the agent exchange, the Operations card's operations, the control-plane protocol.
 - [The egress relay](relay.md): named outbound operations the application asks the agent to make, and sealed secrets.
 

@@ -39,6 +39,7 @@ cycle, never a release later:
 - relay operations shared with `dlux.relay` (`relay_weather_ops.json`,
   `relay_projection_cases.json`);
 - the maintenance page (until 1.13.0 moves it here for good).
+- the generated stack (owner, 2026-11-25: "imperative"): DjangoLux's scaffold and Composer's `check` / `--fix` describe the same stack. A change to its shape (services, stamps, proxy, wrappers, labels, resident block) lands in the scaffold and in Composer's checks and repairs in the same paired release. `scripts/scaffold_alignment.py` must report "aligned" against the paired DjangoLux checkout. `tests/test_scaffold_alignment.py` runs it whenever a sibling checkout is present.
 
 When a DjangoLux change needs Composer, cut the paired Composer beta alongside it,
 accept both together on `~/Desktop/depy/testbed-dlux`, and record the pairing

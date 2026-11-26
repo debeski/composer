@@ -69,10 +69,12 @@ class InstallTests(unittest.TestCase):
     def test_the_result_is_valid_compose_yaml(self):
         self.assertIn("services", self.model)
 
-    def test_all_three_composer_services_are_installed(self):
-        for name in ("docker-socket-proxy", "composer-executor", "composer-agent"):
+    def test_both_composer_services_are_installed_without_a_docker_proxy(self):
+        for name in ("composer-executor", "composer-agent"):
             with self.subTest(service=name):
                 self.assertIn(name, self.model["services"])
+        self.assertNotIn("docker-socket-proxy", self.model["services"])
+        self.assertNotIn("DOCKER_HOST", self.model["services"]["composer-agent"]["environment"])
 
     def test_the_projects_own_services_are_untouched(self):
         for name in ("web", "celery", "dlux-updater", "db"):

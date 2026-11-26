@@ -16,6 +16,7 @@ import sys
 from typing import Dict, Tuple
 
 from . import executor_protocol as proto
+from . import update_policy
 from .service_selection import (
     PROTECTED_LIFECYCLE_SERVICES,
     PROTECTED_RESTART_SERVICES,
@@ -207,7 +208,7 @@ def _run_check_fix(operation_id: str, payload: Dict) -> Tuple[int, str]:
         "-v", "/var/run/docker.sock:/var/run/docker.sock",
         "-w", project_dir,
         *secret_flags(project_dir=project_dir),
-        self_image(_capture), "check", "--fix", "-y",
+        self_image(_capture), "check", "--fix", "-y", "--resident-apply",
     ]
     return _run(argv, _op_env(operation_id))
 
@@ -220,7 +221,7 @@ umask 0002
 python -m composer agent update
 code=$?
 python - "$OPS_TOKEN" "$code" <<'PYEOF'
-import datetime, json, os, sys
+import datetime, json, os, sys, tempfile
 
 token, code = sys.argv[1], int(sys.argv[2])
 state = "/opt/dlux-runtime/state"
@@ -235,11 +236,13 @@ ack = {
     "exit_code": code, "error": error, "finished_at": now,
 }
 for name, payload in (("ops-result.json", result), ("ops-request.json.ack", ack)):
-    target = os.path.join(state, name)
-    tmp = os.path.join(state, "." + name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
+    # A random, exclusively created temp name: a fixed one on this shared
+    # volume could be a planted symlink.
+    fd, tmp = tempfile.mkstemp(dir=state, prefix="." + name + ".", suffix=".tmp")
+    os.fchmod(fd, 0o664)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
-    os.replace(tmp, target)
+    os.replace(tmp, os.path.join(state, name))
 PYEOF
 """
 
@@ -250,7 +253,8 @@ def _run_agent_update(operation_id: str, payload: Dict) -> Tuple[int, str]:
     Returns as soon as the helper is running: this process is one of the two
     containers it is about to recreate, so waiting for it would mean waiting to
     be killed. `--volumes-from` gives the helper this container's mounts (the
-    project and the runtime volume) without widening anything.
+    project and the runtime volume); the project is then mounted read-write over
+    it, as for `check --fix`, so the pin can be written.
     """
     import socket
 
@@ -259,6 +263,9 @@ def _run_agent_update(operation_id: str, payload: Dict) -> Tuple[int, str]:
     ok, out, err = _capture([
         "docker", "run", "-d", "--rm",
         "--volumes-from", socket.gethostname(),
+        # Over the inherited read-only project mount: `agent update` writes the
+        # verified pin into .composer-image and the generated block.
+        "-v", f"{os.getcwd()}:{os.getcwd()}:rw",
         "-v", "/var/run/docker.sock:/var/run/docker.sock",
         "-w", os.getcwd(),
         "-e", f"OPS_TOKEN={payload['token']}",
@@ -308,21 +315,131 @@ def _fit_check_result(operation_id: str, report: Dict) -> Dict:
     return result
 
 
+# How many RepoDigests an image read returns, and how long each may be.
+_MAX_REPO_DIGESTS = 32
+_MAX_REPO_DIGEST_CHARS = 300
+
+
+def _compose_runtime(payload: Dict):
+    """The runtime a read or check uses, or None when its file leaves the project."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    filename = payload.get("file") or None
+    if filename and Path(filename).resolve().parent != Path.cwd().resolve():
+        return None
+    return SimpleNamespace(args=SimpleNamespace(file=filename, dev=payload.get("dev", False)))
+
+
+def _read_services_state(operation_id: str, runtime) -> Dict:
+    from .ops import _service_states, _stack_launcher
+
+    result = proto.build_result(operation_id, "succeeded")
+    result["services"] = _service_states(_stack_launcher(runtime))
+    return result
+
+
+def _fit_logs_result(operation_id: str, text: str) -> Dict:
+    """A ``logs_tail`` result whose oldest lines give way until it fits one frame.
+
+    JSON escapes non-ASCII text to six bytes a character, so a tail that is under
+    the character cap can still be over the frame limit.
+    """
+    result = proto.build_result(operation_id, "succeeded")
+    result["logs"] = text
+    while text:
+        excess = proto.encoded_size(result) - proto.MAX_EXECUTOR_MESSAGE_BYTES
+        if excess <= 0:
+            break
+        text = text[max(1, excess // 6 + 1):]
+        newline = text.find("\n")
+        text = text[newline + 1:] if newline >= 0 else ""
+        result["logs"] = text
+    return result
+
+
+def _read_logs_tail(operation_id: str, runtime, payload: Dict) -> Dict:
+    from .ops import _read_logs, _service_states, _stack_launcher
+
+    launcher = _stack_launcher(runtime)
+    service = payload["service"]
+    if service and service not in {row["name"] for row in _service_states(launcher)}:
+        return proto.build_result(operation_id, "rejected", exit_code=2,
+                                  detail=f"'{service}' is not a service of this deployment.")
+    return _fit_logs_result(operation_id, _read_logs(launcher, service, payload["lines"]))
+
+
+def _readable_images() -> set:
+    """The images whose local digest the agent may ask for: the ones it checks."""
+    return {
+        value.strip()
+        for value in (os.environ.get("WEB_IMAGE"), os.environ.get("COMPOSER_CHECK_IMAGE"))
+        if value and value.strip()
+    }
+
+
+def _compose_images() -> set:
+    from .watcher import _compose_check_images
+
+    try:
+        return set(_compose_check_images(""))
+    except Exception:
+        return set()
+
+
+def _read_image_digests(operation_id: str, image: str) -> Dict:
+    from .watcher import _docker_repo_digests
+
+    if image not in _readable_images() and image not in _compose_images():
+        return proto.build_result(operation_id, "rejected", exit_code=2,
+                                  detail="That image is not one this deployment checks for updates.")
+    digests = _docker_repo_digests(image)
+    result = proto.build_result(operation_id, "succeeded")
+    result["repo_digests"] = None if digests is None else [
+        str(entry)[:_MAX_REPO_DIGEST_CHARS] for entry in digests[:_MAX_REPO_DIGESTS]
+    ]
+    return result
+
+
+#: Executor ops the deployment update policy can refuse, and what each one is.
+#: The executor is the Docker authority, so it refuses on its own reading of the
+#: policy even when the agent asking it has been compromised.
+_POLICY_OPS = {
+    "recovery_deploy": update_policy.IMAGE_UPDATE,
+    "agent_update": update_policy.COMPOSER_UPDATE,
+    "dlux_package_apply": update_policy.INLINE_UPDATE,
+}
+
+
+def _policy_refusal(op: str) -> str:
+    kind = _POLICY_OPS.get(op)
+    if kind and not update_policy.allows(kind):
+        return update_policy.refusal(kind)
+    return ""
+
+
 def default_operation_handler(request: Dict) -> Dict:
     """Map a validated executor request to a redacted typed result."""
     operation_id = request["operation_id"]
     op = request["op"]
     payload = request.get("payload", {})
-    if op == 'deployment_check':
-        from types import SimpleNamespace
-        from pathlib import Path
+    if op == "image_digests":
+        return _read_image_digests(operation_id, payload["image"])
+    if op in ("deployment_check", "services_state", "logs_tail"):
+        runtime = _compose_runtime(payload)
+        if runtime is None:
+            return proto.build_result(operation_id, "rejected", exit_code=2,
+                                      detail="Compose file must stay within the project directory.")
+        if op == "services_state":
+            return _read_services_state(operation_id, runtime)
+        if op == "logs_tail":
+            return _read_logs_tail(operation_id, runtime, payload)
         from .ops import _run_check_local
 
-        filename = payload.get('file') or None
-        if filename and Path(filename).resolve().parent != Path.cwd().resolve():
-            return proto.build_result(operation_id, 'rejected', exit_code=2, detail='Compose file must stay within the project directory.')
-        runtime = SimpleNamespace(args=SimpleNamespace(file=filename, dev=payload['dev']))
         return _fit_check_result(operation_id, _run_check_local(runtime))
+    refused = _policy_refusal(op)
+    if refused:
+        return proto.build_result(operation_id, "rejected", exit_code=update_policy.REFUSED_EXIT, detail=refused)
     if op in ("start", "stop"):
         exit_code, detail = _run_service_lifecycle(operation_id, payload["service"], op)
     elif op == "restart":

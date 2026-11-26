@@ -14,12 +14,12 @@ loop this design removes.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from typing import Tuple
 from pathlib import Path
 
+from . import safe_files
 from .dlux_package_update import apply_package_update, rollback_package_update
 from .dlux_runtime import DluxRuntime
 from .service_selection import parse_service_list
@@ -109,14 +109,44 @@ def parse_dlux_update_args(argv, *, action="update"):
 AVAILABILITY_FILENAME = "package-available.json"
 
 
+def stack_schema_way_out(message: str, runtime, *, channel=None) -> str:
+    """A stack schema refusal (``message``) rewritten to name the real way out, or ``""``.
+
+    The release source refuses a release whose stack schema floor the stack is
+    below and says to run ``check --fix``; on an old stack ``check --fix`` in
+    turn needs a newer DjangoLux. This names what breaks the circle, worked out
+    from the release data: the newest release the stack still takes inline,
+    then ``check --fix``, then a project image for what no inline release
+    reaches (break-it finding #1).
+    """
+    from . import dlux_upgrade_path as path
+
+    refusal = path.parse_refusal(message)
+    if refusal is None:
+        return ""
+    try:
+        running, _verified = installed_release(runtime.read_active() if runtime.exists() else {})
+    except Exception:
+        running = ""
+    if channel is None:
+        channel = _resolved_channel(runtime)
+    try:
+        exclude = runtime.quarantined_versions()
+    except Exception:
+        exclude = []
+    stone, error = path.find_stone(running, below=refusal["version"], channel=channel, exclude=exclude)
+    return refusal["summary"] + " " + path.update_way_out(
+        refused=refusal["version"], needed=refusal["floor"], stamp=refusal["stamp"],
+        running=running, stone=stone, index_error=error,
+    )
+
+
 def write_availability(runtime, payload, path=None) -> Path:
     """Publish availability where DjangoLux reads it, atomically."""
     target = Path(path) if path else (runtime.state_dir / AVAILABILITY_FILENAME)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.tmp")
-    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, target)
-    return target
+    # The state directory is a shared volume: never follow a planted temp-file symlink.
+    return safe_files.atomic_write_json(target, payload)
 
 
 def release_display(manifest) -> dict:
@@ -183,6 +213,8 @@ def build_availability_payload(target_version="", *, channel=None, runtime=None,
             "quarantined": quarantined,
         }
     inline_safe, reason = described["inline_safe"], described["reason"]
+    if not inline_safe and runtime is not None:
+        reason = stack_schema_way_out(reason, runtime, channel=channel) or reason
     # Only a pinned check can land on one.
     held = quarantine_message(runtime, described["version"]) if runtime is not None else ""
     if held:
@@ -253,6 +285,8 @@ def run_availability_check(args, runtime) -> int:
         return 1
     installed, verified = installed_release(runtime.read_active() if runtime.exists() else {})
     print(f"✔ {availability_summary(payload, installed, verified)} — published to {path}")
+    if not payload.get("inline_safe") and payload.get("reason"):
+        print(f"  ↳ {payload['reason']}")
     if payload.get("error"):
         print(f"  note: {payload['error']}", file=sys.stderr)
     skipped = [version for version in payload.get("quarantined") or () if version != payload.get("version")]
@@ -353,7 +387,8 @@ def _publish(path, result) -> None:
     target = Path(path)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(result.as_dict(), sort_keys=True) + "\n", encoding="utf-8")
+        # deploy-status.json lives on the shared runtime volume: replace, never follow.
+        safe_files.atomic_write_json(target, result.as_dict())
     except OSError:
         pass
 
@@ -488,7 +523,7 @@ def _dry_run(args, runtime, staged) -> int:
                 args.version, channel=_resolved_channel(runtime), **extra,
             )
     except Exception as exc:
-        print(f"✖ {exc}", file=sys.stderr)
+        print(f"✖ {stack_schema_way_out(str(exc), runtime) or exc}", file=sys.stderr)
         return 1
     held = "" if args.retry_quarantined else quarantine_message(runtime, candidate.version)
     if held:
@@ -536,6 +571,9 @@ def run_dlux_update(args, argv=None) -> int:
             **({"source": staged} if staged else {}),
         )
 
+    if not result.ok and not result.critical:
+        # The status file is what DjangoLux shows for a panel-started update.
+        result.message = stack_schema_way_out(result.message, runtime) or result.message
     _publish(args.status_file, result)
 
     if result.ok:

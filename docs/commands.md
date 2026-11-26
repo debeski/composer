@@ -19,7 +19,7 @@ where they make sense, to the commands below.
 | `--skip-config` | Leave DjangoLux's initial setup wizard available even when the image contains `config.json` (DjangoLux 1.9.4+): [manual first-deploy setup](first-deploy.md). |
 | `-nm`, `-mm`, `-a APP` | Passed to DjangoLux's migrator: [the migrator contract](deploying.md#the-migrator-contract). |
 | `-u [service]` | Compact form of `update`: pull the latest image(s), then recreate immediately. Pass a service name to scope it. |
-| `--force` | Bypass the preflight [version gate](updates.md#version-gate) (allow updating onto an older image version). |
+| `--force` | Deploy an older image anyway: bypasses the preflight [version gate](updates.md#version-gate) and the [downgrade guard](deploying.md#downgrade-guard). Restore a matching database backup first. |
 | `--status-file PATH` | Write a JSON [deploy-status](deploying.md#deploy-status) file to `PATH` (overrides `COMPOSER_STATUS_FILE`). |
 | `--down` | Stop everything (see [`stop`](#stop)). |
 | `-v`, `--volumes` | With `--down`: remove volumes too. Confirmation required. |
@@ -36,15 +36,17 @@ where they make sense, to the commands below.
 Updates the Composer deployer first (wrapper 5+), then pulls the latest image(s),
 recreates the affected containers, waits for health checks, and runs post-start
 tasks. Name services to scope both the pull and the recreate; naming them leaves the
-deployer as it is. `-u [service]` is the compact form. Details:
+deployer as it is. `-u [service]` is the compact form. A resident pair on a moving
+Composer tag is left out; it moves through `agent update`. Details:
 [image updates](updates.md#image-updates).
 
 ### `pull`
 
 `composer pull [--status-file PATH] [-f FILE] [-d] [service...]`
 
-Only downloads images. It never recreates containers, runs health checks, or
-executes post-start tasks. It replaces the retired `-uo` and `update -o` forms.
+Only downloads images, never a resident pair's moving Composer tag. It never
+recreates containers, runs health checks, or executes post-start tasks. It replaces
+the retired `-uo` and `update -o` forms.
 
 ### `restart`
 
@@ -110,10 +112,12 @@ and `--since`/`--until` bound the window. `composer logs` is an alias.
 
 ### `check`
 
-`composer check [--fix] [-y] [--deep] [--deep-service S] [--deep-command CMD] [--json] [--beta|--stable] [-f FILE] [-d]`
+`composer check [--fix] [-y] [--no-recreate] [--deep] [--deep-service S] [--deep-command CMD] [--json] [--beta|--stable] [--allow-unverified-composer] [-f FILE] [-d]`
 
-Diagnoses the outside of a stack, and with `--fix` repairs it. Reference, with every
-finding: [`composer check`](check.md).
+Diagnoses the outside of a stack, and with `--fix` repairs it, then stops and removes
+the services the repairs drop and recreates the running services they change
+(`--no-recreate` leaves that to `./start.sh`). Reference, with every finding:
+[`composer check`](check.md).
 
 ### `app-permissions revert`
 
@@ -126,8 +130,8 @@ Undoes a group-access grant `check --fix` made on app data, from the
 
 | Command | Does |
 | --- | --- |
-| `composer update self` | pulls the deployer image (`:latest`, or `:beta` on the beta channel) and leaves the stack alone; `self update` is a deprecated alias ([Composer itself](updates.md#composer-itself)) |
-| `composer agent update` | pulls the resident pair's image and recreates `composer-agent` and `composer-executor` |
+| `composer update self [--pin] [--allow-downgrade] [--allow-unverified-composer]` | pins the deployer to the channel's newest signed release (`.composer-image`), pulls it and leaves the stack alone; with nothing to pin it pulls nothing; `--pin` only writes the pin, which the wrapper then pulls; `self update` is a deprecated alias ([the Composer pin](updates.md#the-composer-pin)) |
+| `composer agent update [--allow-downgrade] [--allow-unverified-composer]` | pins the same release, pulls the resident pair's image and recreates `composer-agent` and `composer-executor`; with nothing to pin it changes nothing |
 | `composer agent restart` | restarts the pair and waits for health |
 | `composer agent off` | stops the pair |
 | `composer agent enable [--apply]` | migrates a legacy or agent-only stack to the hardened pair; dry run by default ([topology migrations](stack-migrations.md#topology-migrations)) |
@@ -190,7 +194,9 @@ Pass `-y`/`--yes` (or set `COMPOSER_ASSUME_YES=1`) to confirm up front. The guar
 fails **closed**: when stdin is not a terminal (CI, cron, a piped script) and neither
 the flag nor the variable is set, the run is refused instead of silently proceeding.
 `composer check --fix` and `check --beta`/`--stable` ask the same way before they
-apply. The variable reaches a native `python -m composer` run only: the
+apply. At a terminal, `check --fix` also asks a few short operator-choice questions
+first ([questions](check.md#questions-at-a-terminal)); with `-y`,
+`COMPOSER_ASSUME_YES` or no terminal it asks none. The variable reaches a native `python -m composer` run only: the
 `start.sh`/`start.ps1` wrappers do not pass it into the deployer container, so a
 non-interactive run through them needs the flag (`./start.sh check --fix -y`).
 

@@ -1,12 +1,15 @@
 {
   "schema_version": 1,
-  "version": "1.10.4",
-  "summary": "Follow-ups to Composer 1.10.3. A deployment check whose result is too large for the executor's 64 KiB frame now reaches the agent as a failed result naming the size, and the check shortens long repair diffs so its report fits, instead of the agent seeing only a closed connection. The unused `executor run --package-trigger-file` flag is removed, and the help names the resident pair the agent commands act on. No stack or wrapper changes.",
+  "version": "1.11.0b1",
+  "summary": "Composer 1.11 is a fix and security line, paired with DjangoLux 1.17. check and check --fix are honest and complete: they name the real way out of an old stack, re-stamp every schema stamp, fail on a missing worker or secrets file, run one at a time, keep line endings, and now finish the job: dropped services are removed, changed ones recreated and health-checked, with questions only at a terminal and -y for scripts. Deploys wait until every container stays healthy, keep the proxy up on failure and refuse an older image. Redis moves to crash-safe snapshots and a damaged append-only file is recovered. The agent no longer reads other containers' secrets: the executor answers its reads and docker-socket-proxy leaves the stack. Composer pins its own image to a digest its release job signs and never moves it backwards. DLUX_UPDATE_POLICY can limit which updates the app may request.",
   "highlights": [
-    "A deployment check result over the executor's 64 KiB frame limit is reported as a failure that names the size, not a dropped connection.",
-    "Long repair diffs in a deployment check are shortened at a line end so the report fits; each shortened repair says so.",
-    "`executor run --package-trigger-file` is removed; no generated stack ever passed it.",
-    "No stack, wrapper or DjangoLux changes: works with DjangoLux 1.16."
+    "check --fix finishes the job: removes dropped services, recreates changed ones, health-checks them.",
+    "Deploys wait for stable health, keep the maintenance page up on failure, refuse older images.",
+    "Redis switches to crash-safe snapshots; a damaged append-only file is recovered.",
+    "The agent no longer reads container secrets; docker-socket-proxy leaves the stack.",
+    "Composer pins its own image to a signed digest; updates verify it and never move back.",
+    "DLUX_UPDATE_POLICY limits which updates the app may request.",
+    "Pairs with DjangoLux 1.17; run ./start.sh check --fix after updating."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.10.4"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.11.0b1"
 }

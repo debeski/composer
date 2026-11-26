@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .agent_protocol import redact_text
-from . import registry_login
+from . import registry_login, safe_files, update_policy
 from .registry import (
     DEFAULT_VERSION_LABEL,
     LOGIN_REQUIRED,
@@ -129,10 +129,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _local_repo_digest(image: str) -> Optional[str]:
-    """The digest the local image for `image` was pulled at (its RepoDigest),
-    via `docker image inspect` (honors DOCKER_HOST). None if not present."""
-    repo = str(image).split("@", 1)[0].rsplit(":", 1)[0]
+def _docker_repo_digests(image: str) -> Optional[list]:
+    """`docker image inspect`'s RepoDigests for `image` (honors DOCKER_HOST).
+
+    None when the image is not present or Docker cannot say.
+    """
     try:
         proc = subprocess.run(
             ["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
@@ -146,10 +147,34 @@ def _local_repo_digest(image: str) -> Optional[str]:
         digests = json.loads(proc.stdout.strip() or "[]")
     except ValueError:
         return None
+    return digests if isinstance(digests, list) else None
+
+
+def _repo_digests(image: str) -> Optional[list]:
+    """RepoDigests of the local `image`: from the executor in an executor
+    deployment (the agent has no Docker API), otherwise from Docker itself."""
+    from . import executor_client
+
+    if not executor_client.reads_via_executor():
+        return _docker_repo_digests(image)
+    try:
+        digests = executor_client.read("image_digests", {"image": image}).get("repo_digests")
+    except ValueError:
+        return None
+    return digests if isinstance(digests, list) else None
+
+
+def _local_repo_digest(image: str) -> Optional[str]:
+    """The digest the local image for `image` was pulled at (its RepoDigest).
+    None if not present."""
+    repo = str(image).split("@", 1)[0].rsplit(":", 1)[0]
+    digests = _repo_digests(image)
+    if not digests:
+        return None
     for entry in digests:
         if isinstance(entry, str) and entry.startswith(f"{repo}@"):
             return entry.split("@", 1)[1]
-    if digests and isinstance(digests[0], str) and "@" in digests[0]:
+    if isinstance(digests[0], str) and "@" in digests[0]:
         return digests[0].split("@", 1)[1]
     return None
 
@@ -208,11 +233,7 @@ def availability_payload(images: List[str]) -> dict:
 
 
 def _write_availability_payload(path: str, payload: dict):
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.tmp")
-    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-    os.replace(tmp, target)
+    safe_files.atomic_write_json(path, payload, sort_keys=False)
 
 
 def write_availability(path: str, images: List[str]) -> dict:
@@ -414,12 +435,24 @@ def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = ""):
     if operation_id:
         payload["operation_id"] = operation_id
     try:
-        ack.parent.mkdir(parents=True, exist_ok=True)
-        tmp = ack.with_name(f".{ack.name}.tmp")
-        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-        os.replace(tmp, ack)
+        safe_files.atomic_write_json(ack, payload, sort_keys=False)
     except OSError:
         pass
+
+
+def _describes_request(record: dict, token: str, operation_id: str, written, since) -> bool:
+    """Is ``record`` about this request rather than an earlier run?
+
+    It is when it names the request (the child's ``request_token``, or the
+    ``run_token`` of the DjangoLux run that wrote the request), its operation, or
+    when it was written after the request began: a package child publishes its
+    result without a token.
+    """
+    if token and token in {str(record.get("request_token") or ""), str(record.get("run_token") or "")}:
+        return True
+    if operation_id and str(record.get("operation_id") or "") == operation_id:
+        return True
+    return since is not None and written is not None and written >= since
 
 
 def _publish_terminal_failure(
@@ -428,18 +461,26 @@ def _publish_terminal_failure(
     exit_code: int,
     error: str = "",
     operation_id: str = "",
+    since: Optional[float] = None,
 ) -> bool:
     """Guarantee a terminal deploy status after a failed child process.
 
-    Preserve a detailed error already published by the child. The request token
-    also lets consumers reject a terminal record from an older update.
+    The record describes this request only. What the file already says is kept
+    when it is about this request (a detailed error the child published, the
+    DjangoLux run that handed it over); a record from an earlier run is replaced,
+    never merged. ``since`` is when the request began (``time.time()``). The
+    request token also lets consumers reject a terminal record from an older
+    update.
     """
     target = Path(status_file)
     try:
         current = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(current, dict):
             current = {}
+        written = target.stat().st_mtime
     except (OSError, ValueError, AttributeError):
+        current, written = {}, None
+    if current and not _describes_request(current, token, operation_id, written, since):
         current = {}
 
     detail = str(error or "").strip()
@@ -459,10 +500,7 @@ def _publish_terminal_failure(
     if operation_id:
         payload["operation_id"] = operation_id
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{target.name}.tmp")
-        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-        os.replace(tmp, target)
+        safe_files.atomic_write_json(target, payload, sort_keys=False)
         return True
     except OSError:
         return False
@@ -719,9 +757,15 @@ class WatchRuntime:
         version = str(payload.get("target_version") or request.get("target_version") or "").strip()
 
         label = f"{mode} {version}".strip()
+        started = time.time()
         print(f"⟳ dlux package update {token} — {label}", flush=True)
         run = runner or self.run_package_child
-        exit_code, launch_error = run(mode, version, token, operation_id)
+        if mode == "apply" and not update_policy.allows(update_policy.INLINE_UPDATE):
+            exit_code = update_policy.REFUSED_EXIT
+            launch_error = update_policy.refusal(update_policy.INLINE_UPDATE)
+            print(f"✖ {launch_error}", flush=True)
+        else:
+            exit_code, launch_error = run(mode, version, token, operation_id)
         if exit_code != 0:
             fallback = launch_error or (
                 f"Composer dlux {mode} exited with status {exit_code}."
@@ -729,7 +773,7 @@ class WatchRuntime:
             if self.args.status_file:
                 _publish_terminal_failure(
                     self.args.status_file, token, exit_code,
-                    error=launch_error, operation_id=operation_id,
+                    error=launch_error, operation_id=operation_id, since=started,
                 )
             _append_terminal_failure(self.log_file, fallback)
         _write_ack(self.package_ack, token, exit_code, operation_id=operation_id)
@@ -768,6 +812,7 @@ class WatchRuntime:
     def process(self, request: dict) -> int:
         token = str(request["token"])
         operation_id = str(request.get("operation_id") or "").strip()
+        started = time.time()
         print(f"⟳ update request {token} — running `composer update`", flush=True)
         if self.log_file:
             try:
@@ -780,11 +825,17 @@ class WatchRuntime:
         if operation_id:
             child_env["COMPOSER_OPERATION_ID"] = operation_id
         launch_error = ""
-        try:
-            exit_code = subprocess.run(self.child, env=child_env).returncode
-        except (OSError, subprocess.SubprocessError) as exc:
-            exit_code = 127
-            launch_error = f"Composer update process could not start: {exc}"
+        if not update_policy.allows(update_policy.IMAGE_UPDATE):
+            # Answered like a failed run, so DjangoLux leaves maintenance and says why.
+            exit_code = update_policy.REFUSED_EXIT
+            launch_error = update_policy.refusal(update_policy.IMAGE_UPDATE)
+            print(f"✖ {launch_error}", flush=True)
+        else:
+            try:
+                exit_code = subprocess.run(self.child, env=child_env).returncode
+            except (OSError, subprocess.SubprocessError) as exc:
+                exit_code = 127
+                launch_error = f"Composer update process could not start: {exc}"
         if exit_code != 0:
             fallback_error = launch_error or f"Composer update process exited with status {exit_code}."
             if self.args.status_file:
@@ -794,6 +845,7 @@ class WatchRuntime:
                     exit_code,
                     error=launch_error,
                     operation_id=operation_id,
+                    since=started,
                 )
             _append_terminal_failure(self.log_file, fallback_error)
         _write_ack(self.ack, token, exit_code, operation_id=operation_id)

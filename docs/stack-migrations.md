@@ -19,9 +19,16 @@ and `.proxy/*`. The `stack-schema` finding of `composer check` reads them
 
 | Files | Finding |
 | --- | --- |
+A file may carry more than one stamp: Decrees' and CRM gov's `compose.yml` have a
+`# dlux stack schema N` header above the `DLUX_STACK_SCHEMA` value. Composer reads
+every stamp:
+
+| Files | Finding |
+| --- | --- |
 | none stamped | `ok`: the stack predates stamping |
-| compose.yml stamped, every other stamp agrees | `ok`, with the count of unstamped files |
-| stamps disagree, or other files stamped but compose.yml is not | `warn`, naming the files per schema |
+| compose.yml carries `DLUX_STACK_SCHEMA`, every stamp agrees | `ok`, with the count of unstamped files |
+| files disagree with each other, a file other than compose.yml disagrees with itself, other files stamped but compose.yml is not, or compose.yml stamped in a comment only | `warn`, naming the files |
+| compose.yml's own stamps disagree | `fail`: DjangoLux reads `DLUX_STACK_SCHEMA`, so it runs the stack as that schema |
 
 Composer compares the files with each other. Whether compose.yml's schema is the
 one the running DjangoLux expects is the app's `stack.schema` doctor check, which
@@ -29,11 +36,30 @@ one the running DjangoLux expects is the app's `stack.schema` doctor check, whic
 Composer's own [wrapper marker](deploying.md#wrappers).
 
 Each schema migration of `check --fix` restamps every file stamped with the schema
-it leaves, including the secrets file `check` reads (the first of `.env`,
+it leaves, every stamp in it (a header comment and the value alike), including the
+secrets file `check` reads (the first of `.env`,
 `secrets/.env`, `.secrets/.env`). In the secrets file only the stamp changes: it is
 rewritten in place byte for byte, keeping its mode, owner and line endings; it is
 not copied to the `.xclude/composer-check/` backup; and the repair preview lists it
-without showing any of its lines. An unstamped secrets file is left as it is.
+without showing any of its lines. An unstamped secrets file is left as it is. Every
+other rewritten file keeps its line endings.
+
+### Repairing stamps that disagree
+
+Composer 1.10 and earlier restamped only the first stamp in a file, so after 3 → 4
+→ 5 Decrees' `compose.yml` read `# dlux stack schema 5` above `DLUX_STACK_SCHEMA:
+"3"`. `check --fix` repairs any file whose own stamps disagree, after every other
+repair: it reads the schema the stack's layout follows from the files themselves (no
+`tools/` runtime modules: 2; the published maintenance page: 3; private stored files:
+4; a `worker` service: 5) and restamps every stamp in that file to it. The Compose
+configuration is validated first and the originals archived under
+`.xclude/composer-check/<UTC>/stack-schema/` (the secrets file is restamped in place
+and not copied). It leaves a file alone when the layout cannot be read (the proxy has
+its own `/media/` rules) or a stamp is newer than any schema this Composer knows (a
+newer Composer wrote it: update Composer first).
+
+The stack schema an inline update compares with its release's floor is compose.yml's
+lowest stamp, so a half-restamped stack is never taken for further along than it is.
 
 ## Schema steps
 
@@ -46,15 +72,23 @@ without showing any of its lines. An unstamped secrets file is left as it is.
 ### Schema 4 to 5: `worker`
 
 DjangoLux 1.16 runs its own tasks with `python manage.py dlux_worker` in a `worker`
-service, which takes over everything `celery` did for DjangoLux. The `task-worker`
-finding is a WARN when the running DjangoLux is 1.16 or later and the stack has no
-`worker` (its tasks are queued and never run), and OK otherwise.
+service, which takes over everything `celery` did for DjangoLux. Without `worker` its
+tasks are queued and never run, so scheduled backups and jobs stop.
+
+The `task-worker` finding is a FAIL when the running DjangoLux is 1.16 or later and
+the stack has no `worker`.
 
 `composer check --fix` adds the service once the stack's DjangoLux has
-`dlux_worker`: the running release (the active inline release, or the image's), or
-with `-d` the `django-lux` version `requirements.txt`/`pyproject.toml` pins, since a
-development stack builds from the source. On an older DjangoLux it changes nothing,
-because `worker` could not start. The fix:
+`dlux_worker`, as any one of these says:
+
+- the image the Compose files name (`WEB_IMAGE`), when Docker already has it (pulled
+  or built, not yet deployed): its baked-version label, else `python -m dlux
+  --version` in a throwaway container without network. Nothing is pulled;
+- the running release (the active inline release, or the image's);
+- with `-d`, the `django-lux` version `requirements.txt`/`pyproject.toml` pins, since
+  a development stack builds from the source.
+
+On an older DjangoLux it changes nothing, because `worker` could not start. The fix:
 
 - copies `celery` to `worker` with its mounts, environment anchors, networks and
   dependencies, and gives it the command `python -m dlux.updater.supervisor --
@@ -69,44 +103,97 @@ because `worker` could not start. The fix:
 - adds `worker` to `COMPOSER_AGENT_RESTART_SERVICES` right after `web`, and with
   `-d` mirrors the `compose.dev.yml` `celery` override for `worker`;
 - restamps files stamped 4 to 5, the secrets file among them, also on a stack whose
-  `compose.yml` is already stamped 5. An unstamped `compose.yml` gets
+  `compose.yml` is already stamped 5. A `compose.yml` stamped 5 in a header comment
+  only gains the `DLUX_STACK_SCHEMA: "5"` value DjangoLux reads. An unstamped `compose.yml` gets
   `DLUX_STACK_SCHEMA: "5"` only when nothing older is left: no `tools/` runtime
   modules, the maintenance page published by Composer, and stored files private.
   Otherwise it stays unstamped and the result says why; a later `check --fix` stamps
   it once the rest is done.
 
 The merged configuration is validated with `docker compose config` before anything
-is written, the originals are archived under `.xclude/composer-check/`, and nothing
-is recreated: the next deploy (`./start.sh`, or `./start.sh -d -b`) starts `worker`.
+is written and the originals are archived under `.xclude/composer-check/`. On a
+running stack the same `check --fix` then starts `worker` and recreates the services
+whose definition changed ([after the repairs](check.md#after-the-repairs)); in
+development, `./start.sh -d -b` builds and starts it.
 The step runs after the others, so a stack still on the old layout (`dlux-updater`,
 `tools.dlux_runtime_supervisor`, the project's maintenance page) reaches schema 5 in
 one `check --fix`.
+
+#### `celery` in an image without Celery
+
+`celery` stays for the project's own tasks. A project image without Celery (Decrees
+2.2), or without the app celery's command names, cannot run it, and the container
+restarts for good. `check` reports the loop (`services` FAIL) and the cause
+(`celery` WARN), and `check --fix` removes celery once `worker` exists, in the same
+run that adds it: the service block leaves `compose.yml` and
+`COMPOSER_AGENT_RESTART_SERVICES`, a `compose.dev.yml` celery override moves to
+`worker` when `worker` has none, the result is validated, the
+originals are archived under `.xclude/composer-check/<UTC>/celery-removal/`, and the
+container is stopped and removed. Volumes are kept, and restoring the archived files
+brings celery back.
 
 DjangoLux 1.16 cannot be installed inline onto an older stack, and the step waits
 for a project image on 1.16, so the order is:
 
 1. put the image on DjangoLux 1.16 (`./start.sh pull`, or bump the `django-lux` pin
    and rebuild);
-2. run `./start.sh check --fix`;
-3. deploy.
+2. run `./start.sh check --fix`: it adds `worker` and removes a `celery` the new image
+   cannot run, and leaves `worker` for the deploy, since the stack does not run that
+   image yet;
+3. deploy right after (`./start.sh`), which starts `worker` on the new image. Until
+   then a stack whose `celery` was removed runs no tasks.
 
 A development stack runs `./start.sh -d check --fix` after bumping the pin, then
 `./start.sh -d -b`.
 
+## The way out of an old stack
+
+Each schema step of `check --fix` needs a DjangoLux that can run the new layout
+(schema 4, private stored files: 1.15.3; schema 5, `worker`: 1.16.0), and an inline
+update needs a stack schema at least its release's `requires.stack_schema` (1.16
+releases need 5). On an old stack each refusal used to point at the other: the
+stored-files fix asked for a newer DjangoLux, and `dlux update` refused the newest
+one until `check --fix` had run.
+
+Both now name the way forward, worked out from the release data rather than
+hard-coded. Composer reads the PyPI index and the release manifest of a few
+candidate wheels (each checked against the index's SHA-256; a binary search, as
+release floors only rise) to find the stepping stone: the newest release above the
+running one that this stack takes inline, by the manifest's own verdict. For a stack
+on schema 3 running DjangoLux 1.15.1, with 1.16.5 the newest release:
+
+1. `./start.sh dlux update --version 1.15.5`, the newest release a schema 3 stack
+   takes inline;
+2. `./start.sh check --fix`, which makes stored files private (schema 4);
+3. put the project image on DjangoLux 1.16.0 or later (`./start.sh pull`, or bump the
+   `django-lux` pin and rebuild), run `./start.sh check --fix` (schema 5, `worker`),
+   and deploy.
+
+When `check --fix` can reach the schema on the running DjangoLux, the advice is
+`check --fix` first. The `worker` step reads the DjangoLux of the image the stack is
+set to run, so the image comes before `check --fix`; the stored-files step changes
+what the running stack serves, so when no inline release reaches schema 4 the advice
+is to deploy the image first and run `check --fix` after it. When the release index
+cannot be read, the message says so and names both routes. The `stored-files` finding
+and its refusal give the same advice.
+
 ## Topology migrations
 
 New deployments run the hardened resident pair: `composer-agent` (`agent run`) plus
-`composer-executor` (`executor run`), with a read-only `docker-socket-proxy` (see
+`composer-executor` (`executor run`), and no Docker proxy (see
 [executor hardening](executor-hardening.md)). `composer check` reports any other
 topology, and `check --fix` runs whichever migration applies:
 
 | Topology `check` finds | `check --fix` |
 | --- | --- |
-| legacy `composer-updater` | replaces it with the hardened trio |
-| agent-only (`composer-agent` with a write-enabled proxy) | hardens it: adds `composer-executor`, demotes the proxy to read-only |
-| no Composer service at all | installs `docker-socket-proxy`, `composer-executor` and `composer-agent`, and prints the command that starts them |
+| legacy `composer-updater` | replaces it with the hardened pair and removes the proxy's container |
+| agent-only (`composer-agent` with a write-enabled proxy) | hardens it: adds `composer-executor`, removes the proxy and its container |
+| hardened pair with a leftover `docker-socket-proxy` | removes the proxy, its container, the agent's `DOCKER_HOST` and its `depends_on` entry ([no Docker proxy](executor-hardening.md#no-docker-proxy)) |
+| no Composer service at all | installs `composer-executor` and `composer-agent`, and starts them when the stack is running |
 | `composer-agent` and `composer-updater` together | fails closed |
 
+Each migration stops and removes the containers of the services it drops before it
+writes, and the same run recreates the pair ([after the repairs](check.md#after-the-repairs)).
 Legacy `composer-updater` stacks still deploy until then.
 
 ### By hand: `agent enable` and `executor enable`
@@ -121,10 +208,11 @@ wrapper still accepts:
 ./start.sh agent enable --apply
 ```
 
-`agent enable` writes the hardened trio directly, from a legacy `composer-updater`
+`agent enable` writes the hardened pair directly, from a legacy `composer-updater`
 block or from an agent-only block. `executor enable` (`--apply` to write) hardens an
-agent-only stack the same way; on a stack that is already hardened both change
-nothing. A locally installed binary may instead run `composer agent enable
+agent-only stack the same way; on a stack that is already hardened both only
+normalize the resident block, a leftover proxy included, and change nothing on a
+current one. A locally installed binary may instead run `composer agent enable
 --project-dir /path/to/project` (or `executor enable --project-dir …`). Composer
 owns the only Compose transformer; DjangoLux's `agent enable` command only forwards
 to it.
@@ -133,11 +221,15 @@ Both commands use the same guardrails:
 
 - the default is a dry run that prints the exact Compose diff;
 - apply accepts only a recognized DLUX-generated block, validates the candidate with
-  `docker compose config` before writing, preserves the original under
+  `docker compose config` before writing, stops and removes the containers of the
+  services it drops (`composer-updater`, `docker-socket-proxy`) while the file still
+  names them, preserves the original under
   `.xclude/dlux-agent-bootstrap/<timestamp>/`, and replaces it atomically; re-runs
-  are idempotent;
+  are idempotent. It recreates nothing itself and prints `./start.sh` as the step
+  that does;
 - the replacement keeps the deployment's own topology: the networks attached to the
-  outgoing `docker-socket-proxy`/`composer-updater` services, that block's
+  outgoing `docker-socket-proxy` (carried to `composer-executor`) and
+  `composer-updater` services, that block's
   `COMPOSER_VERSION_LABEL`, and its `WEB_IMAGE` reference are carried forward
   verbatim, so projects generated before the DjangoLux 1.5 scaffold (`egress` /
   `docker_proxy`) migrate without renaming networks or losing the baked-version
@@ -167,6 +259,13 @@ Besides the schema steps and topologies, `check --fix`:
 - with `-d`, validates and normalizes `compose.dev.yml` against the merged base/dev
   config: it removes dev `dlux-updater` overrides, keeps the runtime mount of
   `worker` and `celery` writable, and disables inline updates in dev containers.
+- switches Redis from an append-only file to RDB snapshots (`--appendonly no
+  --save 60 1`, its other flags kept), which DjangoLux scaffolds: a hard stop can
+  leave a half-written append-only file Redis refuses to start from, while a snapshot
+  is renamed into place only when complete
+  ([`redis-persistence`](check.md#redis-persistence)). A Redis already restarting on
+  a damaged file has the files moved aside on its own volume first
+  ([`redis-aof-corrupt`](check.md#redis-aof-corrupt)).
 
 Proxy, permission, relay and registry repairs are listed per finding in the
 [`check` reference](check.md).

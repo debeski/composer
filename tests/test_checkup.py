@@ -588,6 +588,22 @@ class DockerProxyCheckTests(unittest.TestCase):
         self.launcher.services = ["web"]
         self.assertIsNone(self._check({"POST": "1"}))
 
+    def test_a_read_only_proxy_beside_an_executor_is_a_leftover_warning(self):
+        """Its container inspect hands composer-agent every service's environment."""
+        self.launcher.services = ["web", "composer-agent", "composer-executor", "docker-socket-proxy"]
+        result = self._check({"CONTAINERS": "1", "POST": "0", "EXEC": "0"})
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("environment", result["message"])
+        self.assertIn("check --fix", result["fix"])
+
+    def test_a_writable_proxy_beside_an_executor_still_fails(self):
+        self.launcher.services = ["web", "composer-agent", "composer-executor", "docker-socket-proxy"]
+        self.assertEqual(self._check({"POST": "1"})["level"], FAIL)
+
+    def test_a_hardened_stack_without_a_proxy_reports_nothing(self):
+        self.launcher.services = ["web", "composer-agent", "composer-executor"]
+        self.assertIsNone(self._check({}))
+
 
 class CheckupRunTests(unittest.TestCase):
     def test_failing_docker_yields_nonzero_exit(self):

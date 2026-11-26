@@ -12,6 +12,7 @@ from typing import Any, Dict
 
 from .constants import DEFAULT_MIGRATOR_COMMAND, POST_START_LABEL
 from .registry_login import KEYS as REGISTRY_LOGIN_KEYS, REGISTRY_ROLES as REGISTRY_LOGIN_ROLES
+from .stack_lifecycle import APPLY_COMMAND
 
 
 COMPOSER_UPDATER_START = "  # Composer-as-updater start"
@@ -23,19 +24,47 @@ COMPOSER_EXEC_SOCKET_DIR = "/run/composer-exec"
 COMPOSER_EXEC_SOCKET_PATH = "/run/composer-exec/composer-exec.sock"
 COMPOSER_EXEC_SOCKET_VOLUME = "composer_exec_sock"
 MINIMUM_DLUX_VERSION = (1, 5, 0)
-# Pinned by digest: this image holds the host's docker.sock, so whoever can move
-# its tag is root on every deployment. Bump both parts together, deliberately.
-DOCKER_SOCKET_PROXY_IMAGE = (
-    "tecnativa/docker-socket-proxy:v0.5.0"
-    "@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
+# The read-only Docker proxy older generated blocks carry. Its container inspect
+# hands any client every service's environment, so composer-executor answers the
+# agent's reads instead and `check --fix` removes it (`_drop_docker_proxy`).
+DOCKER_SOCKET_PROXY = "docker-socket-proxy"
+# The DjangoLux scaffold's role comments that name the proxy, and their
+# replacements in the scaffold, so a repaired block matches a new project's.
+_PROXY_ROLE_COMMENTS = (
+    (
+        "  # Holds the real Docker socket and performs every write. Not network-facing: it\n"
+        "  # watches the update trigger and serves the agent typed restart/recovery ops.\n",
+        "  # Holds the real Docker socket and performs every Docker operation. Not\n"
+        "  # network-facing: it watches the update trigger and serves the agent typed\n"
+        "  # operations, including the few reads the agent needs, as bare fields only.\n",
+    ),
+    (
+        "  # Outbound-only control-plane agent. Reads Docker via the proxy, delegates all\n"
+        "  # writes to composer-executor, and relays status. DLUX owns backup/maintenance.\n",
+        "  # Outbound-only control-plane agent. Has no Docker access: it asks\n"
+        "  # composer-executor for its reads and writes, and relays status. DLUX owns\n"
+        "  # backup/maintenance.\n",
+    ),
+)
+# The comment above the docker_proxy network, the same in the DjangoLux scaffold.
+DOCKER_PROXY_NETWORK_COMMENT = (
+    "  # Private network of the Docker-control services: composer-executor and\n"
+    "  # composer-agent.\n"
+)
+# What the scaffolds and earlier migrations wrote above that network.
+_PROXY_NETWORK_COMMENTS = (
+    "  # Isolated, internet-less path for the Docker-control services: the agent's\n"
+    "  # read-only route to docker-socket-proxy, plus composer-executor (off egress).\n",
+    "  # Docker-control path: the agent's read-only route to docker-socket-proxy,\n"
+    "  # plus composer-executor.\n",
+    "  # Isolated path from composer-updater to the docker-socket-proxy only.\n",
+    "  # Isolated path from composer-agent to the docker-socket-proxy only.\n",
 )
 # Lets the deploying role read the project's 0600 .secrets/.env. DAC_OVERRIDE is
 # in Docker's default set; DAC_READ_SEARCH is not, because it also unlocks
 # open_by_handle_at, which walks out of any bind mount onto the host filesystem.
 DEPLOYER_READ_CAP = "DAC_OVERRIDE"
 RETIRED_DEPLOYER_READ_CAP = "DAC_READ_SEARCH"
-# Socket-proxy switches that grant Docker write authority.
-PROXY_WRITE_SWITCHES = ("POST", "EXEC", "NETWORKS", "VOLUMES")
 # `ocr` (DjangoLux 1.15 OCR) is also startable/stoppable from the Operations panel.
 # `worker` runs DjangoLux's tasks from stack schema 5; `celery` is project-only there.
 SAFE_RESTART_CANDIDATES = ("web", "worker", "celery", "smtp-relay", "caddy", "nginx", "ocr")
@@ -122,7 +151,7 @@ def _legacy_topology(block: str, project_slug: str) -> Dict[str, Any]:
     updater = bodies.get("composer-updater", "")
     proxy = bodies.get("docker-socket-proxy", "")
     return {
-        "proxy_networks": _service_networks(proxy),
+        "executor_networks": _service_networks(proxy),
         "agent_networks": _service_networks(updater),
         "version_label": _environment_value(updater, "COMPOSER_VERSION_LABEL")
         or f"org.{project_slug}.dlux_baked_version",
@@ -138,7 +167,7 @@ def _current_agent_topology(block: str, project_slug: str) -> Dict[str, Any]:
     agent = bodies.get("composer-agent", "")
     proxy = bodies.get("docker-socket-proxy", "")
     return {
-        "proxy_networks": _service_networks(proxy),
+        "executor_networks": _service_networks(proxy),
         "agent_networks": _service_networks(agent),
         "version_label": _environment_value(agent, "COMPOSER_VERSION_LABEL")
         or f"org.{project_slug}.dlux_baked_version",
@@ -155,44 +184,21 @@ def _networks_block(names: list[str]) -> str:
 
 
 def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, Any]) -> str:
-    """The hardened topology block: a read-only docker-socket-proxy, a
-    composer-executor holding the real docker.sock (the sole write authority), and
-    a composer-agent that keeps only read-only proxy access and delegates writes
-    to the executor over the shared unix socket.
+    """The hardened topology block: a composer-executor holding the real
+    docker.sock (the sole Docker authority), and a composer-agent with no Docker
+    API at all, which asks the executor for its few reads and for every write over
+    the shared unix socket.
     """
     restart_services = [name for name in SAFE_RESTART_CANDIDATES if name in services]
-    excluded_services = ["composer-agent", "composer-executor", "docker-socket-proxy"]
+    excluded_services = ["composer-agent", "composer-executor"]
     excluded_services.extend(name for name in PROTECTED_SERVICE_NAMES if name in services)
     restart_value = ",".join(restart_services)
     exclusion_value = ",".join(excluded_services)
     image = topology["web_image"]
     version_label = topology["version_label"]
-    proxy_networks = _networks_block(topology["proxy_networks"])
+    executor_networks = _networks_block(topology["executor_networks"])
     agent_networks = _networks_block(topology["agent_networks"])
     return f'''{COMPOSER_AGENT_START}
-  docker-socket-proxy:
-    image: {DOCKER_SOCKET_PROXY_IMAGE}
-    restart: always
-    labels:
-      org.dlux.restart: "protected"
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    environment:
-      CONTAINERS: 1
-      IMAGES: 1
-      EVENTS: 1
-      INFO: 1
-      PING: 1
-      VERSION: 1
-      NETWORKS: 0
-      VOLUMES: 0
-      POST: 0
-      EXEC: 0
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro{proxy_networks}
-
   composer-executor:
     image: debeski/composer:latest
     restart: unless-stopped
@@ -223,6 +229,7 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
       COMPOSER_REGISTRY_USERNAME: "${{COMPOSER_REGISTRY_USERNAME:-}}"
       COMPOSER_REGISTRY_PASSWORD: "${{COMPOSER_REGISTRY_PASSWORD:-}}"
       COMPOSER_REGISTRY_HOST: "${{COMPOSER_REGISTRY_HOST:-}}"
+      DLUX_UPDATE_POLICY: "${{DLUX_UPDATE_POLICY:-all}}"
       COMPOSER_EXECUTOR_SOCKET: "{COMPOSER_EXEC_SOCKET_PATH}"
       COMPOSER_VERSION_LABEL: "{version_label}"
       COMPOSER_RELEASE_MANIFEST_LABEL: "org.dlux.project.release-manifest"
@@ -236,7 +243,7 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
       - "${{PWD}}:${{PWD}}:ro"
       - dlux_runtime:/opt/dlux-runtime:rw
       - {COMPOSER_EXEC_SOCKET_VOLUME}:{COMPOSER_EXEC_SOCKET_DIR}:rw
-      - /var/run/docker.sock:/var/run/docker.sock:rw{proxy_networks}
+      - /var/run/docker.sock:/var/run/docker.sock:rw{executor_networks}
 
   composer-agent:
     image: debeski/composer:latest
@@ -266,11 +273,11 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
       - --check-interval
       - "900"
     environment:
-      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
       WEB_IMAGE: "{image}"
       COMPOSER_REGISTRY_USERNAME: "${{COMPOSER_REGISTRY_USERNAME:-}}"
       COMPOSER_REGISTRY_PASSWORD: "${{COMPOSER_REGISTRY_PASSWORD:-}}"
       COMPOSER_REGISTRY_HOST: "${{COMPOSER_REGISTRY_HOST:-}}"
+      DLUX_UPDATE_POLICY: "${{DLUX_UPDATE_POLICY:-all}}"
       COMPOSER_CONTROL_URL: "${{COMPOSER_CONTROL_URL:-}}"
       COMPOSER_ENROLLMENT_TOKEN: "${{COMPOSER_ENROLLMENT_TOKEN:-}}"
       COMPOSER_AGENT_STATE_DIR: "/var/lib/composer-agent"
@@ -289,8 +296,6 @@ def _hardened_stack(project_slug: str, services: set[str], topology: Dict[str, A
       - composer_agent_state:/var/lib/composer-agent:rw
       - {COMPOSER_EXEC_SOCKET_VOLUME}:{COMPOSER_EXEC_SOCKET_DIR}:rw
     depends_on:
-      docker-socket-proxy:
-        condition: service_started
       composer-executor:
         condition: service_started{agent_networks}
 {COMPOSER_AGENT_END}'''
@@ -352,36 +357,60 @@ def _ensure_deployer_read_cap(contents: str, project_slug: str) -> str:
     return contents[:start] + block + contents[end:]
 
 
-def _ensure_proxy_read_only(contents: str, project_slug: str) -> str:
-    """Pin the generated docker-socket-proxy and switch off its write endpoints.
+def _retire_proxy_network_comment(contents: str) -> str:
+    for old in _PROXY_NETWORK_COMMENTS:
+        contents = contents.replace(old, DOCKER_PROXY_NETWORK_COMMENT)
+    return contents
 
-    Only for the hardened topology, where composer-executor holds the socket
-    and the proxy is the agent's read-only view. An image already pinned by
-    digest is the operator's choice and is left alone.
+
+def _drop_docker_proxy(contents: str, project_slug: str = "") -> str:
+    """Remove docker-socket-proxy from the generated block of a hardened stack.
+
+    The agent's reads go to composer-executor, and the proxy's container inspect
+    would hand a compromised agent every service's environment. Takes out the
+    proxy service with the comment lines above it, the agent's ``DOCKER_HOST``
+    pointing at it, and its ``depends_on`` entry. Only for the hardened topology,
+    and only inside the generated block: a proxy the operator added elsewhere is
+    theirs. `_apply_stack_migration` removes the proxy's container on apply.
     """
     span = _generated_block_span(contents)
     if span is None:
         return contents
     start, end = span
     block = contents[start:end]
-    body = _block_bodies(block).get("docker-socket-proxy")
-    if not body:
+    bodies = _block_bodies(block)
+    if "composer-executor" not in bodies or DOCKER_SOCKET_PROXY not in bodies:
         return contents
-    healed = re.sub(
-        r"(?m)^(    image:[ \t]*)tecnativa/docker-socket-proxy(?::[A-Za-z0-9._-]+)?[ \t]*$",
-        lambda match: match.group(1) + DOCKER_SOCKET_PROXY_IMAGE,
-        body,
+    header = re.search(rf"(?m)^  {DOCKER_SOCKET_PROXY}:[ \t]*$", block)
+    following = re.search(r"(?m)^  [A-Za-z0-9_-]+:[ \t]*$", block[header.end():])
+    service_end = header.end() + following.start() if following else block.index(COMPOSER_AGENT_END)
+    # The next service's own comments sit between the proxy body and its header.
+    lines = block[header.start():service_end].splitlines(keepends=True)
+    while lines and (not lines[-1].strip() or lines[-1].startswith("  #")):
+        lines.pop()
+    service_end = header.start() + len("".join(lines))
+    # The proxy's own comments sit right above its header, below the start marker.
+    above = block[:header.start()].splitlines(keepends=True)
+    while above and above[-1].startswith("  #") and not above[-1].startswith(COMPOSER_AGENT_START):
+        above.pop()
+    service_start = len("".join(above))
+    tail = block[service_end:]
+    if tail.startswith("\n") and (not above or above[-1].strip() == "" or above[-1].startswith(COMPOSER_AGENT_START)):
+        tail = tail[1:]
+    block = block[:service_start] + tail
+    agent = _block_bodies(block).get("composer-agent", "")
+    if agent:
+        healed = re.sub(
+            rf'(?m)^      DOCKER_HOST:[ \t]*"?tcp://{DOCKER_SOCKET_PROXY}:2375"?[ \t]*\n', "", agent
+        )
+        healed = _drop_depends_on_entry(healed, DOCKER_SOCKET_PROXY)
+        block = block.replace(agent, healed, 1)
+    block = re.sub(
+        rf'(?m)^(      COMPOSER_EXCLUDE_SERVICES:[ \t]*"?[^"\n]*?),{DOCKER_SOCKET_PROXY}(?=[,"\n])', r"\1", block
     )
-
-    def _off(match):
-        value = match.group(2).strip().strip("'\"").lower()
-        return match.group(0) if value in {"0", "false", "no", "off"} else f"      {match.group(1)}: 0"
-
-    switches = "|".join(PROXY_WRITE_SWITCHES)
-    healed = re.sub(rf"(?m)^      ({switches}):[ \t]*(.*?)[ \t]*$", _off, healed)
-    if healed == body:
-        return contents
-    return contents[:start] + block.replace(body, healed, 1) + contents[end:]
+    for old, new in _PROXY_ROLE_COMMENTS:
+        block = block.replace(old, new)
+    return _retire_proxy_network_comment(contents[:start] + block + contents[end:])
 
 
 def _ensure_nested_role_commands(contents: str) -> str:
@@ -458,7 +487,7 @@ def _transform_compose(contents: str, project_slug: str) -> str:
     end = contents.index(COMPOSER_UPDATER_END, start) + len(COMPOSER_UPDATER_END)
     topology = _legacy_topology(contents[start:end], project_slug)
     declared = _declared_networks(contents)
-    referenced = set(topology["proxy_networks"]) | set(topology["agent_networks"])
+    referenced = set(topology["executor_networks"]) | set(topology["agent_networks"])
     missing = sorted(referenced - declared)
     if declared and missing:
         raise AgentInstallError(
@@ -471,11 +500,7 @@ def _transform_compose(contents: str, project_slug: str) -> str:
     updated = volume_anchor.sub(
         f"  dlux_runtime:\n  composer_agent_state:\n  {COMPOSER_EXEC_SOCKET_VOLUME}:", updated, count=1
     )
-    return updated.replace(
-        "  # Isolated path from composer-updater to the docker-socket-proxy only.",
-        "  # Isolated path from composer-agent to the docker-socket-proxy only.",
-        1,
-    )
+    return _retire_proxy_network_comment(updated)
 
 
 def _fresh_topology(contents: str, project_slug: str) -> Dict[str, Any]:
@@ -497,7 +522,7 @@ def _fresh_topology(contents: str, project_slug: str) -> Dict[str, Any]:
     if not image_match:
         raise AgentInstallError("The 'web' service declares no image for Composer to watch.")
     declared = _declared_networks(contents)
-    # Mirror the generated scaffold: the proxy and executor sit on an isolated
+    # Mirror the generated scaffold: the executor sits on an isolated
     # docker_proxy network, the agent adds egress for the control plane. A project
     # without an `egress` network keeps docker_proxy non-internal instead, so the
     # agent does not lose outbound access (see install_composer_stack).
@@ -505,7 +530,7 @@ def _fresh_topology(contents: str, project_slug: str) -> Dict[str, Any]:
     if "egress" in declared:
         agent_networks = ["egress", "docker_proxy"]
     return {
-        "proxy_networks": ["docker_proxy"],
+        "executor_networks": ["docker_proxy"],
         "agent_networks": agent_networks,
         "version_label": f"org.{project_slug}.dlux_baked_version",
         "web_image": image_match.group(1),
@@ -572,9 +597,8 @@ def _transform_to_installed(contents: str, project_slug: str) -> str:
         insert_at = networks_anchor.end()
         updated = (
             updated[:insert_at]
-            + f"\n  # Docker-control path: the agent's read-only route to "
-              f"docker-socket-proxy,\n  # plus composer-executor."
-              f"\n  docker_proxy:{isolation}"
+            + "\n" + DOCKER_PROXY_NETWORK_COMMENT.rstrip("\n")
+            + f"\n  docker_proxy:{isolation}"
             + updated[insert_at:]
         )
     return updated
@@ -743,8 +767,8 @@ def _transform_dev_init_override(contents: str, project_slug: str) -> str:
 
 def _transform_to_hardened(contents: str, project_slug: str) -> str:
     """Rewrite a current composer-agent block into the hardened topology:
-    read-only proxy + composer-executor (sole write authority) + agent that
-    delegates writes. Idempotent, and refuses anything it does not recognize."""
+    composer-executor (sole Docker authority) + an agent that asks it for reads
+    and writes. Idempotent, and refuses anything it does not recognize."""
     if COMPOSER_AGENT_START not in contents:
         raise AgentInstallError(
             "No recognized composer-agent block to harden. Run 'composer agent enable' first."
@@ -760,7 +784,7 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
     if "composer-executor" in services:
         if "  composer-executor:\n" not in contents:
             raise AgentInstallError("An unmarked composer-executor service already exists.")
-        normalized = _ensure_proxy_read_only(_ensure_deployer_read_cap(contents, project_slug), project_slug)
+        normalized = _drop_docker_proxy(_ensure_deployer_read_cap(contents, project_slug), project_slug)
         return _ensure_registry_login(_ensure_nested_role_commands(normalized))
     if "composer-agent" not in services or "docker-socket-proxy" not in services:
         raise AgentInstallError("The marked agent block is not a recognized topology.")
@@ -771,7 +795,7 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
     block = contents[start:end]
     topology = _current_agent_topology(block, project_slug)
     declared = _declared_networks(contents)
-    referenced = set(topology["proxy_networks"]) | set(topology["agent_networks"])
+    referenced = set(topology["executor_networks"]) | set(topology["agent_networks"])
     missing = sorted(referenced - declared)
     if declared and missing:
         raise AgentInstallError(
@@ -784,7 +808,7 @@ def _transform_to_hardened(contents: str, project_slug: str) -> str:
     updated = volume_anchor.sub(
         f"  composer_agent_state:\n  {COMPOSER_EXEC_SOCKET_VOLUME}:", updated, count=1
     )
-    return updated
+    return _retire_proxy_network_comment(updated)
 
 
 def _post_start_blocks(contents: str) -> Dict[str, tuple[str, str]]:
@@ -1057,9 +1081,12 @@ def _backup_root(project_root: Path) -> Path:
 
 
 def _atomic_write(path: Path, contents: str):
+    from .stack_schema import line_ending
+
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     mode = stat.S_IMODE(path.stat().st_mode)
-    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+    # The file's own line endings: a CRLF compose.yml stays CRLF.
+    with temporary.open("w", encoding="utf-8", newline=line_ending(path)) as stream:
         stream.write(contents)
         stream.flush()
         os.fsync(stream.fileno())
@@ -1148,6 +1175,9 @@ def _apply_stack_migration(
         detail = str(validation.stderr or "").strip()[:1000]
         suffix = f": {detail}" if detail else ""
         raise AgentInstallError(f"docker compose config failed; no project files were changed{suffix}")
+    dropped = sorted(_service_names(contents) - _service_names(updated)) if changed else []
+    if dropped:
+        _remove_service_containers(project_root, compose_path, name_match.group(1), dropped, command_runner)
     if changed:
         backup_root = _backup_root(project_root)
         backup_path = backup_root / compose_path.relative_to(project_root)
@@ -1157,6 +1187,34 @@ def _apply_stack_migration(
         result["backup_root"] = str(backup_root)
     result["applied"] = True
     return result
+
+
+def _remove_service_containers(
+    project_root: Path, compose_path: Path, project: str, services, command_runner
+) -> None:
+    """Stop and remove the containers of services the transform drops, before the file loses them.
+
+    A deploy does not remove orphans: a docker-socket-proxy left running would
+    stay reachable from the agent on docker_proxy, docker.sock and all, and a
+    retired dlux-updater or composer-updater would keep running its old loop.
+    Removed while the file still defines them, as Compose can only name a
+    service it knows; volumes are kept. On failure nothing is written.
+    """
+    removal = command_runner(
+        ["docker", "compose", "--project-directory", str(project_root), "-p", project,
+         "-f", str(compose_path), "rm", "-s", "-f", *services],
+        cwd=str(project_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if removal.returncode != 0:
+        detail = str(removal.stderr or removal.stdout or "").strip()[:500]
+        suffix = f": {detail}" if detail else ""
+        noun = "container" if len(services) == 1 else "containers"
+        raise AgentInstallError(
+            f"Could not remove the {', '.join(services)} {noun}; no project files were changed{suffix}"
+        )
 
 
 def _apply_dev_override_migration(
@@ -1181,7 +1239,7 @@ def _apply_dev_override_migration(
     result: Dict[str, Any] = {
         "applied": False,
         "files": changed,
-        "command": "docker compose -f compose.yml -f compose.dev.yml up -d" if changed else "",
+        "command": "./start.sh -d" if changed else "",
         "backup_root": "",
         "warnings": [],
     }
@@ -1246,10 +1304,7 @@ def enable_agent(
         project_dir,
         compose_file=compose_file,
         transform=_transform_compose,
-        redeploy_command=(
-            "docker compose up -d --force-recreate "
-            "docker-socket-proxy composer-executor composer-agent"
-        ),
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1273,7 +1328,7 @@ def migrate_dlux_init_containers(
         project_dir,
         compose_file=compose_file,
         transform=_transform_to_init_containers,
-        redeploy_command=f"docker compose up -d --force-recreate {host} web",
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1319,9 +1374,7 @@ def install_composer_stack(
         project_dir,
         compose_file=compose_file,
         transform=_transform_to_installed,
-        redeploy_command=(
-            "docker compose up -d docker-socket-proxy composer-executor composer-agent"
-        ),
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1342,10 +1395,7 @@ def enable_executor(
         project_dir,
         compose_file=compose_file,
         transform=_transform_to_hardened,
-        redeploy_command=(
-            "docker compose up -d --force-recreate "
-            "docker-socket-proxy composer-executor composer-agent"
-        ),
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1366,7 +1416,7 @@ def enable_post_start_label(
         project_dir,
         compose_file=compose_file,
         transform=_transform_post_start_to_label,
-        redeploy_command="docker compose up -d --force-recreate web",
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1432,7 +1482,7 @@ def migrate_dlux_updater(
         project_dir,
         compose_file=compose_file,
         transform=_migrate_dlux_updater_command,
-        redeploy_command="docker compose up -d --force-recreate dlux-updater",
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1454,7 +1504,7 @@ def normalize_restart_labels(
         project_dir,
         compose_file=compose_file,
         transform=_ensure_restart_labels,
-        redeploy_command="docker compose up -d",
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1537,27 +1587,22 @@ def run_enable_executor(args) -> int:
 #: and rewriting the whole block would drag unrelated drift (networks, the web
 #: image, the version label) into an operation the operator asked nothing of.
 _COMPOSER_IMAGE_LINE = re.compile(
-    r"^(?P<indent>\s*)image:\s*debeski/composer:(?P<tag>[A-Za-z0-9._-]+)\s*$",
+    r"^(?P<indent>\s*)image:\s*(?P<ref>debeski/composer:[A-Za-z0-9._-]+(?:@sha256:[0-9a-f]{64})?)\s*$",
     re.MULTILINE,
 )
 
-#: The resident services a channel switch has to recreate. `docker-socket-proxy`
-#: is not one of them: it runs a third-party image that no Composer channel
-#: affects, and restarting it would drop the agent's only route to Docker for no
-#: reason.
+#: The resident services a channel switch has to recreate: the two that run the
+#: Composer image.
 CHANNEL_SWITCH_SERVICES = ("composer-agent", "composer-executor")
 
 
 def composer_images_in_block(contents: str) -> list:
-    """The `debeski/composer:<tag>` images the generated block declares."""
+    """The `debeski/composer:<tag>[@sha256:…]` images the generated block declares."""
     if COMPOSER_AGENT_START not in contents or COMPOSER_AGENT_END not in contents:
         return []
     start = contents.index(COMPOSER_AGENT_START)
     end = contents.index(COMPOSER_AGENT_END, start)
-    return [
-        f"debeski/composer:{match.group('tag')}"
-        for match in _COMPOSER_IMAGE_LINE.finditer(contents[start:end])
-    ]
+    return [match.group("ref") for match in _COMPOSER_IMAGE_LINE.finditer(contents[start:end])]
 
 
 def retag_composer_image(contents: str, image: str) -> str:
@@ -1588,6 +1633,7 @@ def switch_composer_channel(
     allow_unverified_dlux: bool = False,
     include_diff: bool = False,
     command_runner=subprocess.run,
+    pin=None,
 ) -> Dict[str, Any]:
     """The one channel-switch operation. Flags, repair and self-update use this.
 
@@ -1604,14 +1650,14 @@ def switch_composer_channel(
     from . import channel_config
 
     channel = channel_config.normalize_channel(channel)
-    image = channel_config.image_for_channel(channel)
+    # A verified pin (``image_pin.resolve``) replaces the moving tag; the lock is
+    # written with the channel so the wrapper follows the same image.
+    image = pin.ref if pin is not None else channel_config.image_for_channel(channel)
     result = _apply_stack_migration(
         project_dir,
         compose_file=compose_file,
         transform=lambda contents, _slug: retag_composer_image(contents, image),
-        redeploy_command=(
-            "docker compose up -d --force-recreate " + " ".join(CHANNEL_SWITCH_SERVICES)
-        ),
+        redeploy_command=APPLY_COMMAND,
         apply=apply,
         allow_unverified_dlux=allow_unverified_dlux,
         include_diff=include_diff,
@@ -1623,6 +1669,62 @@ def switch_composer_channel(
     if not apply:
         return result
     # After the Compose write, so a validation failure above has already raised.
+    if pin is not None:
+        from . import image_pin
+
+        result["lock_file"] = str(image_pin.write_lock(pin, project_dir))
     path = channel_config.write_channel(channel, project_dir)
     result["channel_file"] = str(path)
+    return result
+
+
+def pin_composer_image(
+    project_dir: str = ".",
+    *,
+    pin,
+    compose_file: str = "",
+    apply: bool = False,
+    include_diff: bool = False,
+    command_runner=subprocess.run,
+) -> Dict[str, Any]:
+    """Point the resident pair at ``pin`` and record it in ``.composer-image``.
+
+    The one place a pin is applied: `update self`, `agent update` and
+    `check --fix` all come here. The Compose edit goes first and validates, and
+    the lock follows it, so the wrapper never runs an image the stack refused. A
+    project without a generated block (a deploying machine, a legacy updater
+    stack) only gets the lock. It is a retag inside the block, never a topology
+    change, so the DjangoLux bridge readiness gate does not apply.
+    """
+    from . import image_pin
+
+    try:
+        project_root, _selected, compose_path = _selected_compose_path(project_dir, compose_file)
+    except AgentInstallError:
+        project_root, declared = Path(project_dir).resolve(), []
+    else:
+        declared = composer_images_in_block(compose_path.read_text(encoding="utf-8"))
+    if declared:
+        result = _apply_stack_migration(
+            project_dir,
+            compose_file=compose_file,
+            transform=lambda contents, _slug: retag_composer_image(contents, pin.ref),
+            redeploy_command=APPLY_COMMAND,
+            apply=apply,
+            allow_unverified_dlux=True,
+            include_diff=include_diff,
+            command_runner=command_runner,
+        )
+    else:
+        result = {"applied": False, "files": [], "command": "", "backup_root": "", "warnings": []}
+    current = image_pin.read_lock(project_root)
+    lock_changed = current is None or current.ref != pin.ref
+    result["image"] = pin.ref
+    result["lock_file"] = ""
+    result["lock_changed"] = lock_changed
+    if not apply:
+        return result
+    if lock_changed:
+        result["lock_file"] = str(image_pin.write_lock(pin, project_root))
+    result["applied"] = True
     return result

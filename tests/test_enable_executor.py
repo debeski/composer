@@ -4,7 +4,6 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 
 from composer.agent_installer import (
-    DOCKER_SOCKET_PROXY_IMAGE,
     AgentInstallError,
     _transform_compose,
     _transform_to_hardened,
@@ -95,9 +94,9 @@ class TransformToHardenedTests(unittest.TestCase):
         # The shared socket volume is declared once, next to composer_agent_state.
         self.assertIn("  composer_agent_state:\n  composer_exec_sock:", self.hardened)
 
-    def test_demotes_proxy_and_agent_delegates(self):
-        self.assertIn("POST: 0", self.hardened)
-        self.assertIn("EXEC: 0", self.hardened)
+    def test_drops_the_proxy_and_agent_delegates(self):
+        self.assertNotIn("docker-socket-proxy", self.hardened)
+        self.assertNotIn("DOCKER_HOST", self.hardened)
         self.assertNotIn("POST: 1", self.hardened)
         self.assertIn("COMPOSER_EXECUTOR_SOCKET", self.hardened)
 
@@ -124,26 +123,14 @@ class TransformToHardenedTests(unittest.TestCase):
         self.assertIn("    command:\n      - agent\n      - run\n", updated)
         self.assertIn("    command:\n      - executor\n      - run\n", updated)
 
-    def test_hardened_output_has_no_retired_cap_or_mutable_proxy(self):
+    def test_hardened_output_has_no_retired_cap(self):
         self.assertNotIn("DAC_READ_SEARCH", self.hardened)
-        self.assertNotIn("tecnativa/docker-socket-proxy:latest", self.hardened)
-        self.assertIn(f"image: {DOCKER_SOCKET_PROXY_IMAGE}", self.hardened)
 
     def test_already_hardened_stack_is_normalized(self):
-        old = self.hardened.replace(
-            f"image: {DOCKER_SOCKET_PROXY_IMAGE}", "image: tecnativa/docker-socket-proxy:latest"
-        ).replace("      - DAC_OVERRIDE\n", "      - DAC_READ_SEARCH\n").replace(
-            "      POST: 0\n", "      POST: 1\n"
-        ).replace("      EXEC: 0\n", '      EXEC: "1"\n')
+        old = self.hardened.replace("      - DAC_OVERRIDE\n", "      - DAC_READ_SEARCH\n")
         self.assertNotEqual(old, self.hardened)
 
         self.assertEqual(_transform_to_hardened(old, "demo_project"), self.hardened)
-
-    def test_an_operator_digest_pin_is_kept(self):
-        pinned = "tecnativa/docker-socket-proxy:v0.4.1@sha256:" + "a" * 64
-        old = self.hardened.replace(f"image: {DOCKER_SOCKET_PROXY_IMAGE}", f"image: {pinned}")
-
-        self.assertIn(f"image: {pinned}", _transform_to_hardened(old, "demo_project"))
 
     def test_refuses_a_legacy_updater_stack(self):
         with self.assertRaises(AgentInstallError):
@@ -178,9 +165,8 @@ class HardenedComposeValidityTests(unittest.TestCase):
         doc = yaml.safe_load(_transform_to_hardened(_agent_compose(), "demo_project"))
         self.assertIn("composer-executor", doc["services"])
         self.assertIn("composer_exec_sock", doc["volumes"])
-        proxy = doc["services"]["docker-socket-proxy"]["environment"]
-        self.assertEqual(proxy["POST"], 0)
-        self.assertEqual(proxy["EXEC"], 0)
+        self.assertNotIn("docker-socket-proxy", doc["services"])
+        self.assertNotIn("DOCKER_HOST", doc["services"]["composer-agent"]["environment"])
 
 
 class EnableExecutorTests(unittest.TestCase):
@@ -195,7 +181,7 @@ class EnableExecutorTests(unittest.TestCase):
             result = enable_executor(str(root), include_diff=True)
             self.assertFalse(result["applied"])
             self.assertEqual(result["files"], ["compose.yml"])
-            self.assertIn("composer-executor", result["command"])
+            self.assertEqual(result["command"], "./start.sh")
             self.assertIn("composer-executor", result["diff"])
 
     def test_apply_validates_backs_up_and_writes(self):
@@ -209,6 +195,40 @@ class EnableExecutorTests(unittest.TestCase):
             written = (root / "compose.yml").read_text(encoding="utf-8")
             self.assertIn("  composer-executor:\n", written)
             self.assertIn("  composer_exec_sock:", written)
+
+    def test_apply_removes_the_proxy_container_before_writing(self):
+        """A deploy does not remove orphans: a proxy left running stays reachable."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._project(root, _agent_compose())
+            seen = []
+
+            def runner(argv, **kwargs):
+                text = (root / "compose.yml").read_text(encoding="utf-8")
+                seen.append((list(argv), "  docker-socket-proxy:\n" in text))
+                return Mock(returncode=0, stderr="", stdout="")
+
+            enable_executor(str(root), apply=True, command_runner=runner)
+            removals = [(argv, defined) for argv, defined in seen if "rm" in argv]
+            self.assertEqual(len(removals), 1)
+            argv, still_defined = removals[0]
+            self.assertEqual(argv[-4:], ["rm", "-s", "-f", "docker-socket-proxy"])
+            self.assertIn("demo_project", argv)
+            self.assertTrue(still_defined, "removed while the file still names the service")
+            self.assertNotIn("docker-socket-proxy", (root / "compose.yml").read_text(encoding="utf-8"))
+
+    def test_a_failed_container_removal_writes_nothing(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._project(root, _agent_compose())
+
+            def runner(argv, **kwargs):
+                return Mock(returncode=1 if "rm" in argv else 0, stderr="daemon gone", stdout="")
+
+            with self.assertRaises(AgentInstallError) as caught:
+                enable_executor(str(root), apply=True, command_runner=runner)
+            self.assertIn("no project files were changed", str(caught.exception))
+            self.assertEqual((root / "compose.yml").read_text(encoding="utf-8"), _agent_compose())
 
     def test_apply_is_a_noop_when_already_hardened(self):
         with TemporaryDirectory() as tmp:

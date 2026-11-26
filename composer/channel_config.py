@@ -18,8 +18,11 @@ Precedence, and it is deliberate:
 
 1. ``COMPOSER_SELF_IMAGE`` — an explicit pin, and explicit always wins. An
    operator who pinned an exact image gets that image, channel or no channel.
-2. ``.composer-channel`` — the persisted choice.
-3. ``:latest`` — stable, the default for a project that never chose.
+2. ``.composer-image`` — the digest the last verified update pinned
+   (``image_pin``). The channel decides what the next update resolves; the lock
+   is what runs until then.
+3. ``.composer-channel`` — the persisted choice, as its moving tag.
+4. ``:latest`` — stable, the default for a project that never chose.
 """
 
 from __future__ import annotations
@@ -85,22 +88,22 @@ def image_for_channel(channel) -> str:
 
 
 def resolve_self_image(project_dir=".", env=None) -> str:
-    """The Composer image this project should run, honouring the pin first."""
-    env = os.environ if env is None else env
-    pinned = str(env.get("COMPOSER_SELF_IMAGE") or "").strip()
-    if pinned:
-        return pinned
-    return image_for_channel(read_channel(project_dir))
+    """The Composer image this project should run: explicit pin, lock, then channel."""
+    return describe(project_dir, env)["image"]
 
 
 def describe(project_dir=".", env=None) -> dict:
-    """Channel, resolved image, and whether a pin is overriding the channel."""
+    """Channel, resolved image, the digest lock, and whether a pin overrides both."""
+    from .image_pin import read_lock
+
     env = os.environ if env is None else env
     pinned = str(env.get("COMPOSER_SELF_IMAGE") or "").strip()
     channel = read_channel(project_dir)
+    lock = read_lock(project_dir)
     return {
         "channel": channel,
-        "image": pinned or image_for_channel(channel),
+        "image": pinned or (lock.ref if lock else image_for_channel(channel)),
         "pinned": bool(pinned),
+        "lock": lock,
         "channel_image": image_for_channel(channel),
     }

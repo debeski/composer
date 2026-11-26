@@ -1,16 +1,19 @@
 # Executor hardening
 
 The resident pair splits Docker authority. The network-facing `composer-agent`
-holds none: it reads Docker through a read-only proxy and asks for every write. The
-`composer-executor` holds the Docker socket, is not network-facing, and performs
-only a fixed set of typed operations, re-validating each one.
+holds none and has no Docker API at all: it asks for every write and for its few
+reads. The `composer-executor` holds the Docker socket, is not network-facing, and
+performs only a fixed set of typed operations, re-validating each one.
 
 **Threat model.** The agent holds an outbound connection to a control plane and to
 package and image registries, and processes requests from DjangoLux and remote
 commands. A compromise of, or an injection bug in, that component must not turn
 into host-Docker control: `EXEC` on any container, or a container created with
-host mounts, is root-equivalent on the host in most deployments. So the agent gets
-no write path to Docker at all.
+host mounts, is root-equivalent on the host in most deployments. Nor may it turn
+into a read of the stack's secrets: a container inspect carries every service's
+environment (the database password, `SECRET_KEY`), and `archive`/`export` carry its
+files. So the agent gets no Docker access at all, and the executor answers its reads
+with only the fields it uses.
 
 ## Architecture
 
@@ -18,23 +21,22 @@ no write path to Docker at all.
  Control Plane, registries, PyPI
      │ outbound only
      ▼
- composer-agent ──── reads ───▶ docker-socket-proxy   (POST=0, EXEC=0)
- (no docker.sock;                  │ docker.sock:ro
-  DOCKER_HOST → proxy)             ▼
-     │ typed request            dockerd
-     │ (private Unix socket)       ▲
-     ▼                             │ docker.sock (rw)
- composer-executor ────────────────┘
+ composer-agent
+ (no docker.sock, no DOCKER_HOST)
+     │ typed request: a write, or a read
+     │ (private Unix socket)
+     ▼
+ composer-executor ──── docker.sock (rw) ───▶ dockerd
  (watches the image-update trigger;
   serves typed operations;
-  re-validates every request)
+  re-validates every request;
+  returns bare fields for reads)
 ```
 
 | Service | Docker access | Network | Job |
 | --- | --- | --- | --- |
-| `composer-agent` | `DOCKER_HOST: tcp://docker-socket-proxy:2375`, read-only; no socket mount | `egress` and `docker_proxy` | triggers, registry and PyPI checks, staging verified packages, the Operations card, the egress relay, the control plane |
-| `composer-executor` | the only service with `/var/run/docker.sock` read-write | the proxy's network only | image updates, restarts, recreates, start/stop, repairs, package activation |
-| `docker-socket-proxy` | `docker.sock:ro`, GET endpoints only | `docker_proxy` | the agent's reads (`ps`, `inspect`, `image inspect`, events) |
+| `composer-agent` | none: no socket mount, no `DOCKER_HOST` | `egress` and `docker_proxy` | triggers, registry and PyPI checks, staging verified packages, the Operations card, the egress relay, the control plane |
+| `composer-executor` | the only service with `/var/run/docker.sock`, read-write | `docker_proxy` only | image updates, restarts, recreates, start/stop, repairs, package activation, the agent's reads |
 
 `docker_proxy` is generated `internal: true` when the stack has an `egress`
 network, so the executor has no route out: giving it egress would put the
@@ -69,23 +71,42 @@ default seccomp profile allows the call once the cap is granted). `composer chec
 walk is a separate container with `--network none`; see
 [app data permissions](app-permissions.md#what-check---fix-grants).)
 
-### The proxy is read-only and pinned
+### No Docker proxy
 
-`docker-socket-proxy` runs with `CONTAINERS`, `IMAGES`, `EVENTS`, `INFO`, `PING` and
-`VERSION` on, and `POST`, `EXEC`, `NETWORKS` and `VOLUMES` off: any write endpoint
-lets a client start a privileged container, which is root on the host. `composer
-check` reports a write-enabled proxy as a `docker-proxy` FAIL. Its image is pinned
-by version and digest (`DOCKER_SOCKET_PROXY_IMAGE` in `agent_installer.py`), because
-it mounts `docker.sock`. `composer check --fix` repins an unpinned tag and switches
-the write endpoints off in the generated block; an image the operator already pinned
-by digest is kept.
+The agent needs three things from Docker:
+- each service's state, health and status line, for the Operations card;
+- a service's log tail;
+- the local `RepoDigests` of the image it checks for updates.
+
+`docker compose ps` and `docker compose logs` both inspect every container
+(`GET /containers/{id}/json`), and that answer carries the container's environment.
+A proxy can allow or refuse a path, but it cannot strip fields from a response. So a
+read-only `docker-socket-proxy` lets a compromised agent read every secret the
+stack's containers hold, plus their files through `archive` and `export`. The
+generated block has no proxy. The executor answers the agent's reads
+([below](#the-agents-reads)).
+
+A stack that still runs a proxy beside `composer-executor` gets a `docker-proxy`
+WARN from `composer check`. A write-enabled proxy is a FAIL: any write endpoint lets
+a client start a privileged container, which is root on the host.
+
+`composer check --fix` removes the proxy from the generated block. That covers the
+service with the comment lines above it, the agent's `DOCKER_HOST` that points at it,
+and its `depends_on` entry. Before the file is written, `docker compose rm -s -f
+docker-socket-proxy` takes down its container: a deploy does not remove orphans, so a
+proxy left running would stay reachable from the agent on `docker_proxy`. If the
+removal fails, no file is written. A proxy outside the generated block is the
+operator's to remove.
 
 ## What the executor owns
 
 The executor reuses Composer's own operation code (`docker_compose_manager`,
 `version_gate`, the restart allowlist) rather than reimplementing it. One lease
-serializes everything it does: a socket request that arrives while another
-operation runs is refused ("Executor is busy with another operation.").
+serializes every write: a write request that arrives while another operation runs
+is refused ("Executor is busy with another operation."). Reads do not take the
+lease, so the Operations card and the update check keep working during a deploy.
+At most two reads run at once; a third is refused ("Executor is busy with other
+reads.").
 
 ### The trigger-watched image update
 
@@ -115,6 +136,9 @@ operation refuses payload fields it does not list
 | `deployment_check` | `dev` (strict boolean), `file` (a bare `*.yml`/`*.yaml` name in the project) | check and repair preview only; returns redacted, bounded findings | the Operations card's `check` |
 | `check_fix` | `compose_digest` | the files must still hash to the digest the preview returned | the Operations card's `check-fix-apply` |
 | `agent_update` | `token` | starts a detached helper that replaces the resident pair | the Operations card's `agent-update` |
+| `services_state` | `dev`, `file` (as `deployment_check`) | read; returns `name`, `state`, `health`, `status` and `restart_label` per Compose service, nothing else | the Operations card's `services`, and the service check before a restart, start, stop or log tail |
+| `logs_tail` | `dev`, `file`, `service` (empty: every service, merged), `lines` (an integer, 1–1000) | read; the service must be one of the deployment's; the text is redacted in the executor, capped at 60 000 characters, and its oldest lines dropped until the result fits one frame. A read that fails because Docker removed the container it resolved (a recreate during an update) is asked again once, a second later; any other failure is returned as it is | the Operations card's `logs-tail` |
+| `image_digests` | `image` (an image reference) | read; the image must be `WEB_IMAGE`, `COMPOSER_CHECK_IMAGE` or a `--check-image` of the generated block; returns its `RepoDigests` only | the agent's update check and its local-digest probe |
 
 Protected services: `PROTECTED_RESTART_SERVICES` (`service_selection.py`) covers the
 databases, Redis, backups, `pgadmin`, `dlux-updater`, the Composer services and
@@ -156,8 +180,6 @@ backup rules are the same as for an operator's `dlux update`
 - **`agent.rotate_credentials`** is agent-local (credential store, no Docker).
 - **Fetching a DjangoLux release** needs the network the executor does not have; the
   agent stages the verified wheel and the executor swaps it.
-- **Reads** (availability via `docker image inspect`, `ps`/`inspect` for health) stay
-  with the agent through the read-only proxy.
 
 ### Hard rejections
 
@@ -167,6 +189,22 @@ backup rules are the same as for an operator's `dlux update`
 - Any service outside the allowlist, or a protected one.
 - Unknown operations, payload fields or protocol versions.
 
+### The agent's reads
+
+The three reads are executor operations (`READ_OPS` in `executor_protocol.py`). The
+agent calls them through `executor_client.read`, and the agent-side code in
+`ops.py` (`_service_table`, `_tail_logs`) and `watcher.py` (`_local_repo_digest`)
+never runs `docker` itself. The agent still applies its own restart policy to the
+service table; the executor re-applies it on every write.
+
+An executor that does not know a read, because only half of the resident pair is
+updated, is reported as "Update both Composer resident services and retry". The
+agent does not fall back to a proxy. A digest probe the executor cannot answer is
+*unknown*, never a change.
+
+The executor sets `COMPOSER_IN_EXECUTOR` in its own environment, so its own code and
+its children read Docker directly instead of asking themselves over the socket.
+
 ## The private socket
 
 - **Transport:** a Unix domain socket, `COMPOSER_EXECUTOR_SOCKET` (default
@@ -174,8 +212,13 @@ backup rules are the same as for an operator's `dlux update`
   volume mounted into the agent and the executor only. Never TCP, never the runtime
   volume. The agent uses executor mode whenever that variable is set.
 - **Authorization:** the socket is mode `0660` and binding refuses a symlinked path.
-  Setting `COMPOSER_EXECUTOR_PEER_UID` adds an `SO_PEERCRED` check of the connecting
-  uid where the platform reports it.
+  Every connection's uid is checked (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on
+  macOS). The expected uid is `COMPOSER_EXECUTOR_PEER_UID` when set, otherwise the
+  executor's own uid: the generated pair runs the agent and the executor from the same
+  image as the same user, so the check is on without configuration. A peer whose uid
+  cannot be read is refused, and a value that is not a uid stops `executor run` with
+  exit 2 instead of turning the check off. Set the variable only when the agent runs
+  as another user.
 - **Framing:** a 4-byte big-endian length prefix and a JSON body, requests and results
   each capped at 64 KiB. A result that would exceed the cap is replaced by a `failed`
   result for the same operation that gives its size, so the agent always gets an
@@ -219,7 +262,14 @@ The runtime volume is shared by the app services, the agent and the executor:
   (uid 0 without capabilities) reach each other's entries only through group 0
   ([app data permissions](app-permissions.md#composers-own-writes));
 - documents are written to a temporary file in the same directory, flushed and
-  renamed over the target, so a reader never sees half a file;
+  renamed over the target, so a reader never sees half a file. The temporary file
+  is created exclusively under a random name (`composer/safe_files.py`): a fixed
+  name such as `.x.json.tmp` could already be a symlink an app service planted,
+  and writing through it would clobber its target. The rename replaces the target
+  itself, a planted symlink included, without following it;
+- documents another service writes (the bridge results, `snapshot.json`,
+  `enroll-request.json`) are read with `O_NOFOLLOW`, only when they are a regular
+  file, and only up to 64 KiB (256 KiB for the snapshot);
 - the package-operation lock opens with `O_NOFOLLOW`, refusing a planted symlink;
 - inputs the agent consumes are bounded where it parses them: control-plane commands
   (64 KiB), relay requests (64 KiB each, at most 64 pending,
@@ -227,4 +277,21 @@ The runtime volume is shared by the app services, the agent and the executor:
   and wheels, and Operations results (200 findings, 2,000 characters each, 20,000 per
   diff);
 - the control-plane outbox keeps only the newest pending snapshot; commands and
-  events replay in order from SQLite.
+  events replay in order from SQLite;
+- at most 32 commands wait or run at once (`MAX_QUEUED_COMMANDS`); a command beyond
+  that fails at once with an event saying the queue is full;
+- one operation queues at most 64 events (`MAX_EVENTS_PER_OPERATION`). Further
+  progress events are dropped before they take a sequence number, so the sequence
+  stays gapless, and the terminal event is always recorded. Nothing is queued after
+  a terminal event;
+- the newest 1,000 finished commands are kept so a redelivered operation is still
+  recognised; older ones are forgotten once all their events are sent;
+- an event carries only the last 32 KiB of the deploy log, and a streamed command
+  keeps the last 5,000 lines of its output (every line is still printed).
+
+## Child processes
+
+Composer runs every child process from an argument list, never a shell string. On
+Windows the executable is resolved through `PATH`/`PATHEXT` instead of `shell=True`,
+so `cmd.exe` never re-parses an argument, and a batch file (`.bat`, `.cmd`) is
+refused because Windows would run it through `cmd.exe` anyway.

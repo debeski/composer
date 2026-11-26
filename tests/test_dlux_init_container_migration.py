@@ -295,15 +295,15 @@ class WorkerHostTests(unittest.TestCase):
         self.assertNotIn("pre_start", services["celery"])
         self.assertIn("dlux_runtime:/opt/dlux-runtime:ro", services["celery"]["volumes"])
 
-    def test_the_redeploy_hint_names_the_host(self):
+    def test_the_redeploy_hint_is_start_sh(self):
         import tempfile
         from pathlib import Path
 
-        for source, host in ((DEPLOYED, "celery"), (self.SOURCE, "worker")):
+        for source in (DEPLOYED, self.SOURCE):
             with tempfile.TemporaryDirectory() as root:
                 (Path(root) / "compose.yml").write_text(source, encoding="utf-8")
                 outcome = migrate_dlux_init_containers(root)
-            self.assertEqual(outcome["command"], f"docker compose up -d --force-recreate {host} web")
+            self.assertEqual(outcome["command"], "./start.sh")
 
 
 class RefusalTests(unittest.TestCase):

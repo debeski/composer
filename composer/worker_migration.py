@@ -35,10 +35,12 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import maintenance_migration, media_migration
 from .stack_schema import (
     STAMPED_FILES,
+    ensure_writable,
+    has_env_stamp,
     preview_diff,
-    read_stamp,
-    restamp,
+    read_stamps,
     restamp_secrets,
+    restamp_step,
     secrets_note,
     write_updates,
 )
@@ -57,6 +59,10 @@ TARGET_SCHEMA = 5
 WORKER = "worker"
 CELERY = "celery"
 DEV_OVERRIDE = "compose.dev.yml"
+#: The note ``migrate`` adds while the development override still names only celery.
+DEV_WAITS_NOTE = (
+    f"{DEV_OVERRIDE} overrides celery but not worker yet; run './start.sh -d check --fix' to mirror it."
+)
 
 # The generated schema 5 worker, as DjangoLux's scaffold writes it.
 WORKER_COMMAND = """\
@@ -407,14 +413,22 @@ def pending(project_dir: str, compose_files: Sequence[str]) -> Dict[str, bool]:
     return result
 
 
+def _lowest_stamp(text: str) -> Optional[int]:
+    stamps = read_stamps(text)
+    return min(stamps) if stamps else None
+
+
 def _stamps(project_root, compose_files, sources, base, updates, notes) -> None:
     """Bring the stack's stamps to 5 once its compose file has worker.
 
     Files still stamped 4 are caught up on a compose file already stamped 5,
-    such as a secrets file an earlier ``check --fix`` left behind.
+    such as a secrets file an earlier ``check --fix`` left behind. Every stamp
+    in a file is rewritten, so a ``DLUX_STACK_SCHEMA`` value under a header
+    comment is updated with it, and a compose file stamped 5 by a comment only
+    gains the value DjangoLux reads.
     """
     base_text = updates.get(base) or base.read_text(encoding="utf-8")
-    if not updates and read_stamp(base_text) not in (None, LEGACY_SCHEMA, TARGET_SCHEMA):
+    if not updates and not set(read_stamps(base_text)) <= {LEGACY_SCHEMA, TARGET_SCHEMA}:
         return
     # compose.dev.yml keeps its stamp while it still lacks the worker override.
     dev_file = (project_root / DEV_OVERRIDE).resolve()
@@ -426,31 +440,37 @@ def _stamps(project_root, compose_files, sources, base, updates, notes) -> None:
         path = path.resolve()
         if not path.is_file() or (path == dev_file and dev_waits):
             continue
-        text = updates.get(path, path.read_text(encoding="utf-8"))
-        if read_stamp(text) == LEGACY_SCHEMA:
-            updates[path] = restamp(text, TARGET_SCHEMA)
+        restamped = restamp_step(updates.get(path, path.read_text(encoding="utf-8")), LEGACY_SCHEMA, TARGET_SCHEMA)
+        if restamped is not None:
+            updates[path] = restamped
     restamp_secrets(project_root, updates, LEGACY_SCHEMA, TARGET_SCHEMA)
     if dev_waits:
-        notes.append(
-            f"{DEV_OVERRIDE} overrides celery but not worker yet; run './start.sh -d check --fix' "
-            "to mirror it."
-        )
+        notes.append(DEV_WAITS_NOTE)
 
     base_after = updates.get(base, base_text)
-    stamp = read_stamp(base_after)
+    stamp = _lowest_stamp(base_after)
     if stamp is not None:
         if stamp < TARGET_SCHEMA:
             notes.append(
                 f"{base.name} stays stamped {stamp}: bring it to stack schema {LEGACY_SCHEMA} "
                 "first, then run 'composer check --fix' again."
             )
+        elif not has_env_stamp(base_after):
+            stamped = _with_stamp(base_after)
+            if stamped is not None:
+                updates[base] = stamped
+            else:
+                notes.append(
+                    f"{base.name} is stamped {TARGET_SCHEMA} in a comment only and has no x-environment "
+                    "anchor to carry the DLUX_STACK_SCHEMA value DjangoLux reads; add it by hand."
+                )
         return
     reason = older_layout(project_root, compose_files, base_after)
     lagging = [
         relative for relative in STAMPED_FILES
         if (project_root / relative).is_file()
-        and (read_stamp(updates.get((project_root / relative).resolve())
-                        or (project_root / relative).read_text(encoding="utf-8")) or TARGET_SCHEMA)
+        and (_lowest_stamp(updates.get((project_root / relative).resolve())
+                           or (project_root / relative).read_text(encoding="utf-8")) or TARGET_SCHEMA)
         < TARGET_SCHEMA
     ]
     if not reason and lagging:
@@ -554,6 +574,7 @@ def migrate(
     }
     if not updates:
         return result
+    ensure_writable(project_root, updates)
     if not shutil.which("docker"):
         raise WorkerMigrationError("Docker is required to validate the migrated Compose configuration.")
     _validate(command_runner, project_root, sources, updates, environment)
@@ -561,5 +582,118 @@ def migrate(
     archive = _archive_root(project_root)
     result["backup_root"] = str(archive)
     write_updates(project_root, updates, archive / "worker-migration")
+    result["applied"] = True
+    return result
+
+
+# --- Retiring celery ----------------------------------------------------------
+# Schema 5 keeps celery for the project's own tasks. A project image without
+# Celery (Decrees 2.2) cannot run it: the container crash-loops for good. Once
+# worker exists, ``check --fix`` removes celery from the Compose files instead.
+
+
+def without_celery(contents: str) -> str:
+    """``contents`` without the celery service block or its restart-list entry."""
+    from .stack_cleanup import remove_obsolete_service_blocks
+
+    updated, _removed = remove_obsolete_service_blocks(contents, {CELERY})
+
+    def drop(match):
+        names = [name.strip() for name in match.group(3).split(",") if name.strip()]
+        if CELERY not in names:
+            return match.group(0)
+        quote = match.group(2)
+        return f"{match.group(1)}{quote}{','.join(name for name in names if name != CELERY)}{quote}"
+
+    return _RESTART_ENV.sub(drop, updated)
+
+
+def _celery_plan(project_root: Path, compose_files: Sequence[str]):
+    """``(sources, updates)``: celery dropped from the base file and any development override."""
+    base, dev = _sources(project_root, compose_files)
+    sources = [base] + ([dev] if dev else [])
+    base_services = _services(base.read_text(encoding="utf-8"))
+    if WORKER not in base_services or CELERY not in base_services:
+        return sources, {}
+    # compose.dev.yml loses its celery override even when this run is not -d:
+    # an override for a service the base file no longer has would break -d.
+    paths = list(sources)
+    dev_file = (project_root / DEV_OVERRIDE).resolve()
+    if dev_file.is_file() and dev_file not in paths:
+        paths.append(dev_file)
+    updates: Dict[Path, str] = {}
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        # A development override of celery alone carries the settings worker
+        # needs too (platform, URLs): it moves to worker rather than going.
+        updated = without_celery(migrate_dev_override(text) if path != base else text)
+        if updated != text:
+            updates[path] = updated
+    return sources, updates
+
+
+def celery_removal_preview(project_dir: str, compose_files: Sequence[str]) -> Dict[str, Any]:
+    project_root = Path(project_dir).resolve()
+    _sources_, updates = _celery_plan(project_root, compose_files)
+    return {
+        "files": sorted(str(path.relative_to(project_root)) for path in updates),
+        "diff": preview_diff(project_root, updates),
+    }
+
+
+def retire_celery(
+    project_dir: str,
+    compose_files: Sequence[str],
+    *,
+    environment: Mapping[str, str] | None = None,
+    command_runner=None,
+) -> Dict[str, Any]:
+    """Remove celery: validated, the originals archived, its container removed, then written.
+
+    Volumes and the worker service are untouched. Restoring the archived files
+    brings celery back.
+    """
+    from .stack_cleanup import _compose_args, _run
+
+    command_runner = command_runner or subprocess.run
+    project_root = Path(project_dir).resolve()
+    sources, updates = _celery_plan(project_root, compose_files)
+    result: Dict[str, Any] = {
+        "applied": False,
+        "files": sorted(str(path.relative_to(project_root)) for path in updates),
+        "backup_root": "",
+    }
+    if not updates:
+        return result
+    ensure_writable(project_root, updates)
+    if not shutil.which("docker"):
+        raise WorkerMigrationError("Docker is required to validate the Compose configuration without celery.")
+    staged: Dict[Path, Path] = {}
+    try:
+        for path in sources:
+            if path in updates:
+                staged[path] = _stage_candidate(path, updates[path])
+        model = _compose_model(
+            command_runner, project_root, [staged.get(path, path) for path in sources],
+            environment, "The Compose configuration without celery",
+        )
+    finally:
+        for candidate in staged.values():
+            if candidate.exists():
+                candidate.unlink()
+    services = model.get("services") if isinstance(model.get("services"), dict) else {}
+    if CELERY in services:
+        raise WorkerMigrationError("Another Compose file still defines celery; remove it there by hand.")
+    if WORKER not in services:
+        raise WorkerMigrationError("The Compose configuration without celery has no worker service.")
+    removal = _run(
+        command_runner, _compose_args(project_root, sources, "rm", "-s", "-f", CELERY), project_root, environment
+    )
+    if removal.returncode != 0:
+        detail = str(removal.stderr or removal.stdout or "").strip()[:500]
+        raise WorkerMigrationError(f"Could not remove the celery container; nothing was changed: {detail}")
+    archive = _archive_root(project_root)
+    result["backup_root"] = str(archive)
+    write_updates(project_root, updates, archive / "celery-removal")
     result["applied"] = True
     return result

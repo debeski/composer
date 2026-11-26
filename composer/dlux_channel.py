@@ -20,10 +20,11 @@ because a file was missing or corrupt.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
+
+from . import safe_files
 
 STABLE = "stable"
 BETA = "beta"
@@ -140,9 +141,4 @@ def _read_json(path) -> dict:
 
 
 def _atomic_json(path, payload) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    return path
+    return safe_files.atomic_write_json(path, payload)

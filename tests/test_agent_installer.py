@@ -121,19 +121,19 @@ class AgentInstallerTests(unittest.TestCase):
             self.assertNotIn("composer-updater:", updated)
             self.assertIn("composer-agent:", updated)
             # Straight to the hardened topology: the executor deploys, so it alone
-            # carries the secrets read capability, and the proxy is read-only.
+            # carries the secrets read capability, and there is no Docker proxy.
             self.assertIn("composer-executor:", updated)
             self.assertIn("cap_drop:\n      - ALL", updated)
             self.assertIn("cap_add:\n      - DAC_OVERRIDE", updated)
             self.assertNotIn("DAC_READ_SEARCH", updated)
-            self.assertNotIn("POST: 1", updated)
+            self.assertNotIn("docker-socket-proxy", updated)
             self.assertIn("composer_agent_state:", updated)
             self.assertIn('COMPOSER_AGENT_RESTART_SERVICES: "web,celery,caddy"', updated)
             self.assertIn(
-                'COMPOSER_EXCLUDE_SERVICES: "composer-agent,composer-executor,docker-socket-proxy,db,redis"',
+                'COMPOSER_EXCLUDE_SERVICES: "composer-agent,composer-executor,db,redis"',
                 updated,
             )
-            self.assertIn("composer-executor", result["command"])
+            self.assertEqual(result["command"], "./start.sh")
             self.assertEqual((root / "compose.yml").stat().st_mode & 0o777, 0o600)
             backup = Path(result["backup_root"]) / "compose.yml"
             self.assertEqual(backup.read_text(encoding="utf-8"), COMPOSE)

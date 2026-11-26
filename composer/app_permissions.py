@@ -134,22 +134,67 @@ def _mounts(spec: dict) -> Iterator[Tuple[str, str, str, bool]]:
         yield kind, source, target, len(parts) > 2 and "ro" in parts[2].split(",")
 
 
-def app_image(config: dict) -> str:
-    services = config.get("services") or {}
-    for name in ("web", "worker"):
-        spec = services.get(name)
-        if isinstance(spec, dict) and spec.get("image"):
-            return str(spec["image"])
+_APP_ROLES = ("web", "worker")
+
+
+def service_image(config: dict, name: str) -> str:
+    """The image ``up`` runs for service ``name``.
+
+    A service with only a ``build`` section (development mode resets ``image:``
+    and builds) has no ``image`` in the resolved config; Compose tags what it
+    builds ``<project>-<service>``, so that is the image to read.
+    """
+    spec = (config.get("services") or {}).get(name)
+    if not isinstance(spec, dict):
+        return ""
+    if spec.get("image"):
+        return str(spec["image"])
+    if spec.get("build") and config.get("name"):
+        return f"{config['name']}-{name}".lower()
     return ""
 
 
+def _image_key(spec) -> Optional[Tuple[str, str]]:
+    """What makes two services run the same app: one image, or one build."""
+    if not isinstance(spec, dict):
+        return None
+    if spec.get("image"):
+        return ("image", str(spec["image"]))
+    build = spec.get("build")
+    if isinstance(build, str):
+        build = {"context": build}
+    if isinstance(build, dict) and build:
+        return ("build", json.dumps(build, sort_keys=True, default=str))
+    return None
+
+
+def _app_role(config: dict) -> str:
+    for name in _APP_ROLES:
+        if service_image(config, name):
+            return name
+    return ""
+
+
+def app_image(config: dict) -> str:
+    role = _app_role(config)
+    return service_image(config, role) if role else ""
+
+
 def app_services(config: dict) -> List[str]:
-    image = app_image(config)
-    if not image:
+    """Every service running the app: the same image as web/worker, or the same build.
+
+    Built services get one image name each (``<project>-web``,
+    ``<project>-worker``), so matching on the image name alone would leave the
+    worker's mounts out in development mode.
+    """
+    role = _app_role(config)
+    if not role:
         return []
+    services = config.get("services") or {}
+    key = _image_key(services.get(role))
     return sorted(
-        name for name, spec in (config.get("services") or {}).items()
-        if isinstance(spec, dict) and str(spec.get("image") or "") == image
+        name for name, spec in services.items()
+        if key is not None and _image_key(spec) == key
     )
 
 

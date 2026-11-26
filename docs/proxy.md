@@ -31,7 +31,8 @@ image's), `composer check --fix` rewrites an unmodified generated `.proxy/Caddyf
   `.xclude/composer-check/`, and the proxy is recreated.
 
 With an older DjangoLux the fix refuses, because the proxy would then refuse every
-private file. Before fixing, list folders your site shows to signed-out visitors
+private file; the finding and the refusal both name the way to 1.15.3 on this stack
+([the way out of an old stack](stack-migrations.md#the-way-out-of-an-old-stack)). Before fixing, list folders your site shows to signed-out visitors
 (product photos, for example) in DjangoLux's `DLUX_PUBLIC_MEDIA`, or move them
 under `media/public/`.
 
@@ -87,7 +88,8 @@ The trusted range is the optional `DLUX_FRONT_PROXY` line in the secrets file
 | anything else (`none`, comma-separated lists) | Caddy does not start | FAIL, naming the entries |
 | a quoted value (`"10.0.0.5 10.0.0.6"`) | `./start.sh` passes the quotes to Caddy, which does not start with a quoted list | FAIL |
 
-The WARN names three ways out:
+The WARN names three ways out (at a terminal, `check --fix` asks which one applies
+and writes the answer: [questions](check.md#questions-at-a-terminal)):
 
 - set `DLUX_FRONT_PROXY` to the front proxy's address(es);
 - set it empty when users reach the server directly;

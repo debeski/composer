@@ -24,7 +24,7 @@ Both carry a marker (line 2 of `start.sh`, after the shebang; line 1 of
 `start.ps1`):
 
 ```bash
-# composer-wrapper: 6
+# composer-wrapper: 7
 ```
 
 It is a plain integer, bumped only when the wrapper bytes change, deliberately
@@ -62,6 +62,11 @@ Publishing a new wrapper version is a release step: see
 Composer resolves secrets automatically. It looks for a plaintext env file
 (`.env`, `secrets/.env`, then `.secrets/.env`) and uses the first one that supplies
 every variable the compose file requires.
+
+`check --fix` writes to that file only when an operator at a terminal answers one
+of its questions (`DLUX_FRONT_PROXY`, `DLUX_UPDATE_POLICY`): the one line is set in
+place, the file keeps its owner, mode and line endings, and it is never copied
+([questions](check.md#questions-at-a-terminal)).
 
 ### The resident pair keeps the values
 
@@ -159,6 +164,11 @@ States: `starting` → `pulling` → `recreating` → `migrating` → `ready`, o
 (with an `error`). `pull` reports `starting` → `pulling` → `pulled`. The restart flow
 reports `restarting`/`ready`/`failed`. Nothing is written unless configured.
 
+A run that succeeds but needs the operator's attention lists it in `warnings` (an
+array of strings, present only when there is one), in every status written after it
+arose. Each warning is also printed in the terminal, again after "Environment
+ready", and written to the console log as a `WARNING:` line.
+
 ### Console log
 
 With `--status-file` (or `--log-file PATH`), each update run also writes a clean,
@@ -166,12 +176,120 @@ ANSI-free console log (`deploy-log.txt` beside the status file, fresh per run).
 Together with the deploy status, a proxy can render a live progress page and console
 while the app is being recreated and unreachable.
 
+## Before and after `up`
+
+### Downgrade guard
+
+Before every `up` that (re)creates the app services, Composer compares the app
+image it is about to deploy with the newest release this deployment has run, and
+refuses an older one. Migrations only run forwards: once a newer image's migrator
+has changed the schema, older code may fail on it or write data the newer release
+then reads wrongly. The guard is always on; it does not need the opt-in
+[version gate](updates.md#version-gate).
+
+- **What is compared**: the app version (the `version` in the image's
+  `org.dlux.project.release-manifest` label, else `org.opencontainers.image.version`)
+  and the baked DjangoLux version (`org.<project>.dlux_baked_version`). A version
+  either side does not label is not compared; an image with neither label is refused
+  when the recorded release had them, since nothing shows it is not older.
+- **What it is compared with**: the labels of the app containers that have started
+  (they ran the migrator, even if they then failed their health check; one only
+  created, never started, ran nothing and is not counted), and the deploy record,
+  which Composer raises after every `up` so the floor survives a `down`. The record
+  is kept twice, and the newer copy counts:
+  - `.xclude/composer-deploy/deployed.json` in the deploy root;
+  - `state/composer-deployed.json` on the DjangoLux runtime volume, written in a
+    throwaway Composer container (`--pull never`, `--network none`), so a deploy
+    root Composer cannot write still keeps a record. `down -v` removes it, together
+    with the database it protects.
+
+  Each copy names the database it describes (`database`: the Postgres data volume,
+  the named volume mounted at `/var/lib/postgresql/data` or `/var/lib/postgresql`,
+  and its creation time). A copy whose volume no longer exists, or was created
+  again since (`down -v`, a restore onto a new volume), describes another database:
+  it is not compared, the run says so, and the deploy's `up` replaces it. A copy
+  without `database`, or a stack whose volume Docker cannot describe, is compared.
+
+  When neither copy can be written, the run says so as a
+  [deploy-status](#deploy-status) warning: the guard then relies on container labels
+  alone, which a `down` removes. When only the deploy-root copy fails, the console
+  log notes it.
+- **Refused**: the run stops before anything is recreated and names each older
+  version. To go back on purpose, restore a database backup taken before the newer
+  release, then deploy with `--force`; a forced deploy becomes the new record.
+- **Not compared**: `-d` and `-b` runs (local builds carry no labels) and scoped
+  runs that do not touch the app services.
+- **What was deployed**: the record also names the image `up` used, by tag
+  (`image`), by repository digest (`repo_digest`, the pulled image's `RepoDigests`
+  entry for that repository; empty for a local build) and by `image_id`. That is the
+  exact rollback target even after the tag has moved (`WEB_IMAGE=<repo_digest>`),
+  and `check`'s [`registry-login`](check.md#registry-login) finding notes when the
+  tag now names another image. It is a record, not a protection: an update still
+  pulls whatever the tag names, and labels can be set by anyone who can push it.
+  Composer's own images are pinned to signed digests instead
+  ([the Composer pin](updates.md#the-composer-pin)).
+
+The baked DjangoLux version is also checked against the image floor of the release
+the runtime volume has active: `requires.baked_image` (legacy `image_baseline`) in
+`releases/<active>/dlux/release-manifest.json`. Composer reads it in a throwaway
+container of its own image (`--pull never`, `--network none`, the volume mounted
+read-only), and only when the volume already exists. From DjangoLux 1.17 the
+runtime supervisor serves an image's baked package when the image is below that
+floor; an older image runs its own supervisor, which never checks, so this
+pre-`up` refusal is the only defence there.
+
+### Health check
+
+After `up`, every monitored service must reach healthy (running, and `healthy` when
+it has a healthcheck) and its newest container must have been up for the settle
+window, 10 s by default. `COMPOSER_HEALTH_SETTLE_SECONDS` sets it in seconds, `0`
+turns it off: in the shell for one run (`COMPOSER_HEALTH_SETTLE_SECONDS=0 ./start.sh`,
+which both wrappers pass to Composer), or in the secrets file for every run.
+The window is measured from each container's own Docker `StartedAt`, so a container
+that has already been up that long when the last service turns healthy (usually
+`web`, after its migrations) adds no wait, and one that just started is watched
+until it reaches the window. When the start time cannot be read, or lies ahead of
+Composer's clock, the window runs from the first poll that found the service
+healthy. The run fails, naming the service and its last log lines, when:
+
+- a container restarts at any point from the first health poll on (a higher
+  `RestartCount`, a new start time, or a poll that finds it `restarting`): a
+  crash-looping service without a healthcheck reads as running between crashes, so
+  one healthy poll is not proof;
+- a service that was healthy leaves that state before every service has passed;
+- not every service is healthy within 180 s of the last state change.
+
+The failure also names the likely cause when the service's last log lines or exit
+code show one: a Python module missing from the image (a service left over from an
+older release, such as `celery` after Decrees 2.2), another CPU architecture, a
+missing command, a port already in use, an unreachable database or Redis, a schema
+that does not match the code, incomplete settings, a permission problem, or exit 137
+(out of memory). It ends with the next steps: `./start.sh logs SERVICE`, and adding
+`COMPOSER_EXCLUDE_SERVICES=SERVICE` to the secrets file to deploy without it while it
+is fixed. A failed `up` and a failed `restart` carry the same diagnosis.
+
+`restart` and inline DjangoLux updates (`dlux update`, `dlux rollback`) use the same check.
+
+### When a deploy fails
+
+The edge proxy (`caddy`, `nginx` or `proxy`) depends on `web`, so Compose can leave
+it "Created" when the app does not come up, and the site then has no front door.
+After `up`, and again when `up` or the health check fails, Composer starts any edge
+proxy in scope that is not running with `docker compose up -d --no-deps`. It then
+serves the [maintenance page](maintenance-page.md) on 502/503/504 while `web` cannot
+answer, and the failure message says so (or says the proxy could not be started).
+The failed containers stay as they are for diagnosis: putting the previous image
+back after its successor migrated the database would itself be a downgrade.
+
 ## How a run behaves
 
 - **Version**: every service gets `COMPOSER_VERSION`.
 - **Runtime override**: the generated Compose override is a private system-temp
   file, not a project-root file, so Composer supports host-owned and read-only
-  project mounts without extra Linux capabilities.
+  project mounts without extra Linux capabilities. It names only services the
+  Compose files define: when a file changes during the run (a `check --fix` repair
+  that drops `celery` or `docker-socket-proxy`), Composer rewrites it before its next
+  Compose call.
 - **Service exclusions**: `COMPOSER_EXCLUDE_SERVICES` is a comma/space-separated
   service list omitted from generated runtime overrides, bulk pulls, bulk `up -d`,
   health checks, and diagnostics. Explicit `update SERVICE`, `pull SERVICE`, and
@@ -189,5 +307,8 @@ while the app is being recreated and unreachable.
   🔴 failed. A service stops showing 🟢 the moment its pull/recreate/restart starts
   (the health it last reported belongs to the container being replaced) and health
   monitoring resolves it back.
+- **App data**: before `up`, a non-root app image gets access to its data, in
+  development mode (`-d`, where `web` and `worker` are built) as in production; see
+  [app data permissions](app-permissions.md#before-every-start-of-the-app).
 - **Closing the terminal** does not stop a deploy, and destructive flags ask first:
   see [commands](commands.md#closing-the-terminal).

@@ -45,24 +45,33 @@ revoked. Protocol: [Agent Protocol v1](agent-protocol-v1.md#transport-and-authen
 `composer executor run` runs the privileged half. The executor is the sole holder of
 Docker write authority: it owns the real `docker.sock`, runs the trigger-watched
 image-update loop, and serves typed operations to the agent over a private Unix
-socket (`COMPOSER_EXECUTOR_SOCKET`). The network-facing `composer-agent` keeps only
-read-only Docker access through a `docker-socket-proxy` with POST and exec disabled,
-and delegates every write. The generated Compose block starts it; it is not for
+socket (`COMPOSER_EXECUTOR_SOCKET`). The network-facing `composer-agent` has no
+Docker access: it asks the executor for every write and for its few reads, which the
+executor answers with bare fields
+([the agent's reads](executor-hardening.md#the-agents-reads)). The generated Compose block starts it; it is not for
 interactive use.
+
+Both halves read `DLUX_UPDATE_POLICY` from their own environment and refuse the
+update requests it does not allow, the executor even when the agent asks for them
+([what the application may request](updates.md#what-the-application-may-request)).
 
 ## `agent watch`
 
 `composer agent watch --trigger-file PATH [--interval N]` is the plain watcher that
 `agent run` succeeds; it performs updates itself, in its own process. It watches
 the trigger file and, on each new request (a changed `token`, or the file's `mtime`),
-runs the full `composer update` pipeline (pull → version gate → recreate → health →
-post_start). The processed token and child exit code are recorded in
+runs the full `composer update` pipeline (pull → version gate → downgrade guard →
+recreate → health → post_start). The processed token and child exit code are recorded in
 `<trigger-file>.ack`, so a request is applied once and survives a restart.
 
 - `--status-file PATH` has each run publish [deploy status](deploying.md#deploy-status);
   if the child exits before publishing its own terminal failure, the watcher
   guarantees a token-matched `failed` status so maintenance consumers are never left
-  waiting on a dead process.
+  waiting on a dead process. That status, a policy refusal's included, describes
+  only its request: it keeps what the file says when that names the request (its
+  `request_token`, the `run_token` of the DjangoLux run that wrote it, its
+  `operation_id`) or was written while it ran, and otherwise replaces the earlier
+  run's record instead of merging into it.
 - `--check-image`, `--availability-file` and `--check-interval` make it publish image
   availability ([image availability](updates.md#image-availability)).
 
@@ -77,15 +86,17 @@ the update:
   `composer-agent`; setting it (also to `""`) replaces that list, and the generated
   block sets it to each role's own name (`composer-agent`, `composer-executor`);
 - `COMPOSER_EXCLUDE_SERVICES` adds exclusions and never replaces them. The generated
-  block lists `composer-agent`, `composer-executor`, `docker-socket-proxy` and the
-  protected services the stack defines, and the executor always excludes the
-  Composer services and the socket proxy.
+  block lists `composer-agent`, `composer-executor` and the protected services the
+  stack defines, and the executor always excludes the Composer services and a
+  leftover `docker-socket-proxy`.
 
 ## Lifecycle commands
 
 The resident services have three host-side lifecycle commands, run by the deployer:
 
-- `composer agent update` pulls and recreates;
+- `composer agent update` pins the channel's signed release
+  ([the Composer pin](updates.md#the-composer-pin)), pulls and recreates; with
+  nothing to pin it pulls and recreates nothing;
 - `composer agent restart` restarts and health-checks;
 - `composer agent off` stops.
 
@@ -95,7 +106,10 @@ defines `composer-executor`, all three target the `composer-agent` +
 to different versions. Legacy stacks resolve to just `composer-agent`. The dedicated
 commands ignore the resident services' normal self-exclusion only for those explicit
 targets. `agent update` does not run application version gates or post-start hooks.
-DjangoLux's Operations card offers the same update as `agent-update`.
+DjangoLux's Operations card offers the same update as `agent-update`. It is refused
+unless the channel publishes a release newer than the resident one; the executor
+runs it in a helper container from its own image, with the project mounted
+read-write over the inherited read-only mount so the pin can be written.
 
 Adding or hardening the pair on an existing stack (`agent enable`,
 `executor enable`, `check --fix`): [topology migrations](stack-migrations.md#topology-migrations).

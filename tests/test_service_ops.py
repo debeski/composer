@@ -71,6 +71,29 @@ class ServiceOpsTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    def _executor_read(self, op, payload):
+        """Answer the agent's read the way composer-executor would, in-process."""
+        request = executor_protocol.validate_executor_request({
+            "protocol_version": executor_protocol.EXECUTOR_PROTOCOL_VERSION,
+            "operation_id": "00000000-0000-4000-8000-000000000001", "op": op, "payload": payload,
+        })
+        self.executor_reads.append((op, request["payload"]))
+        with patch.dict(os.environ, {"COMPOSER_IN_EXECUTOR": "1"}):
+            result = executor_ops.default_operation_handler(request)
+        if result["state"] != "succeeded":
+            raise ValueError(result["detail"])
+        return result
+
+    def _executor_mode(self):
+        """The agent of an executor deployment: writes and Docker reads go to the executor."""
+        from contextlib import ExitStack
+
+        self.executor_reads = []
+        stack = ExitStack()
+        stack.enter_context(patch("composer.executor_client.executor_configured", return_value=True))
+        stack.enter_context(patch("composer.executor_client.read", side_effect=self._executor_read))
+        return stack
+
     def _ask(self, operation, **fields):
         self.request_count += 1
         (self.state / "ops-request.json").write_text(
@@ -92,12 +115,12 @@ class ServiceOpsTests(unittest.TestCase):
         self.assertFalse(rows["composer-agent"]["can_restart"])
 
     def test_restart_goes_through_the_executor_for_an_allowed_service(self):
-        with patch("composer.executor_client.executor_configured", return_value=True), \
+        with self._executor_mode(), \
                 patch("composer.executor_client.run_operation", return_value=(0, "")) as run:
             result = self._ask("service-restart", service="web")
         self.assertEqual(result["error"], "")
         self.assertEqual(run.call_args.args[:2], ("restart", {"service": "web"}))
-        with patch("composer.executor_client.executor_configured", return_value=True), \
+        with self._executor_mode(), \
                 patch("composer.executor_client.run_operation", return_value=(0, "")) as run:
             self._ask("service-recreate", service="celery")
         self.assertEqual(run.call_args.args[:2], ("recreate", {"service": "celery"}))
@@ -127,7 +150,7 @@ class ServiceOpsTests(unittest.TestCase):
             self.assertFalse(rows[name]['can_stop'], name)
 
     def test_start_stop_travel_through_executor_and_revalidate_state(self):
-        with patch('composer.executor_client.executor_configured', return_value=True), \
+        with self._executor_mode(), \
                 patch('composer.executor_client.run_operation', return_value=(0, '')) as run:
             self.assertEqual(self._ask('service-stop', service='metrics')['error'], '')
             self.assertEqual(run.call_args.args[:2], ('stop', {'service': 'metrics'}))

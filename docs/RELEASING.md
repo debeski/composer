@@ -38,12 +38,28 @@ changelog records which versions each release moves to.
 3. **If `start.sh` or `start.ps1` changed in this release**, bump the
    `# composer-wrapper: N` marker in *both* (they share one version), record the
    new sha256s in `wrappers-history.json` — the test suite prints them on
-   failure — and re-copy both files into `dlux/scaffold_templates/project/` in
-   the django-lux repo, updating the expected version in its scaffold test.
+   failure — and re-copy both files into `dlux/scaffold/templates/project/` (as
+   `start.sh.tmpl` / `start.ps1.tmpl`) in the django-lux repo, updating the expected version in its scaffold test.
    Without the bump, deployments cannot tell a stale wrapper from an edited one
    ([wrapper versioning](deploying.md#wrapper-versioning)).
 4. Commit both on `main`.
-5. Tag and push:
+5. **For a release paired with DjangoLux**, check that a project generated from the
+   paired DjangoLux checkout needs nothing from `check --fix`:
+
+   ```bash
+   python scripts/scaffold_alignment.py --dlux ../../pkg-django-lux/<checkout> \
+       --dlux-python ../../pkg-django-lux/main/.venv/bin/python
+   ```
+
+   It must print `aligned`:
+   - no finding fails;
+   - the only warnings are those that need a live stack or an operator's choice;
+   - no repair plans a file change;
+   - the wrappers are byte-identical.
+
+   The unit suite runs the same gate whenever a sibling DjangoLux checkout is present
+   (`DLUX_CHECKOUT` picks it).
+6. Tag and push:
 
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z
@@ -56,9 +72,49 @@ The `Release` workflow then:
 - runs the unit tests, then builds an amd64 image and runs `scripts/smoke-test.sh`
   on it,
 - builds `linux/amd64` + `linux/arm64` with Buildx,
-- pushes `debeski/composer:vX.Y.Z` plus the moving alias the tag earns,
+- pushes `debeski/composer:vX.Y.Z` only,
+- writes `composer-image.json` (`schema`, `image`, `version`, `tag`, the pushed index
+  `digest`, `prerelease`), signs it keylessly with Sigstore as this workflow on this
+  tag (`sign` job, the only one with `id-token: write`), and verifies the signature
+  exactly as a deployment will,
 - publishes the GitHub Release with the real `prerelease`/`make_latest` flags,
-  using the matching `CHANGELOG.md` section.
+  using the matching `CHANGELOG.md` section, with `composer-image.json` and
+  `composer-image.json.sigstore.json` attached,
+- only then moves the alias the tag earns (`aliases` job) onto that digest with
+  `docker buildx imagetools create`.
+
+Deployments pin Composer to the signed digest and refuse a release without one
+([the Composer pin](updates.md#the-composer-pin)), so the statement and its bundle are
+part of the release, not decoration. The aliases move last so that a channel tag
+never advertises a release whose statement is not published yet.
+
+### When a release job fails
+
+Each job can be re-run on its own from the workflow run (**Re-run failed jobs**); the
+tag, the pushed `:vX.Y.Z` and its digest stay the same.
+
+- **`sign` failed:** nothing is published beyond `:vX.Y.Z`. Re-run it. If it keeps
+  failing (Sigstore down), wait: without the statement no deployment will take the
+  release, and the aliases have not moved.
+- **`github-release` failed:** re-run it. It downloads the signed files from the
+  `sign` job's artifact; never recreate them by hand, since a statement signed
+  anywhere else does not carry this workflow's identity and every deployment refuses
+  it. A release that already exists is updated and gets the two assets attached.
+- **`aliases` failed:** re-run it. Until it succeeds the channels still serve the
+  previous release, which is safe.
+- **Before calling a release done,** check that both assets are on it:
+
+  ```bash
+  gh release view vX.Y.Z -R debeski/composer --json assets --jq '.assets[].name'
+  ```
+
+  and that the aliases name the statement's digest:
+
+  ```bash
+  docker buildx imagetools inspect debeski/composer:beta --format '{{json .Manifest.Digest}}'
+  ```
+
+A tag whose `build-push` failed before anything was pushed is re-cut as before.
 
 ## Channels: stable and beta
 
@@ -112,6 +168,29 @@ refuse the exact Composer the pair was tested against — which may not exist ye
 `composer` package, runs the unit tests (`python -m unittest discover -s tests`),
 smoke-tests the CLI, builds the Docker image (no push) to catch `Dockerfile`
 breakage before a release, and runs `scripts/smoke-test.sh` against that image.
+
+## Image vulnerability scan
+
+Before a release, scan the built image with the same gate the Composer image has
+been held to since 1.10.3:
+
+```bash
+trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 \
+  --ignorefile .trivyignore debeski/composer:vX.Y.Z
+```
+
+It is a manual step: neither workflow runs Trivy. `.trivyignore` lists the findings
+accepted for now, each with its reason and an expiry date (`exp:`). After that date
+the gate fails on it again, and the finding is rechecked: drop the entry once Docker
+ships a fixed plugin, or renew it with the reason still true.
+
+| CVE | Where | Why it is accepted | Expires |
+| --- | --- | --- | --- |
+| CVE-2026-17106 | `docker-buildx-plugin` 0.39.1 (`moby/go-archive` v0.2.0, link following in tar extraction) | buildx runs only to build the project's own source (`-b`, `-d`); deploy hosts and the resident pair never build. It is kept because without it `--build` falls back to the deprecated classic builder. | 2027-01-31 |
+| CVE-2026-78661 | `docker-compose-plugin` 5.8.0 (`golang.org/x/net` v0.60.0, denial of service on crafted HTML) | Compose parses no untrusted HTML in Composer's use. | 2027-01-31 |
+
+Both plugins were the newest upstream releases when the exceptions were recorded
+(2026-11-25), and neither upstream main branch had bumped the library yet.
 
 ## Versioning note
 

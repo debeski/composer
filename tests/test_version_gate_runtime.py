@@ -14,8 +14,8 @@ from composer.version_gate import VersionGateMixin
 
 
 class _Gate(VersionGateMixin):
-    def __init__(self, *, verdict=None, exec_ok=True, force=False):
-        self.active_version_file = "/opt/dlux-runtime/state/active.json"
+    def __init__(self, *, verdict=None, exec_ok=True, force=False, label="1.8.6", enabled=True):
+        self.active_version_file = "/opt/dlux-runtime/state/active.json" if enabled else None
         self.active_version_key = "version"
         self.version_label = "org.demo.dlux_baked_version"
         self.force = force
@@ -24,6 +24,7 @@ class _Gate(VersionGateMixin):
         self.gate_images: List[str] = []
         self.gate_target_version: Optional[str] = None
         self.gate_active_version: Optional[str] = None
+        self._label = label
         self._verdict = verdict
         self._exec_ok = exec_ok
         self.exec_calls: List[List[str]] = []
@@ -36,7 +37,7 @@ class _Gate(VersionGateMixin):
         return ["registry.example/demo:latest"]
 
     def image_label_version(self, image):
-        return "1.8.6"
+        return self._label
 
     def run_docker_compose(self, args, timeout=None) -> Tuple[bool, str, str]:
         self.exec_calls.append(list(args))
@@ -96,6 +97,113 @@ class RuntimeVerdictGateTests(unittest.TestCase):
         gate = _Gate(verdict={"verdict": "keep"})
         gate.preflight_version_gate()
         self.assertEqual(gate.exec_calls[0][:3], ["exec", "-T", "web"])
+
+
+class MissingLabelGateTests(unittest.TestCase):
+    """A target image without a readable version label used to pass with a note:
+    the gate failed open on exactly the image it could not judge."""
+
+    def test_a_missing_label_blocks(self):
+        gate = _Gate(label=None)
+        ok, message = gate.preflight_version_gate()
+        self.assertFalse(ok)
+        self.assertIn("org.demo.dlux_baked_version", message)
+        self.assertIn("registry.example/demo:latest", message)
+        self.assertIn("--force", message)
+        self.assertEqual(gate.exec_calls, [])
+
+    def test_an_unparseable_label_blocks(self):
+        ok, _message = _Gate(label="latest").preflight_version_gate()
+        self.assertFalse(ok)
+
+    def test_force_is_the_deliberate_override(self):
+        ok, message = _Gate(label=None, force=True).preflight_version_gate()
+        self.assertTrue(ok)
+        self.assertIn("without a version check", message)
+
+    def test_an_unconfigured_gate_still_passes(self):
+        self.assertEqual(_Gate(label=None, enabled=False).preflight_version_gate(), (True, ""))
+
+    def test_a_newer_labelled_image_passes(self):
+        self.assertEqual(_Gate(label="1.9.0").preflight_version_gate(), (True, ""))
+
+
+class _NoActiveFileGate(_Gate):
+    """No active.json: the gate has to find the active version elsewhere."""
+
+    def __init__(self, *, running_label="1.8.11", containers=("c0ffee",), ps_ok=True,
+                 file_present=False, **kwargs):
+        super().__init__(**kwargs)
+        self._running_label = running_label
+        self._containers = list(containers)
+        self._ps_ok = ps_ok
+        self._file_present = file_present
+        self.commands: List[List[str]] = []
+
+    def read_active_version(self):
+        return None
+
+    def active_version_file_present(self):
+        return self._file_present
+
+    def run_docker_compose(self, args, timeout=None):
+        if args[:1] == ["ps"]:
+            self.commands.append(list(args))
+            return self._ps_ok, "\n".join(self._containers), ""
+        return super().run_docker_compose(args, timeout)
+
+    def run_command(self, cmd, timeout=None):
+        self.commands.append(list(cmd))
+        return True, "sha256:running\n", ""
+
+    def image_label_version(self, image):
+        return self._running_label if image == "sha256:running" else self._label
+
+
+class MissingActiveVersionTests(unittest.TestCase):
+    """Without active.json the gate passed with "proceeding without a version
+    check", so a stack that never had an inline update had no downgrade guard.
+    DjangoLux reads a missing active.json as "running the baked release", so the
+    running app image's label is the active version."""
+
+    def test_an_older_target_than_the_running_image_blocks(self):
+        gate = _NoActiveFileGate(running_label="1.8.11", label="1.8.6", exec_ok=False)
+        ok, message = gate.preflight_version_gate()
+        self.assertFalse(ok)
+        self.assertIn("OLDER than the active deployment version 1.8.11 (from the running app image)", message)
+        self.assertEqual(gate.gate_active_version, "1.8.11")
+        self.assertEqual(gate.commands[0], ["ps", "--all", "-q", "web"])
+        self.assertEqual(gate.commands[1][:3], ["docker", "inspect", "--format"])
+
+    def test_a_newer_target_passes(self):
+        self.assertEqual(_NoActiveFileGate(running_label="1.8.6", label="1.9.0").preflight_version_gate(),
+                         (True, ""))
+
+    def test_an_unlabelled_running_image_blocks(self):
+        ok, message = _NoActiveFileGate(running_label=None, label="1.9.0").preflight_version_gate()
+        self.assertFalse(ok)
+        self.assertIn("running app image has no readable version label", message)
+
+    def test_a_first_deploy_has_nothing_to_downgrade(self):
+        ok, message = _NoActiveFileGate(containers=(), label="1.9.0").preflight_version_gate()
+        self.assertTrue(ok)
+        self.assertIn("nothing is deployed yet", message)
+
+    def test_a_failed_ps_is_not_a_first_deploy(self):
+        ok, _message = _NoActiveFileGate(ps_ok=False, containers=(), label="1.9.0").preflight_version_gate()
+        self.assertFalse(ok)
+
+    def test_an_unreadable_active_file_blocks(self):
+        gate = _NoActiveFileGate(file_present=True, label="1.9.0")
+        ok, message = gate.preflight_version_gate()
+        self.assertFalse(ok)
+        self.assertIn("is unreadable", message)
+        self.assertEqual(gate.commands, [], "a present file is never second-guessed")
+
+    def test_force_overrides_an_unknown_active_version(self):
+        ok, message = _NoActiveFileGate(running_label=None, label="1.9.0", force=True).preflight_version_gate()
+        self.assertTrue(ok)
+        self.assertIn("--force", message)
 
 
 if __name__ == "__main__":

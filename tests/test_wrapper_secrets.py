@@ -88,7 +88,7 @@ class WrapperSecretsTests(unittest.TestCase):
             self.assertIn("pull registry.example/composer:test", calls)
             self.assertNotIn("self update", "\n".join(calls))
 
-    def _run_wrapper_capturing_docker_args(self, use_pty):
+    def _run_wrapper_capturing_docker_args(self, use_pty, extra_env=None):
         """Run start.sh against a fake docker and return the argv it received."""
         repo_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -111,6 +111,7 @@ class WrapperSecretsTests(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
             env["DOCKER_ARGS_FILE"] = str(args_path)
+            env.update(extra_env or {})
 
             argv = ["bash", str(project / "start.sh"), "--version"]
             if use_pty:
@@ -144,6 +145,20 @@ class WrapperSecretsTests(unittest.TestCase):
         args = self._run_wrapper_capturing_docker_args(use_pty=True)
         self.assertIn("-i", args)
         self.assertIn("-t", args)
+
+    def test_the_settle_window_set_in_the_shell_reaches_composer(self):
+        """S3 (1.11.0b1 live proof): `COMPOSER_HEALTH_SETTLE_SECONDS=0 ./start.sh` had no effect."""
+        args = self._run_wrapper_capturing_docker_args(
+            use_pty=False, extra_env={"COMPOSER_HEALTH_SETTLE_SECONDS": "0"}
+        )
+        forwarded = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "-e"]
+        self.assertIn("COMPOSER_HEALTH_SETTLE_SECONDS", forwarded)
+        self.assertNotIn("COMPOSER_HEALTH_SETTLE_SECONDS=0", args, "forwarded by name, as set")
+
+    def test_the_powershell_wrapper_forwards_the_settle_window_too(self):
+        text = (Path(__file__).resolve().parents[1] / "start.ps1").read_text(encoding="utf-8")
+        launch = text[text.index("$dockerArgs = @(\"run\")"):]
+        self.assertIn('"-e", "COMPOSER_HEALTH_SETTLE_SECONDS"', launch[: launch.index("$composerSelfImage")])
 
 
 FAKE_DOCKER = r"""#!/bin/sh

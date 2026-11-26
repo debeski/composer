@@ -1,0 +1,824 @@
+"""Deploy safety: break-it findings #3, #10 and #11 (2026-11-25)."""
+import base64
+import json
+import os
+import re
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from composer import downgrade_guard, health_monitor
+from composer.constants import SERVICE_HEALTHY
+from composer.launcher import DockerComposeLauncher
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def _running(service, container_id, health=""):
+    return {"Service": service, "ID": container_id, "State": "running", "Health": health}
+
+
+class HealthHarness:
+    """A launcher whose Docker calls replay scripted polls."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        patcher = patch.object(health_monitor, "time", self.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = patch.dict(os.environ, {health_monitor.SETTLE_ENV: "20"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web", "celery"]
+        self.launcher.service_state = {}
+        self.launcher.render = lambda *args, **kwargs: None
+        self.statuses = []
+        self.launcher.emit_status = lambda label, message: self.statuses.append(message)
+        self.logs_requested = []
+
+        def run_docker_compose(args, timeout=None):
+            if args[:1] == ["logs"]:
+                self.logs_requested.append(args[-1])
+                return True, f"{args[-1]}-1  | ModuleNotFoundError: No module named 'celery'\n", ""
+            return True, "", ""
+
+        self.launcher.run_docker_compose = run_docker_compose
+
+    def script(self, polls, markers):
+        """``polls``: ps entries per poll; ``markers``: inspect output per poll."""
+        state = {"poll": -1}
+
+        def ps(include_all=False):
+            if include_all:
+                return True, polls[min(state["poll"], len(polls) - 1)], ""
+            state["poll"] += 1
+            return True, polls[min(state["poll"], len(polls) - 1)], ""
+
+        def run_command(argv, timeout=None, env=None):
+            if argv[:2] == ["docker", "inspect"]:
+                return True, markers[min(state["poll"], len(markers) - 1)], ""
+            return False, "", "unexpected"
+
+        self.launcher.get_compose_ps_entries = ps
+        self.launcher.run_command = run_command
+
+
+class HealthSettleWindowTests(HealthHarness, unittest.TestCase):
+    """#3: the result must not depend on when the poll lands."""
+
+    def test_a_crash_looping_service_without_a_healthcheck_fails(self):
+        # celery has no healthcheck, so it reads "running" between crashes. Its
+        # restart count climbs while every poll still looks healthy.
+        polls = [[_running("web", "aaa"), _running("celery", "ccc")]]
+        markers = [
+            "aaa 0 2026-11-25T10:00:00Z\nccc 0 2026-11-25T10:00:00Z\n",
+            "aaa 0 2026-11-25T10:00:00Z\nccc 1 2026-11-25T10:00:02Z\n",
+            "aaa 0 2026-11-25T10:00:00Z\nccc 2 2026-11-25T10:00:05Z\n",
+        ]
+        self.script(polls, markers)
+
+        ok, detail = self.launcher.monitor_health()
+
+        self.assertFalse(ok)
+        self.assertIn("celery restarted once during the health check", detail)
+        self.assertIn("No module named 'celery'", detail)
+        self.assertEqual(self.logs_requested, ["celery"])
+        self.assertIn("celery: Likely cause: its image has no Python module 'celery'", detail)
+        self.assertIn("./start.sh logs celery", detail)
+        self.assertIn("COMPOSER_EXCLUDE_SERVICES=celery", detail)
+
+    def test_a_service_stuck_starting_gets_its_logs_at_the_timeout(self):
+        polls = [[_running("web", "aaa", "starting"), _running("celery", "ccc")]]
+        self.script(polls, ["aaa 0 t0\nccc 0 t0\n"])
+        ok, detail = self.launcher.monitor_health()
+        self.assertFalse(ok)
+        self.assertIn("web (starting)", detail)
+        self.assertIn("web", self.logs_requested)
+        self.assertIn("./start.sh logs web", detail)
+
+    def test_a_service_caught_restarting_fails(self):
+        polls = [
+            [_running("web", "aaa"), _running("celery", "ccc")],
+            [_running("web", "aaa"), {"Service": "celery", "ID": "ccc", "State": "restarting"}],
+        ]
+        self.script(polls, ["aaa 0 t0\nccc 0 t0\n"])
+
+        ok, detail = self.launcher.monitor_health()
+
+        self.assertFalse(ok)
+        self.assertIn("celery restarted", detail)
+
+    def test_a_service_that_leaves_healthy_inside_the_window_fails(self):
+        polls = [
+            [_running("web", "aaa", "healthy"), _running("celery", "ccc")],
+            [_running("web", "aaa", "unhealthy"), _running("celery", "ccc")],
+        ]
+        self.script(polls, ["aaa 0 t0\nccc 0 t0\n"])
+
+        ok, detail = self.launcher.monitor_health()
+
+        self.assertFalse(ok)
+        self.assertIn("web was healthy, then went to", detail)
+        self.assertIn("web", self.logs_requested)
+
+    def test_stable_services_pass_only_after_the_settle_window(self):
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, ["aaa 3 t0\nccc 0 t0\n"])
+        started = self.clock.now
+
+        ok, detail = self.launcher.monitor_health()
+
+        self.assertTrue(ok, detail)
+        self.assertGreaterEqual(self.clock.now - started, 20)
+        self.assertEqual(self.statuses[-1], "All services healthy")
+
+    def test_a_restart_before_the_deploy_does_not_count(self):
+        # A container kept from an earlier run carries its old RestartCount.
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, ["aaa 7 t0\nccc 0 t0\n"])
+        self.assertTrue(self.launcher.monitor_health()[0])
+
+    def test_the_settle_window_is_configurable(self):
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, ["aaa 0 t0\nccc 0 t0\n"])
+        started = self.clock.now
+        with patch.dict(os.environ, {health_monitor.SETTLE_ENV: "0"}):
+            self.assertTrue(self.launcher.monitor_health()[0])
+        self.assertLess(self.clock.now - started, 1)
+
+    def _iso(self, seconds_ago):
+        from datetime import datetime, timezone
+
+        stamp = datetime.fromtimestamp(self.clock.now - seconds_ago, timezone.utc)
+        return stamp.strftime("%Y-%m-%dT%H:%M:%S.%f") + "123Z"
+
+    def test_containers_up_longer_than_the_window_add_no_wait(self):
+        # The usual case: web turns healthy last, after migrations, and every
+        # container has long been up by then.
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, [f"aaa 0 {self._iso(45)}\nccc 0 {self._iso(60)}\n"])
+        started = self.clock.now
+        ok, detail = self.launcher.monitor_health()
+        self.assertTrue(ok, detail)
+        self.assertLess(self.clock.now - started, 1)
+
+    def test_a_container_that_just_started_waits_until_it_reaches_the_window(self):
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, [f"aaa 0 {self._iso(60)}\nccc 0 {self._iso(3)}\n"])
+        started = self.clock.now
+        ok, detail = self.launcher.monitor_health()
+        self.assertTrue(ok, detail)
+        self.assertGreaterEqual(self.clock.now - started, 17)
+        self.assertLess(self.clock.now - started, 18)
+        self.assertIn("All services healthy; watching celery until up 20s", self.statuses)
+
+    def test_a_container_that_restarts_inside_the_window_fails(self):
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        first, again = self._iso(2), self._iso(0)
+        self.script(polls, [
+            f"aaa 0 {self._iso(60)}\nccc 0 {first}\n",
+            f"aaa 0 {self._iso(60)}\nccc 0 {first}\n",
+            f"aaa 0 {self._iso(60)}\nccc 1 {again}\n",
+        ])
+        ok, detail = self.launcher.monitor_health()
+        self.assertFalse(ok)
+        self.assertIn("celery restarted once", detail)
+        self.assertIn("No module named 'celery'", detail)
+
+    def test_a_start_time_ahead_of_our_clock_is_measured_from_the_first_healthy_poll(self):
+        polls = [[_running("web", "aaa", "healthy"), _running("celery", "ccc")]]
+        self.script(polls, [f"aaa 0 {self._iso(-300)}\nccc 0 {self._iso(60)}\n"])
+        started = self.clock.now
+        self.assertTrue(self.launcher.monitor_health()[0])
+        self.assertGreaterEqual(self.clock.now - started, 20)
+        self.assertLess(self.clock.now - started, 21)
+
+    def test_the_default_window_is_ten_seconds(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(health_monitor.SETTLE_ENV, None)
+            self.assertEqual(health_monitor.settle_seconds(), 10.0)
+        with patch.dict(os.environ, {health_monitor.SETTLE_ENV: "nonsense"}):
+            self.assertEqual(health_monitor.settle_seconds(), 10.0)
+        with patch.dict(os.environ, {health_monitor.SETTLE_ENV: "45"}):
+            self.assertEqual(health_monitor.settle_seconds(), 45.0)
+
+    def test_docker_start_times_parse_with_nanoseconds(self):
+        self.assertEqual(health_monitor.started_epoch("1970-01-01T00:16:40.123456789Z"), 1000.123456)
+        self.assertEqual(health_monitor.started_epoch("1970-01-01T02:16:40+02:00"), 1000.0)
+        self.assertIsNone(health_monitor.started_epoch("0001-01-01T00:00:00Z"))
+        self.assertIsNone(health_monitor.started_epoch("t0"))
+
+    def test_restart_markers_map_containers_back_to_services(self):
+        self.launcher.service_container_ids = {"web": ["aaa"], "celery": ["ccc"]}
+        self.launcher.run_command = lambda argv, timeout=None, env=None: (
+            True, "aaa111 0 t0\nccc222 4 t1\n", ""
+        )
+        self.assertEqual(
+            self.launcher.container_restart_markers(),
+            {"web": {"aaa111": (0, "t0")}, "celery": {"ccc222": (4, "t1")}},
+        )
+
+
+class FailureHintTests(unittest.TestCase):
+    def test_causes_seen_on_djangolux_stacks(self):
+        from composer.failure_hints import likely_cause
+
+        cases = {
+            "ModuleNotFoundError: No module named 'celery'": "no Python module 'celery'",
+            "exec /app/entrypoint.sh: exec format error": "another CPU architecture",
+            "OSError: [Errno 98] Address already in use": "already taken",
+            'django.db.utils.OperationalError: connection to server at "db" failed': "cannot reach the database",
+            "redis.exceptions.ConnectionError: Error 111 connecting to redis:6379. Connection refused.": "cannot reach Redis",
+            'psycopg.errors.UndefinedTable: relation "dlux_task" does not exist': "schema does not match",
+            "PermissionError: [Errno 13] Permission denied: '/app/media/x'": "app-permissions",
+        }
+        for log, expected in cases.items():
+            with self.subTest(log=log):
+                self.assertIn(expected, likely_cause("svc", log))
+
+    def test_exit_137_is_named_and_unknown_logs_say_nothing(self):
+        from composer.failure_hints import likely_cause
+
+        self.assertIn("out of memory", likely_cause("web", "", "137"))
+        self.assertEqual(likely_cause("web", "everything is fine", "1"), "")
+
+    def test_next_steps_name_the_services(self):
+        from composer.failure_hints import next_steps
+
+        text = next_steps(["celery", "worker", "celery"])
+        self.assertIn("./start.sh logs celery worker", text)
+        self.assertIn("COMPOSER_EXCLUDE_SERVICES=celery,worker", text)
+        self.assertEqual(next_steps([]), "")
+
+class EdgeProxyTests(unittest.TestCase):
+    """#10: a failed deploy must leave the proxy serving the maintenance page."""
+
+    def setUp(self):
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web", "worker", "caddy"]
+        self.compose_calls = []
+
+        def run_docker_compose(args, timeout=None):
+            self.compose_calls.append(list(args))
+            return True, "", ""
+
+        self.launcher.run_docker_compose = run_docker_compose
+        self.entries = [
+            {"Service": "web", "State": "running"},
+            {"Service": "worker", "State": "running", "Health": "unhealthy"},
+            {"Service": "caddy", "State": "created"},
+        ]
+        self.launcher.get_compose_ps_entries = lambda include_all=False: (True, self.entries, "")
+
+    def test_a_proxy_left_created_is_started_without_its_dependencies(self):
+        started, error = self.launcher.ensure_edge_proxy()
+        self.assertEqual((started, error), (["caddy"], ""))
+        self.assertEqual(self.compose_calls, [["up", "-d", "--no-deps", "caddy"]])
+
+    def test_a_running_proxy_is_left_alone(self):
+        self.entries[-1]["State"] = "running"
+        self.assertEqual(self.launcher.ensure_edge_proxy(), ([], ""))
+        self.assertEqual(self.compose_calls, [])
+
+    def test_a_scoped_update_does_not_touch_the_proxy(self):
+        self.launcher.up_service = ["web"]
+        self.assertEqual(self.launcher.ensure_edge_proxy(), ([], ""))
+
+    def test_the_failure_says_the_site_could_not_be_kept_up(self):
+        self.launcher.run_docker_compose = lambda args, timeout=None: (False, "", "port is already allocated")
+        detail = self.launcher.keep_site_reachable("worker failed")
+        self.assertIn("could not be started", detail)
+        self.assertIn("port is already allocated", detail)
+
+
+def _deploy(launcher, health=(True, ""), launch=(True, "", "")):
+    """Drive ``DockerComposeLauncher.run`` for a plain deploy with Docker stubbed."""
+    launcher.extract_config = lambda: None
+    launcher.services = list(launcher.services or ["web", "worker", "caddy"])
+
+    def discover_services(silent=False):
+        launcher.service_state = {s: SERVICE_HEALTHY for s in launcher.services}
+        return True
+
+    launcher.discover_services = discover_services
+    launcher.update_service_states = lambda: True
+    launcher.resolve_secrets = lambda: (True, "")
+    launcher.render = lambda *args, **kwargs: None
+    launcher.statuses = []
+    launcher.write_status = lambda status, error=None: launcher.statuses.append((status, error))
+    launcher.prepare_app_data = lambda services=None: (True, "")
+    launcher.launched = []
+    launcher.launch_containers = lambda: (launcher.launched.append(True) or launch)
+    launcher.monitor_health = lambda: health
+    launcher.run_post_start_hooks = lambda: (True, "")
+    with patch("sys.argv", ["composer"]), patch("composer.launcher.install_hangup_guard"):
+        try:
+            launcher.run()
+        except SystemExit as exc:
+            return exc.code
+    return 0
+
+
+class FailedDeployKeepsProxyTests(unittest.TestCase):
+    def setUp(self):
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web", "worker", "caddy"]
+        self.launcher.downgrade_guard = lambda: (True, "")
+        self.launcher.record_deployed_release = lambda: None
+        self.compose_calls = []
+        self.caddy_state = "created"
+
+        def run_docker_compose(args, timeout=None):
+            self.compose_calls.append(list(args))
+            if args[:3] == ["up", "-d", "--no-deps"]:
+                self.caddy_state = "running"
+            return True, "", ""
+
+        self.launcher.run_docker_compose = run_docker_compose
+        self.launcher.get_compose_ps_entries = lambda include_all=False: (
+            True,
+            [{"Service": "web", "State": "running"}, {"Service": "caddy", "State": self.caddy_state}],
+            "",
+        )
+
+    def test_a_failed_health_check_starts_the_proxy(self):
+        code = _deploy(self.launcher, health=(False, "Containers failed to become healthy: worker (failed)"))
+        self.assertEqual(code, 1)
+        self.assertIn(["up", "-d", "--no-deps", "caddy"], self.compose_calls)
+        status, error = self.launcher.statuses[-1]
+        self.assertEqual(status, "failed")
+        self.assertIn("visitors get the maintenance page", error)
+
+    def test_a_failed_up_starts_the_proxy(self):
+        code = _deploy(self.launcher, launch=(False, "", "service worker pre_start failed"))
+        self.assertEqual(code, 1)
+        self.assertIn(["up", "-d", "--no-deps", "caddy"], self.compose_calls)
+
+    def test_a_proxy_compose_left_created_is_started_before_health_is_watched(self):
+        code = _deploy(self.launcher)
+        self.assertEqual(code, 0)
+        self.assertIn(["up", "-d", "--no-deps", "caddy"], self.compose_calls)
+
+
+def _manifest_label(version):
+    raw = json.dumps({"schema_version": 1, "version": version}).encode()
+    return "base64:" + base64.urlsafe_b64encode(raw).decode()
+
+
+def _labels(app, dlux):
+    labels = {"org.dlux.stack-schema": "5"}
+    if app:
+        labels["org.dlux.project.release-manifest"] = _manifest_label(app)
+    if dlux:
+        labels["org.decrees.dlux_baked_version"] = dlux
+    return labels
+
+
+OLD = _labels("2.1.26", "1.15.1")
+NEW = _labels("2.2.1", "1.16.3")
+NEWER = _labels("2.2.2", "1.16.6")
+CONFIG = {"services": {
+    "web": {"image": "debeski/decrees:v2.1.26"},
+    "worker": {"image": "debeski/decrees:v2.1.26"},
+    "caddy": {"image": "caddy:latest"},
+}}
+
+
+class DowngradeGuardTests(unittest.TestCase):
+    """#11: an app image older than the migrated database is refused before `up`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web", "worker", "caddy"]
+        self.launcher.compose_config_json = lambda: CONFIG
+        self.image = {"debeski/decrees:v2.1.26": OLD}
+        self.containers = {"w1": NEW, "k1": NEW}
+        self.started = {}
+        self.pulled = []
+
+        def run_command(argv, timeout=None, env=None):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                labels = self.image.get(argv[3])
+                return (labels is not None), json.dumps(labels), ""
+            if argv[:3] == ["docker", "container", "inspect"]:
+                fields = {
+                    "{{json .State.StartedAt}}": json.dumps(self.started.get(argv[3], "2026-11-25T22:12:30.05Z")),
+                    "{{json .Config.Labels}}": json.dumps(self.containers[argv[3]]),
+                }
+                return True, " ".join(fields[field] for field in re.findall(r"\{\{[^}]*\}\}", argv[-1])), ""
+            return False, "", "unexpected"
+
+        def run_docker_compose(args, timeout=None):
+            if args[:1] == ["pull"]:
+                self.pulled.append(args[-1])
+                self.image["debeski/decrees:v2.1.26"] = OLD
+            return True, "", ""
+
+        self.launcher.run_command = run_command
+        self.launcher.run_docker_compose = run_docker_compose
+        self.launcher.get_compose_ps_entries = lambda include_all=False: (
+            True,
+            [{"Service": "web", "ID": cid} if cid.startswith("w") else {"Service": "worker", "ID": cid}
+             for cid in self.containers],
+            "",
+        )
+
+    def test_labels_give_the_app_and_baked_djangolux_versions(self):
+        self.assertEqual(downgrade_guard.label_versions(OLD), {"app": "2.1.26", "dlux": "1.15.1"})
+        self.assertEqual(
+            downgrade_guard.label_versions({"org.opencontainers.image.version": "3.0.0"}),
+            {"app": "3.0.0"},
+        )
+        self.assertEqual(downgrade_guard.label_versions({"org.x.dlux_baked_version": ""}), {})
+
+    def test_an_older_image_over_newer_containers_is_refused(self):
+        ok, message = self.launcher.downgrade_guard()
+        self.assertFalse(ok)
+        self.assertIn("app 2.1.26 is older than 2.2.1", message)
+        self.assertIn("DjangoLux 1.15.1 is older than 1.16.3", message)
+        self.assertIn("--force", message)
+        self.assertIn("Migrations do not run backwards", message)
+
+    def test_a_container_that_never_started_does_not_count(self):
+        """S4 (1.11.0b1 live proof): a raw `docker compose create` ran no migrator."""
+        self.image["debeski/decrees:v2.1.26"] = NEW
+        self.containers = {"w1": NEW, "w2": NEWER}
+        self.started = {"w2": "0001-01-01T00:00:00Z"}
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def test_the_record_still_refuses_after_down_removed_the_containers(self):
+        downgrade_guard.write_record(downgrade_guard.label_versions(NEW), "debeski/decrees:v2.2.1", replace=False)
+        self.containers = {}
+        self.assertFalse(self.launcher.downgrade_guard()[0])
+
+    def test_force_deploys_and_makes_the_forced_release_the_record(self):
+        self.launcher.force = True
+        ok, message = self.launcher.downgrade_guard()
+        self.assertTrue(ok)
+        self.assertIn("--force", message)
+        self.launcher.record_deployed_release()
+        self.assertEqual(downgrade_guard.read_record(), {"app": "2.1.26", "dlux": "1.15.1"})
+
+    def test_an_upgrade_passes_and_raises_the_record(self):
+        self.image["debeski/decrees:v2.1.26"] = NEWER
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+        self.launcher.record_deployed_release()
+        self.assertEqual(downgrade_guard.read_record(), {"app": "2.2.2", "dlux": "1.16.6"})
+
+    def test_a_normal_deploy_never_lowers_the_record(self):
+        downgrade_guard.write_record({"app": "2.2.1", "dlux": "1.16.3"}, "x", replace=False)
+        downgrade_guard.write_record({"app": "2.1.0", "dlux": "1.17.0"}, "y", replace=False)
+        self.assertEqual(downgrade_guard.read_record(), {"app": "2.2.1", "dlux": "1.17.0"})
+
+    def test_a_record_that_cannot_be_written_is_not_silent(self):
+        # The deploy root's .xclude/ is not writable (here: a file where the
+        # directory should be). The operator must hear it in the terminal, the
+        # console log the live page shows, and the deploy status Operations reads.
+        Path(".xclude").mkdir()
+        Path(".xclude/composer-deploy").write_text("not a directory")
+        self.image["debeski/decrees:v2.1.26"] = NEWER
+        self.launcher.status_file = str(Path(self.tmp.name) / "deploy-status.json")
+        self.launcher.log_file = str(Path(self.tmp.name) / "deploy-log.txt")
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+        with patch("builtins.print") as printed:
+            self.launcher.record_deployed_release()
+        self.launcher.write_status("ready")
+
+        shown = " ".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn(".xclude/composer-deploy/deployed.json", shown)
+        self.assertIn("relies on the app containers' image labels alone", shown)
+        log = Path(self.launcher.log_file).read_text()
+        self.assertIn("WARNING: Could not write .xclude/composer-deploy/deployed.json", log)
+        status = json.loads(Path(self.launcher.status_file).read_text())
+        self.assertEqual(status["status"], "ready")
+        self.assertEqual(len(status["warnings"]), 1)
+        self.assertIn("downgrade guard now relies", status["warnings"][0])
+
+    def test_a_written_record_adds_no_warning(self):
+        self.image["debeski/decrees:v2.1.26"] = NEWER
+        self.launcher.downgrade_guard()
+        with patch("builtins.print") as printed:
+            self.launcher.record_deployed_release()
+        printed.assert_not_called()
+        self.assertFalse(getattr(self.launcher, "deploy_warnings", None))
+
+    def test_an_unlabelled_image_over_a_labelled_release_is_refused(self):
+        self.image["debeski/decrees:v2.1.26"] = {}
+        ok, message = self.launcher.downgrade_guard()
+        self.assertFalse(ok)
+        self.assertIn("no app or DjangoLux version label", message)
+
+    def test_a_stack_with_no_labelled_history_is_not_blocked(self):
+        self.containers = {"w1": {}}
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def test_an_image_not_pulled_yet_is_pulled_to_read_it(self):
+        del self.image["debeski/decrees:v2.1.26"]
+        self.assertFalse(self.launcher.downgrade_guard()[0])
+        self.assertEqual(self.pulled, ["web"])
+
+    def test_local_builds_are_not_compared(self):
+        self.launcher.build_images = True
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def test_a_scope_without_the_app_is_not_compared(self):
+        self.launcher.up_service = ["caddy"]
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def test_the_deploy_stops_before_up(self):
+        code = _deploy(self.launcher)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.launcher.launched, [])
+        status, error = self.launcher.statuses[-1]
+        self.assertEqual(status, "failed")
+        self.assertIn("Refusing to deploy debeski/decrees:v2.1.26", error)
+
+
+class DatabaseRecordTests(unittest.TestCase):
+    """S5 (1.11.0b1 live proof): the deploy record describes one database.
+
+    After `docker compose down -v` the old record refused an older image on fresh
+    volumes, saying the database had been migrated by the newer release.
+    """
+
+    CONFIG = {
+        "name": "stack",
+        "services": {
+            "web": {"image": "debeski/decrees:v2.1.26"},
+            "db": {"image": "postgres:17", "volumes": [
+                {"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}]},
+        },
+        "volumes": {"postgres_data": {"name": "stack_postgres_data"}},
+    }
+    MIGRATED = {"volume": "stack_postgres_data", "created_at": "2026-11-25T22:12:30Z"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web", "db"]
+        self.launcher.compose_config_json = lambda: self.CONFIG
+        self.launcher.get_compose_ps_entries = lambda include_all=False: (True, [], "")
+        self.volume = (True, json.dumps(self.MIGRATED["created_at"]), "")
+        self.inspected = []
+
+        def run_command(argv, timeout=None, env=None):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return True, json.dumps(OLD), ""
+            if argv[:3] == ["docker", "volume", "inspect"]:
+                self.inspected.append(argv[3])
+                return self.volume
+            return False, "", "unexpected"
+
+        self.launcher.run_command = run_command
+        downgrade_guard.write_record(
+            downgrade_guard.label_versions(NEW), "debeski/decrees:v2.2.1", replace=False, database=self.MIGRATED
+        )
+
+    def test_the_record_names_the_database_it_describes(self):
+        self.assertEqual(downgrade_guard.read_record_database(), self.MIGRATED)
+
+    def test_the_same_database_is_still_protected(self):
+        ok, message = self.launcher.downgrade_guard()
+        self.assertFalse(ok)
+        self.assertIn("The database was migrated by the newer release", message)
+        self.assertIn("stack_postgres_data", self.inspected)
+
+    def test_a_record_of_a_removed_database_does_not_refuse_and_is_replaced(self):
+        self.volume = (False, "", "Error response from daemon: get stack_postgres_data: no such volume")
+        with patch("builtins.print") as printed:
+            self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+        note = " ".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn("stack_postgres_data created 2026-11-25T22:12:30Z no longer exists", note)
+        self.assertNotIn("migrated by the newer release", note)
+
+        self.volume = (True, json.dumps("2026-11-26T09:00:00Z"), "")
+        self.launcher.record_deployed_release()
+        self.assertEqual(downgrade_guard.read_record(), {"app": "2.1.26", "dlux": "1.15.1"})
+        self.assertEqual(downgrade_guard.read_record_database()["created_at"], "2026-11-26T09:00:00Z")
+
+    def test_a_recreated_volume_of_the_same_name_is_another_database(self):
+        self.volume = (True, json.dumps("2026-11-26T09:00:00Z"), "")
+        with patch("builtins.print"):
+            self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def test_a_database_docker_cannot_describe_keeps_the_record(self):
+        self.volume = (False, "", "Cannot connect to the Docker daemon")
+        self.assertFalse(self.launcher.downgrade_guard()[0])
+
+    def test_a_record_without_the_database_keeps_refusing(self):
+        downgrade_guard.write_record(downgrade_guard.label_versions(NEW), "x", replace=True)
+        self.volume = (False, "", "no such volume")
+        self.assertEqual(downgrade_guard.read_record_database(), {})
+        self.assertFalse(self.launcher.downgrade_guard()[0])
+
+
+class RuntimeFloorTests(unittest.TestCase):
+    """#11: an old image runs its own old supervisor, which never checks the
+    active release's ``requires.baked_image``; the pre-up guard must."""
+
+    CONFIG = {
+        "name": "stack",
+        "services": {
+            "web": {
+                "image": "debeski/decrees:v2.1.26",
+                "volumes": [{"type": "volume", "source": "dlux_runtime", "target": "/opt/dlux-runtime"}],
+            },
+        },
+        "volumes": {"dlux_runtime": {}},
+    }
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+        self.launcher = DockerComposeLauncher()
+        self.launcher.services = ["web"]
+        self.launcher.compose_config_json = lambda: self.CONFIG
+        self.launcher.get_compose_ps_entries = lambda include_all=False: (True, [], "")
+        self.volume_exists = True
+        self.runtime = {"active": "1.16.6b1", "floor": "1.16.0b1"}
+        self.target = OLD
+        self.runs = []
+
+        def run_command(argv, timeout=None, env=None):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return True, json.dumps(self.target), ""
+            if argv[:3] == ["docker", "volume", "inspect"]:
+                return self.volume_exists, "", ""
+            if argv[:2] == ["docker", "inspect"]:
+                return True, "sha256:composer\n", ""
+            if argv[:2] == ["docker", "run"]:
+                if downgrade_guard.RUNTIME_WRITE_SCRIPT in argv:
+                    self.writes.append(argv)
+                    return self.write_ok, "", "" if self.write_ok else "OSError: read-only file system"
+                self.runs.append(argv)
+                return True, json.dumps(self.runtime) + "\n", ""
+            return False, "", "unexpected"
+
+        self.writes = []
+        self.write_ok = True
+        self.launcher.run_command = run_command
+
+    def test_the_runtime_record_still_refuses_with_no_containers_and_no_project_record(self):
+        # A deploy root Composer cannot write keeps no .xclude record; after a
+        # `down` only the copy on the runtime volume remembers the release.
+        self.runtime = {"record": {"app": "2.2.1", "dlux": "1.16.3"}}
+        ok, message = self.launcher.downgrade_guard()
+        self.assertFalse(ok)
+        self.assertIn("app 2.1.26 is older than 2.2.1", message)
+
+    def test_the_record_is_written_to_both_places(self):
+        self.target = NEWER
+        self.runtime = {"record": {"app": "2.2.1", "dlux": "1.16.3"}}
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+        self.launcher.record_deployed_release()
+        expected = {"app": "2.2.2", "dlux": "1.16.6"}
+        self.assertEqual(downgrade_guard.read_record(), expected)
+        write = self.writes[0]
+        self.assertIn("stack_dlux_runtime:/opt/dlux-runtime", write)
+        self.assertNotIn("stack_dlux_runtime:/opt/dlux-runtime:ro", write)
+        payload = json.loads(write[-1])
+        self.assertEqual({k: payload[k] for k in ("app", "dlux")}, expected)
+
+    def test_a_read_only_deploy_root_is_covered_by_the_runtime_copy(self):
+        Path(".xclude").mkdir()
+        Path(".xclude/composer-deploy").write_text("not a directory")
+        self.target = NEWER
+        self.launcher.log_file = str(Path(self.tmp.name) / "deploy-log.txt")
+        self.launcher.downgrade_guard()
+        with patch("builtins.print") as printed:
+            self.launcher.record_deployed_release()
+        printed.assert_not_called()
+        self.assertFalse(getattr(self.launcher, "deploy_warnings", None))
+        self.assertEqual(len(self.writes), 1)
+        self.assertIn("runtime volume only", Path(self.launcher.log_file).read_text())
+
+    def test_both_copies_failing_warns_with_both_reasons(self):
+        Path(".xclude").mkdir()
+        Path(".xclude/composer-deploy").write_text("not a directory")
+        self.write_ok = False
+        self.target = NEWER
+        self.launcher.downgrade_guard()
+        with patch("builtins.print"):
+            self.launcher.record_deployed_release()
+        (warning,) = self.launcher.deploy_warnings
+        self.assertIn(".xclude/composer-deploy/deployed.json", warning)
+        self.assertIn("copy on the DjangoLux runtime volume (OSError: read-only file system)", warning)
+
+    def test_the_scripts_write_and_read_back_the_volume_record(self):
+        import subprocess
+        import sys
+
+        root = Path(self.tmp.name) / "runtime"
+        payload = json.dumps({"app": "2.2.1", "dlux": "1.16.3", "image": "x"})
+        subprocess.run(
+            [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_WRITE_SCRIPT, str(root), payload],
+            check=True,
+        )
+        written = root / "state" / "composer-deployed.json"
+        self.assertEqual(written.stat().st_mode & 0o777, 0o664)
+        self.assertEqual(self._script({"source": "image"})["record"], {"app": "2.2.1", "dlux": "1.16.3"})
+
+    def test_the_volume_record_keeps_its_database(self):
+        import subprocess
+        import sys
+
+        root = Path(self.tmp.name) / "runtime"
+        database = {"volume": "stack_postgres_data", "created_at": "2026-11-25T22:12:30Z"}
+        payload = downgrade_guard.record_payload({"app": "2.2.1", "dlux": "1.16.3"}, "x", database=database)
+        subprocess.run(
+            [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_WRITE_SCRIPT, str(root), json.dumps(payload)],
+            check=True,
+        )
+        self.assertEqual(self._script({"source": "image"})["record_database"], database)
+
+    def test_an_image_below_the_active_release_floor_is_refused(self):
+        ok, message = self.launcher.downgrade_guard()
+        self.assertFalse(ok)
+        self.assertIn(
+            "DjangoLux 1.15.1 is below the image floor 1.16.0b1 of the active runtime release 1.16.6b1",
+            message,
+        )
+        run = self.runs[0]
+        self.assertIn("stack_dlux_runtime:/opt/dlux-runtime:ro", run)
+        self.assertEqual(run[run.index("--pull") + 1], "never")
+        self.assertEqual(run[run.index("--network") + 1], "none")
+        self.assertIn("sha256:composer", run)
+
+    def test_an_image_meeting_the_floor_passes(self):
+        self.target = NEW
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def test_force_deploys_below_the_floor(self):
+        self.launcher.force = True
+        ok, message = self.launcher.downgrade_guard()
+        self.assertTrue(ok)
+        self.assertIn("below the image floor", message)
+
+    def test_a_missing_volume_is_never_created(self):
+        self.volume_exists = False
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+        self.assertEqual(self.runs, [])
+
+    def test_the_image_release_in_force_has_no_floor(self):
+        self.runtime = {}
+        self.assertEqual(self.launcher.downgrade_guard(), (True, ""))
+
+    def _script(self, active, manifest=None, version="1.16.6b1"):
+        import subprocess
+        import sys
+
+        root = Path(self.tmp.name) / "runtime"
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "active.json").write_text(json.dumps(active))
+        if manifest is not None:
+            release = root / "releases" / version / "dlux"
+            release.mkdir(parents=True, exist_ok=True)
+            (release / "release-manifest.json").write_text(json.dumps(manifest))
+        out = subprocess.run(
+            [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_STATE_SCRIPT, str(root)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        return json.loads(out)
+
+    def test_the_script_reads_the_active_release_floor(self):
+        self.assertEqual(
+            self._script({"source": "volume", "version": "1.16.6b1"}, {"requires": {"baked_image": ">=1.16.0b1"}}),
+            {"active": "1.16.6b1", "floor": "1.16.0b1"},
+        )
+
+    def test_the_script_falls_back_to_the_legacy_image_baseline(self):
+        self.assertEqual(
+            self._script({"source": "volume", "version": "1.16.6b1"}, {"image_baseline": "1.15.0"}),
+            {"active": "1.16.6b1", "floor": "1.15.0"},
+        )
+
+    def test_the_script_ignores_the_image_release_and_unsafe_versions(self):
+        self.assertEqual(self._script({"source": "image", "version": "1.16.3"}), {})
+        self.assertEqual(self._script({"source": "volume", "version": "../etc"}), {})
+
+if __name__ == "__main__":
+    unittest.main()

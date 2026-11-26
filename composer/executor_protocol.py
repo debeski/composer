@@ -34,9 +34,17 @@ _LENGTH_PREFIX_BYTES = 4
 # The agent-initiated Docker operations that travel over the socket. Note the
 # absence of image_update (file-triggered), backup (DLUX-side), and
 # rotate_credentials (agent-local) — none of them belong on this surface.
+# The reads the agent needs from Docker. They return only the fields the agent
+# uses, so the agent needs no Docker API of its own: a container inspect would
+# hand it every service's environment. They do not wait on the write lease.
+READ_OPS = frozenset({"services_state", "logs_tail", "image_digests"})
+
 EXECUTOR_OPS = frozenset(
     {"start", "stop", "restart", "recreate", "recovery_deploy", "dlux_package_apply", "dlux_package_rollback", "check_fix", "agent_update", "deployment_check"}
-)
+) | READ_OPS
+
+# Bounds a log request may ask for.
+LOG_LINES_MAX = 1000
 
 REQUEST_FIELDS = frozenset({"protocol_version", "operation_id", "op", "payload"})
 RESULT_STATES = frozenset({"succeeded", "failed", "rejected"})
@@ -49,6 +57,9 @@ _WHEEL_RE = re.compile(r"^django_lux-[0-9][A-Za-z0-9._+-]{0,96}\.whl$")
 _PACKAGE_VERSION_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)*(?:[.-]?(?:a|b|rc|post|dev)[0-9]+)?$")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_COMPOSE_FILE_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml")
+# A Docker image reference: registry/repo[:tag][@sha256:digest], no spaces or flags.
+_IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}")
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -59,6 +70,17 @@ def _require_payload_fields(payload: Dict[str, Any], allowed: set) -> None:
     unexpected = set(payload) - allowed
     if unexpected:
         raise ProtocolError(f"Unsupported payload field: {sorted(unexpected)[0]}.")
+
+
+def _compose_target(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``dev``/``file`` pair naming which Compose files of the project to read."""
+    if not isinstance(payload.get("dev", False), bool):
+        raise ProtocolError("dev must be a JSON boolean.")
+    filename = payload.get("file", "")
+    if (not isinstance(filename, str) or "/" in filename or "\\" in filename
+            or (filename and not _COMPOSE_FILE_RE.fullmatch(filename))):
+        raise ProtocolError("file must be a Compose filename in the project directory.")
+    return {"dev": payload.get("dev", False), "file": filename}
 
 
 def validate_executor_request(value: Any) -> Dict[str, Any]:
@@ -145,15 +167,25 @@ def validate_executor_request(value: Any) -> Dict[str, Any]:
         if not _TOKEN_RE.fullmatch(token):
             raise ProtocolError("The operation token is invalid.")
         payload = {"token": token}
-    elif op == "deployment_check":
-        _require_payload_fields(payload, {'dev', 'file'})
-        if not isinstance(payload.get('dev', False), bool):
-            raise ProtocolError('dev must be a JSON boolean.')
-        filename = payload.get('file', '')
-        if (not isinstance(filename, str) or '/' in filename or '\\' in filename
-                or (filename and not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml', filename))):
-            raise ProtocolError('file must be a Compose filename in the project directory.')
-        payload = {'dev': payload.get('dev', False), 'file': filename}
+    elif op in ("deployment_check", "services_state"):
+        _require_payload_fields(payload, {"dev", "file"})
+        payload = _compose_target(payload)
+    elif op == "logs_tail":
+        _require_payload_fields(payload, {"dev", "file", "service", "lines"})
+        target = _compose_target(payload)
+        service = _clip(payload.get("service"), 200)
+        if service and not _SERVICE_RE.fullmatch(service):
+            raise ProtocolError("Log service name is invalid.")
+        lines = payload.get("lines")
+        if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= LOG_LINES_MAX:
+            raise ProtocolError(f"lines must be an integer from 1 to {LOG_LINES_MAX}.")
+        payload = {**target, "service": service, "lines": lines}
+    elif op == "image_digests":
+        _require_payload_fields(payload, {"image"})
+        image = payload.get("image")
+        if not isinstance(image, str) or not _IMAGE_RE.fullmatch(image):
+            raise ProtocolError("image must be a Docker image reference.")
+        payload = {"image": image}
     elif op == "check_fix":
         # The digest of the deployment files DjangoLux previewed. It is the only
         # input: the repair itself is whatever `check --fix` decides, and the

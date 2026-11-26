@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from . import safe_files, update_policy
 from .app_permissions import SHARED_UMASK, share_runtime_dirs
-from .agent_protocol import ProtocolError, redact_text, utc_now, validate_command
+from .agent_protocol import MAX_EVENT_TEXT, ProtocolError, redact_text, utc_now, validate_command
 from .agent_store import AgentStore
 from .control_client import ControlPlaneClient, ControlPlaneError
 from .service_selection import (
@@ -22,6 +23,10 @@ from .service_selection import (
 )
 from .version import read_composer_version
 from .watcher import WatchRuntime
+
+# DjangoLux's snapshot.json is the largest document the agent reads off the
+# shared volume; anything bigger is not a snapshot it wrote.
+MAX_SNAPSHOT_BYTES = 256 * 1024
 
 
 class ComposerAgent:
@@ -190,7 +195,7 @@ class ComposerAgent:
         endpoint (the pairing code *is* the enrollment token), persist durable
         credentials, and record the outcome for the DLUX tile."""
         try:
-            raw = self.enroll_request_path.read_bytes()
+            raw = safe_files.read_bounded(self.enroll_request_path)
         except OSError:
             return
         try:
@@ -280,6 +285,9 @@ class ComposerAgent:
             # run created. Published here it survives that, because the agent is
             # recreated by the deploy itself.
             "deployer_version": os.environ.get("COMPOSER_VERSION", "").strip(),
+            # The policy this pair enforces. DjangoLux applies the stricter of it
+            # and its own, and warns when they differ (a pair not yet recreated).
+            "update_policy": update_policy.current(),
             "enrolled_at": str(self.store.get_meta("enrolled_at") or ""),
             "last_contact_at": str(self.store.get_meta("last_contact_at") or ""),
             "revoked": bool(self.store.get_meta("revoked")),
@@ -300,14 +308,7 @@ class ComposerAgent:
         self._atomic_json(self.agent_status_path, status)
 
     def _atomic_json(self, path: Path, payload: Dict[str, Any]):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        with temporary.open("w", encoding="utf-8") as stream:
-            json.dump(payload, stream, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        safe_files.atomic_write_json(path, payload)
 
     def _bridge_request(self, command: Dict[str, Any]):
         operation_id = command["operation_id"]
@@ -348,7 +349,7 @@ class ComposerAgent:
             operation_id = command["operation_id"]
             path = self.bridge_results / f"{operation_id}.json"
             try:
-                raw = path.read_bytes()
+                raw = safe_files.read_bounded(path)
                 value = json.loads(raw.decode("utf-8"))
             except (OSError, UnicodeDecodeError, ValueError):
                 continue
@@ -371,7 +372,7 @@ class ComposerAgent:
     def publish_snapshot(self):
         path = self.bridge_dir / "snapshot.json"
         try:
-            raw = path.read_bytes()
+            raw = safe_files.read_bounded(path, MAX_SNAPSHOT_BYTES)
             snapshot = json.loads(raw.decode("utf-8"))
         except (OSError, UnicodeDecodeError, ValueError):
             return
@@ -463,6 +464,9 @@ class ComposerAgent:
     def _run_child(self, command: Dict[str, Any]) -> tuple[int, str]:
         operation_id = command["operation_id"]
         action = command["action"]
+        if action == "composer.recovery_deploy" and not update_policy.allows(update_policy.IMAGE_UPDATE):
+            # A recovery deploy is a full `composer update`: it pulls images.
+            return update_policy.REFUSED_EXIT, update_policy.refusal(update_policy.IMAGE_UPDATE)
         # Executor mode: the agent holds no Docker authority. Restart/recovery are
         # synchronous, so delegate over the private socket and report the
         # executor's exit code exactly as the legacy path would. The executor
@@ -555,7 +559,8 @@ class ComposerAgent:
             detail["error"] = redact_text(error)
         if self.args.log_file:
             try:
-                detail["log"] = redact_text(Path(self.args.log_file).read_text(encoding="utf-8"))
+                tail = safe_files.read_tail(self.args.log_file, MAX_EVENT_TEXT)
+                detail["log"] = redact_text(tail.decode("utf-8", "replace"))
             except OSError:
                 pass
         self.store.transition(operation_id, "succeeded" if exit_code == 0 else "failed", detail)

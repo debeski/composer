@@ -1,9 +1,11 @@
 """composer-executor: the sole holder of Docker authority.
 
 Listens on a private Unix socket for the small, fixed set of typed operations the
-network-facing agent initiates (``restart``, ``recovery_deploy``), re-validates
+network-facing agent initiates (``restart``, ``recovery_deploy``, …), re-validates
 each (the security boundary), and runs the corresponding composer op with real
-Docker access. The agent itself holds no Docker socket and no ``DOCKER_HOST``.
+Docker access. It also answers the agent's few Docker reads (``READ_OPS``) with
+only the fields the agent uses. The agent itself holds no Docker socket and no
+``DOCKER_HOST``.
 
 Image updates are handled by the executor's (relocated) trigger-watcher loop, not
 over this socket; backups are DjangoLux-side. This module is the socket half.
@@ -27,13 +29,22 @@ EXECUTOR_SOCKET_ENV = "COMPOSER_EXECUTOR_SOCKET"
 # Dedicated mount (a shared named volume) rather than a subpath of dlux_runtime,
 # so the socket volume never nests inside another mount.
 DEFAULT_EXECUTOR_SOCKET = "/run/composer-exec/composer-exec.sock"
-# Optional expected peer uid (the agent's uid); when set, enforced via SO_PEERCRED.
+# The uid a connecting peer must have (checked via SO_PEERCRED). Unset, it is the
+# executor's own uid: the generated pair runs agent and executor from the same
+# image as the same user.
 EXECUTOR_PEER_UID_ENV = "COMPOSER_EXECUTOR_PEER_UID"
+
+# Set in the executor's own environment, so its code and its children read Docker
+# directly instead of asking the executor over the socket.
+EXECUTOR_ROLE_ENV = "COMPOSER_IN_EXECUTOR"
 
 _ACCEPT_BACKLOG = 8
 # Cap concurrent connection handlers so a flood cannot exhaust threads. Only one
-# op ever runs (the lease); extra connections are cheaply rejected as busy.
+# write op ever runs (the lease); extra connections are cheaply rejected as busy.
 _MAX_INFLIGHT_CONNS = 4
+# Reads run beside the write lease, so the Operations card and the update check
+# keep working during a deploy, but never more than this many at once.
+_MAX_INFLIGHT_READS = 2
 
 Handler = Callable[[Dict], Dict]
 
@@ -58,13 +69,23 @@ def _recv_exactly(conn: socket.socket) -> Callable[[int], bytes]:
 
 
 def _peer_uid(conn: socket.socket) -> Optional[int]:
-    """Return the connecting peer's uid via SO_PEERCRED (Linux), else None."""
+    """The connecting peer's uid: SO_PEERCRED on Linux, LOCAL_PEERCRED on macOS/BSD.
+
+    None when the platform cannot say, which the caller treats as a refusal.
+    """
     try:
-        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        _pid, uid, _gid = struct.unpack("3i", creds)
-        return uid
-    except (OSError, AttributeError, ValueError):
+        if hasattr(socket, "SO_PEERCRED"):
+            creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            _pid, uid, _gid = struct.unpack("3i", creds)
+            return uid
+        if sys.platform == "darwin" or "bsd" in sys.platform:
+            # struct xucred { u_int cr_version; uid_t cr_uid; ... }, at level SOL_LOCAL (0).
+            creds = conn.getsockopt(0, getattr(socket, "LOCAL_PEERCRED", 1), 76)
+            _version, uid = struct.unpack_from("Ii", creds)
+            return uid
+    except (OSError, AttributeError, ValueError, struct.error):
         return None
+    return None
 
 
 class Executor:
@@ -77,6 +98,7 @@ class Executor:
         self.op_lease = threading.Lock()
         self._op_lease = self.op_lease
         self._conn_slots = threading.BoundedSemaphore(_MAX_INFLIGHT_CONNS)
+        self._read_slots = threading.BoundedSemaphore(_MAX_INFLIGHT_READS)
         self._stop = threading.Event()
         # `bind()` creates the socket file, `listen()` is what starts accepting.
         # Waiting on the path alone therefore says "ready" during the window in
@@ -174,18 +196,19 @@ class Executor:
                     self._send(conn, proto.build_result("", "rejected", exit_code=2, detail=f"Executor: {exc}"))
                     return
                 operation_id = request["operation_id"]
-                if not self._op_lease.acquire(blocking=False):
-                    self._send(
-                        conn,
-                        proto.build_result(operation_id, "rejected", exit_code=2, detail="Executor is busy with another operation."),
-                    )
+                reading = request["op"] in proto.READ_OPS
+                slot = self._read_slots if reading else self._op_lease
+                if not slot.acquire(blocking=False):
+                    busy = ("Executor is busy with other reads." if reading
+                            else "Executor is busy with another operation.")
+                    self._send(conn, proto.build_result(operation_id, "rejected", exit_code=2, detail=busy))
                     return
                 try:
                     result = self.handler(request)
                 except Exception as exc:  # handler must never crash the server
                     result = proto.build_result(operation_id, "failed", exit_code=1, detail=f"Executor handler error: {exc}")
                 finally:
-                    self._op_lease.release()
+                    slot.release()
                 if not isinstance(result, dict):
                     result = proto.build_result(operation_id, "failed", exit_code=1, detail="Executor handler returned no result.")
                 self._send(conn, result)
@@ -197,12 +220,9 @@ class Executor:
     def _authorized(self, conn: socket.socket) -> bool:
         if self.expected_peer_uid is None:
             return True
+        # A peer whose uid cannot be read is refused: the check fails closed.
         uid = _peer_uid(conn)
-        # If the platform cannot report peer creds, fall back to the filesystem
-        # permission control (the socket is 0660 on a private volume).
-        if uid is None:
-            return True
-        return uid == self.expected_peer_uid
+        return uid is not None and uid == self.expected_peer_uid
 
     def _send(self, conn: socket.socket, obj: Dict) -> None:
         frame = proto.encode_result_frame(obj)
@@ -212,22 +232,29 @@ class Executor:
             pass  # the agent hung up; there is no one left to tell
 
 
-def _expected_peer_uid_from_env() -> Optional[int]:
-    raw = os.environ.get(EXECUTOR_PEER_UID_ENV)
-    if raw is None or not str(raw).strip():
-        return None
+def _expected_peer_uid_from_env() -> int:
+    """The peer uid to enforce: the variable when set, otherwise this process's uid.
+
+    A value that is not a uid is an error, never "no check".
+    """
+    raw = str(os.environ.get(EXECUTOR_PEER_UID_ENV) or "").strip()
+    if not raw:
+        return os.getuid()
     try:
-        return int(str(raw).strip())
+        uid = int(raw)
     except ValueError:
-        return None
+        uid = -1
+    if uid < 0:
+        raise ValueError(f"{EXECUTOR_PEER_UID_ENV} must be a uid, not {raw!r}.")
+    return uid
 
 
 def _run_watch_loop(watch, op_lease, stop_event) -> None:
     """The executor's trigger-watched image-update loop.
 
     Serializes with socket ops on the shared ``op_lease``. Availability checks are
-    NOT run here — those are a Docker read the agent performs via the read-only
-    proxy. Neither is the inline *package* trigger: staging a release means
+    NOT run here: the agent runs them, asking this executor only for the local
+    digest (``image_digests``). Neither is the inline *package* trigger: staging a release means
     reaching PyPI, and this service sits on an internal network by design. The
     agent owns that trigger and sends the swap back as a `dlux_package_apply`
     socket op, which lands on the same lease through the ops handler. A single
@@ -262,8 +289,7 @@ def _build_watch_runtime(args):
         interval=getattr(args, "interval", 2) or 2,
         dev=getattr(args, "dev", False),
         file=getattr(args, "file", None),
-        # Availability is a Docker READ that stays with the agent (read-only
-        # proxy); the executor never runs it.
+        # The agent runs availability checks; the executor never does.
         check_image=[],
         availability_file=None,
         check_interval=3600,
@@ -279,12 +305,14 @@ def run_executor(args) -> int:
     from .executor_ops import default_operation_handler
 
     os.umask(SHARED_UMASK)
+    os.environ[EXECUTOR_ROLE_ENV] = "1"
     socket_path = getattr(args, "socket", None) or resolve_socket_path()
-    executor = Executor(
-        socket_path,
-        default_operation_handler,
-        expected_peer_uid=_expected_peer_uid_from_env(),
-    )
+    try:
+        expected_peer_uid = _expected_peer_uid_from_env()
+    except ValueError as exc:
+        print(f"✖ {exc}", file=sys.stderr)
+        return 2
+    executor = Executor(socket_path, default_operation_handler, expected_peer_uid=expected_peer_uid)
     stop_event = threading.Event()
     watch = _build_watch_runtime(args)
     if watch is not None:

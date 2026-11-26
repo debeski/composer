@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
@@ -29,15 +30,22 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlparse
 
-from . import dlux_channel, stack_schema
+from . import dlux_channel, safe_files, stack_schema
 from .version import read_composer_version
 from .versions import at_least, try_parse
 
 # Mirrored from dlux/updater/manifest.py — keep in step.
 PYPI_SIMPLE_URL = "https://pypi.org/simple/django-lux/"
+# One release's JSON. PyPI's CDN caches it apart from the project index, so it
+# is fresh the moment a release is published while the index can lag for
+# minutes (seen 2026-10-09 and 2026-11-25).
+PYPI_RELEASE_URL = "https://pypi.org/pypi/django-lux/{version}/json"
 PYPI_PROJECT_REPOSITORY = "https://github.com/debeski/django-lux"
 ALLOWED_DOWNLOAD_HOSTS = frozenset({"pypi.org", "files.pythonhosted.org"})
 MAX_INDEX_BYTES = 4 * 1024 * 1024
+# Seconds between re-reads while PyPI's CDN serves a stale view of a new release.
+INDEX_RETRY_DELAYS = (3, 6, 12)
+PROBE_TIMEOUT = 10
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MANIFEST_PATH = "dlux/release-manifest.json"
 SAFE_INLINE_EFFECTS = frozenset({"none", "state_only", "additive"})
@@ -135,6 +143,141 @@ def fetch_index(*, opener=urllib.request.urlopen) -> list:
     return candidates
 
 
+def fetch_release(version, *, opener=urllib.request.urlopen) -> Optional[ReleaseCandidate]:
+    """The wheel of one exact release from its own JSON page, or None if unpublished.
+
+    The same trust as the index: an approved HTTPS host, a SHA-256 digest to
+    verify the download against, and (later) the attestation. A yanked or
+    malformed release is treated as absent.
+    """
+    parsed = try_parse(version)
+    if parsed is None:
+        return None
+    url = PYPI_RELEASE_URL.format(version=quote(str(version), safe=""))
+    request = urllib.request.Request(url, headers={"User-Agent": "composer-dlux-updater/1"})
+    try:
+        with opener(request, timeout=PROBE_TIMEOUT) as response:
+            _validated_https_url(response.geturl())
+            payload = json.loads(_read_bounded(response, MAX_INDEX_BYTES).decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise ReleaseSourceError(f"Could not read the DjangoLux {version} release page.") from exc
+    except ReleaseSourceError:
+        raise
+    except Exception as exc:
+        raise ReleaseSourceError(f"Could not read the DjangoLux {version} release page.") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("urls"), list):
+        return None
+    for entry in payload["urls"]:
+        if not isinstance(entry, dict) or entry.get("yanked"):
+            continue
+        filename = str(entry.get("filename") or "")
+        match = _WHEEL_RE.match(filename)
+        if not match or try_parse(match.group(1)) != parsed:
+            continue
+        digest = str((entry.get("digests") or {}).get("sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            continue
+        try:
+            wheel_url = _validated_https_url(entry.get("url"))
+        except ReleaseSourceError:
+            continue
+        return ReleaseCandidate(version=match.group(1), filename=filename, url=wheel_url, sha256=digest)
+    return None
+
+
+def likely_successors(candidates, *, prereleases=False) -> list:
+    """Versions that may have been published since this (possibly stale) index.
+
+    The next patch, minor and major after the newest release and the final of a
+    newest prerelease; with ``prereleases``, also the next beta of each. A
+    short, fixed list: each is one cheap request that is either fresh or a 404.
+    """
+    parsed = [v for v in (try_parse(c.version) for c in candidates) if v is not None]
+    if not parsed:
+        return []
+    newest = max(parsed)
+    major, minor, patch = (tuple(newest.release) + (0, 0, 0))[:3]
+    finals = [f"{major}.{minor}.{patch + 1}", f"{major}.{minor + 1}.0", f"{major + 1}.0.0"]
+    found = []
+    if newest.pre:
+        found.append(f"{major}.{minor}.{patch}")
+        if prereleases:
+            phase, number = newest.pre
+            found.append(f"{major}.{minor}.{patch}{phase}{number + 1}")
+    found += finals
+    if prereleases:
+        found += [f"{final}b1" for final in finals[:2]]
+    known = set(parsed)
+    return [v for v in dict.fromkeys(found) if try_parse(v) not in known]
+
+
+def _merge(candidates, extra) -> list:
+    known = {try_parse(c.version) for c in candidates}
+    return list(candidates) + [c for c in extra if c is not None and try_parse(c.version) not in known]
+
+
+def _probe(versions, opener) -> list:
+    """Best effort: a probe that fails is simply not evidence of a release."""
+    found = []
+    for version in versions:
+        try:
+            found.append(fetch_release(version, opener=opener))
+        except ReleaseSourceError:
+            continue
+    return [c for c in found if c is not None]
+
+
+def published_candidates(*, opener=urllib.request.urlopen, target_version="", expected="",
+                         channel=dlux_channel.STABLE) -> list:
+    """The index, topped up from per-release pages the CDN cannot have cached stale.
+
+    A pin reads its own release page when the index lacks it; an unpinned read
+    probes the likely successors of the newest release and the ``expected``
+    release a recent check saw. Adding a candidate is not choosing it: channel
+    and quarantine filtering still happen in `select_candidate`.
+    """
+    candidates = fetch_index(opener=opener)
+    versions = {try_parse(c.version) for c in candidates}
+    if target_version:
+        if try_parse(target_version) in versions:
+            return candidates
+        return _merge(candidates, _probe([target_version], opener))
+    probes = likely_successors(candidates, prereleases=dlux_channel.prereleases_allowed(channel))
+    if expected and try_parse(expected) is not None and try_parse(expected) not in versions:
+        probes = [expected] + [v for v in probes if try_parse(v) != try_parse(expected)]
+    return _merge(candidates, _probe(probes, opener))
+
+
+def resolve_candidate(target_version="", *, channel=dlux_channel.STABLE, exclude=(), expected="",
+                      opener=urllib.request.urlopen, sleep=time.sleep) -> ReleaseCandidate:
+    """`select_candidate` over `published_candidates`, re-reading while it lags.
+
+    A pin that is not published yet, or an unpinned resolve that lands below
+    ``expected``, re-reads a few times before giving its answer. It never pins
+    to ``expected``: the channel may have changed.
+    """
+    wanted = try_parse(expected) if expected and not target_version else None
+    for delay in INDEX_RETRY_DELAYS + (None,):
+        candidates = published_candidates(
+            opener=opener, target_version=target_version, expected=expected if wanted else "",
+            channel=channel,
+        )
+        try:
+            candidate = select_candidate(candidates, target_version, channel=channel, exclude=exclude)
+        except ReleaseSourceError:
+            if not target_version or delay is None:
+                raise
+            sleep(delay)
+            continue
+        current = try_parse(candidate.version)
+        if wanted is None or delay is None or current is None or current >= wanted:
+            return candidate
+        sleep(delay)
+    raise AssertionError("unreachable")
+
+
 def select_candidate(candidates, target_version="", *, channel=dlux_channel.STABLE,
                      exclude=()) -> ReleaseCandidate:
     """Pin to ``target_version`` when given, otherwise the newest eligible release.
@@ -228,9 +371,7 @@ def download_wheel(candidate: ReleaseCandidate, destination, *, opener=urllib.re
     actual = hashlib.sha256(payload).hexdigest()
     if actual != candidate.sha256:
         raise ReleaseSourceError("The downloaded wheel does not match PyPI's SHA-256 digest.")
-    temporary = destination.with_name(f".{destination.name}.part")
-    temporary.write_bytes(payload)
-    temporary.replace(destination)
+    safe_files.atomic_write_bytes(destination, payload)
     return destination
 
 
@@ -383,7 +524,8 @@ def assess(candidate: ReleaseCandidate, wheel_path) -> dict:
 
 
 def describe(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
-             opener=urllib.request.urlopen, runner=subprocess.run, exclude=()) -> dict:
+             opener=urllib.request.urlopen, runner=subprocess.run, exclude=(),
+             sleep=time.sleep) -> dict:
     """Resolve and inspect the newest (or pinned) release without installing it.
 
     Downloads and verifies the wheel — the manifest inside it is the only
@@ -391,8 +533,8 @@ def describe(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
     whether a release may be applied to the runtime volume. Nothing is unpacked
     and nothing is activated.
     """
-    candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel,
-                                 exclude=exclude)
+    candidate = resolve_candidate(target_version, channel=channel, exclude=exclude,
+                                  opener=opener, sleep=sleep)
     workdir = Path(workdir or tempfile.mkdtemp(prefix="composer-dlux-check-"))
     workdir.mkdir(parents=True, exist_ok=True)
     verify_attestation(candidate, runner=runner)
@@ -431,8 +573,6 @@ def unpack(wheel_path, destination) -> Path:
     return destination
 
 
-INDEX_RETRY_DELAYS = (3, 6, 12)
-
 
 def obtain(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
            opener=urllib.request.urlopen, runner=subprocess.run,
@@ -442,22 +582,12 @@ def obtain(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
     Order matters: attestation and digest are checked before the archive is
     opened, and `inline_safe` before anything is unpacked into place.
 
-    ``expected`` is the newest release a recent check saw. Shortly after a
-    publish PyPI's CDN can serve an index without it, so an unpinned resolve
-    that lands below it re-reads the index a few times before settling for
-    what it found. It never pins to ``expected``: the channel may have changed.
-    ``exclude`` is passed to `select_candidate`.
+    ``expected`` is the newest release a recent check saw; see
+    `resolve_candidate` for how a lagging index is handled. ``exclude`` is
+    passed to `select_candidate`.
     """
-    candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel,
-                                 exclude=exclude)
-    wanted = try_parse(expected) if expected and not target_version else None
-    for delay in INDEX_RETRY_DELAYS if wanted is not None else ():
-        current = try_parse(candidate.version)
-        if current is None or current >= wanted:
-            break
-        sleep(delay)
-        candidate = select_candidate(fetch_index(opener=opener), target_version, channel=channel,
-                                     exclude=exclude)
+    candidate = resolve_candidate(target_version, channel=channel, exclude=exclude,
+                                  expected=expected, opener=opener, sleep=sleep)
     workdir = Path(workdir or tempfile.mkdtemp(prefix="composer-dlux-"))
     workdir.mkdir(parents=True, exist_ok=True)
     verify_attestation(candidate, runner=runner)
