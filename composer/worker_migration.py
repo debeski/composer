@@ -59,6 +59,10 @@ TARGET_SCHEMA = 5
 WORKER = "worker"
 CELERY = "celery"
 DEV_OVERRIDE = "compose.dev.yml"
+#: The note ``migrate`` adds while the development override still names only celery.
+DEV_WAITS_NOTE = (
+    f"{DEV_OVERRIDE} overrides celery but not worker yet; run './start.sh -d check --fix' to mirror it."
+)
 
 # The generated schema 5 worker, as DjangoLux's scaffold writes it.
 WORKER_COMMAND = """\
@@ -441,10 +445,7 @@ def _stamps(project_root, compose_files, sources, base, updates, notes) -> None:
             updates[path] = restamped
     restamp_secrets(project_root, updates, LEGACY_SCHEMA, TARGET_SCHEMA)
     if dev_waits:
-        notes.append(
-            f"{DEV_OVERRIDE} overrides celery but not worker yet; run './start.sh -d check --fix' "
-            "to mirror it."
-        )
+        notes.append(DEV_WAITS_NOTE)
 
     base_after = updates.get(base, base_text)
     stamp = _lowest_stamp(base_after)

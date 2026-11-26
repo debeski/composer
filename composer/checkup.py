@@ -1715,9 +1715,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
     def _recheck_after_fix(self, results: List[Dict[str, Any]]) -> None:
         """Report, in place, what the repairs changed as it now stands.
 
-        A repaired FAIL must not fail the run. After a confirmed run the WARNs a
-        repair clears by rewriting files are read again too, so the summary says
-        what is healthy now rather than what was.
+        A repaired FAIL must not fail the run. After a confirmed run every check a
+        repair can change is read again, whatever it said before (a removed
+        docker-socket-proxy, a restamped schema, a dropped service's count), so
+        the report and the summary say what stands now rather than what was.
         """
         rechecks = {
             "resident-commands": self._check_resident_commands,
@@ -1744,9 +1745,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         } if confirmed else {}
         for index, result in enumerate(results):
             name, level = result.get("name"), result.get("level")
-            if name in rechecks and (level == FAIL or name in always):
+            if name in rechecks and (level == FAIL or name in always or confirmed):
                 check = rechecks[name]
-            elif name in refreshed and level != OK:
+            elif name in refreshed:
                 check = refreshed[name]
             else:
                 continue
@@ -2762,6 +2763,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if grant_access:
             fixes.append(self._fix_app_permissions(grant_access))
         # Last: it builds on what the steps above made of an older layout.
+        worker_entry = None
         if needs_worker:
             from .stack_cleanup import StackCleanupError
 
@@ -2777,7 +2779,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     detail = f"Brought the stack to schema 5: {', '.join(outcome['files'])}."
                 if outcome["notes"]:
                     detail += " " + " ".join(outcome["notes"])
-                fixes.append(_result(OK, "fix:task-worker", f"{detail} Backup: {outcome['backup_root'] or 'n/a'}"))
+                worker_entry = _result(OK, "fix:task-worker", f"{detail} Backup: {outcome['backup_root'] or 'n/a'}")
+                fixes.append(worker_entry)
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:task-worker", str(exc)))
         if retire_celery and not any(
@@ -2795,6 +2798,11 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         f"Removed celery ({', '.join(outcome['files'])}); its container is gone and worker runs "
                         f"DjangoLux's tasks. Backup: {outcome['backup_root']}",
                     ))
+                    if worker_entry is not None and worker_migration.DEV_OVERRIDE in outcome["files"]:
+                        # Removing celery mirrored the development override onto worker.
+                        worker_entry["message"] = worker_entry["message"].replace(
+                            f" {worker_migration.DEV_WAITS_NOTE}", ""
+                        )
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:celery", str(exc)))
         # After every step that restamps: it re-reads the files they left.

@@ -71,14 +71,14 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    `celery` removal, stamp repair. A failed obsolete-services cleanup stops there.
 5. **Finish what changed.** The stack is brought to the files the repairs wrote, in the
    same run ([after the repairs](#after-the-repairs)).
-6. **Re-check.** After a repair the services are discovered again. `resident-commands`,
-   `docker-proxy`, `stored-files`, `stack-schema`, `task-worker`, `services` and
-   `redis-aof-corrupt` are checked again when they failed, and `app-permissions`
-   (deep) and `redis-persistence` always are. After a run that applied repairs,
-   `front-proxy`, `update-policy`, `relay-env`, `removed-services`, `proxy-routes`
-   and `topology` are checked again when they were not OK, and so is
-   `pending-recreate`. The new results replace the old, so the summary reports what
-   is healthy now.
+6. **Re-check.** After a repair the services are discovered again. `app-permissions`
+   (deep) and `redis-persistence` are always checked again. After a run that applied
+   repairs, every check a repair can change is checked again, whatever it reported
+   before: `resident-commands`, `docker-proxy`, `stored-files`, `stack-schema`,
+   `task-worker`, `services`, `redis-aof-corrupt`, `front-proxy`, `update-policy`,
+   `relay-env`, `removed-services`, `proxy-routes`, `topology` and `pending-recreate`.
+   A run that applied nothing checks again only the first seven of those that failed.
+   The new results replace the old, so the report and the summary say what stands now.
 
 The obsolete-services cleanup stops and removes only the detected obsolete
 containers with a targeted `docker compose rm -sf`, applies the service and route
