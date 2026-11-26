@@ -240,11 +240,14 @@ def next_command(entry: Mapping[str, Any]) -> str:
         if services:
             return "./start.sh logs " + " ".join(dict.fromkeys(services))
     text = f"{entry.get('fix') or ''} {message}"
-    found = [command for command in _START_SH.findall(text) if "<" not in command]
-    if found:
-        return found[0]
-    if "check --fix" in text:
+    found = [match for match in _START_SH.finditer(text) if "<" not in match.group(1)]
+    repair = text.find("check --fix")
+    # The first step the text names comes first: "Run 'composer check --fix' …, then
+    # './start.sh'" needs the repair before the restart.
+    if repair >= 0 and (not found or repair < found[0].start()):
         return "./start.sh check --fix"
+    if found:
+        return found[0].group(1)
     return "./start.sh check"
 
 

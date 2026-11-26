@@ -79,8 +79,8 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    repairs, every check a repair can change is checked again, whatever it reported
    before: `resident-commands`, `docker-proxy`, `stored-files`, `stack-schema`,
    `task-worker`, `services`, `redis-aof-corrupt`, `front-proxy`, `update-policy`,
-   `relay-env`, `removed-services`, `proxy-routes`, `topology`, `celery`, the
-   `wrapper:` findings and `pending-recreate`. A run that applied nothing checks again
+   `relay-env`, `removed-services`, `proxy-routes`, `topology`, `compose-config`, `celery`,
+   the `wrapper:` findings and `pending-recreate`. A run that applied nothing checks again
    only the first seven of those that failed. The new results replace the old, and a
    finding whose service the run removed (`docker-socket-proxy`, `celery`) leaves the
    report, as from a fresh `check`, so the report and the summary say what stands now.
@@ -173,9 +173,9 @@ entries:
 - **Healthy now:** the findings its repairs fixed (a repair whose finding still warns
   is not counted), and the findings that were not OK before and are now.
 - **Still needs you:** every finding and fix that is still not OK, each with one
-  `./start.sh` command: the one its advice names (`./start.sh logs <service>` for a
-  service that keeps restarting), else `./start.sh check --fix` when that repairs it,
-  else `./start.sh check` once its advice is followed.
+  `./start.sh` command: the first step its advice names (`./start.sh check --fix` when
+  the repair comes before a restart, `./start.sh logs <service>` for a service that
+  keeps restarting), else `./start.sh check` once its advice is followed.
 - **Skipped by your choice:** the questions you skipped.
 
 ## Findings
