@@ -287,6 +287,187 @@ class FinishFixTests(_InTempProject):
         self.assertTrue(all(f["level"] != FAIL for f in fixes), fixes)
 
 
+class _FakeDocker:
+    """Docker and Compose for one project, answered from the Compose files on disk.
+
+    Compose merges every ``-f`` file, and rejects the whole project when one
+    names a service no file gives an image: what a stale runtime override did.
+    """
+
+    def __init__(self, live):
+        self.live = dict(live)
+        self.calls = []
+        self.recreated = []
+
+    def _model(self, files):
+        import yaml
+
+        services = {}
+        for name in files:
+            data = yaml.safe_load(Path(name).read_text(encoding="utf-8")) or {}
+            for service, spec in (data.get("services") or {}).items():
+                merged = services.setdefault(service, {})
+                for key, value in (spec or {}).items():
+                    if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                        merged[key] = {**merged[key], **value}
+                    else:
+                        merged[key] = value
+        for service, spec in services.items():
+            if "image" not in spec and "build" not in spec:
+                return None, (f'service "{service}" has neither an image nor a build context specified: '
+                              "invalid compose project")
+        return {"name": "demo", "services": services}, ""
+
+    def __call__(self, argv, timeout=None, env=None, progress_callback=None):
+        argv = list(argv)
+        self.calls.append(argv)
+        if argv[:2] == ["docker", "compose"]:
+            rest = argv[2:]
+            files = []
+            while rest[:1] == ["-f"]:
+                files.append(rest[1])
+                rest = rest[2:]
+            model, error = self._model(files)
+            if model is None:
+                return False, "", error
+            if rest[:2] == ["config", "--services"]:
+                return True, "".join(f"{name}\n" for name in model["services"]), ""
+            if rest[:3] == ["config", "--format", "json"]:
+                return True, json.dumps(model), ""
+            if rest[:1] == ["ps"]:
+                return True, json.dumps([
+                    {"Service": name, "Name": f"demo-{name}-1", "ID": cid, "State": "running"}
+                    for name, cid in self.live.items()
+                ]), ""
+            if rest[:1] == ["up"]:
+                self.recreated.append([name for name in rest[1:] if not name.startswith("-")])
+            return True, "", ""
+        if argv[:3] == ["docker", "ps", "-aq"]:
+            service = next(a.rsplit("=", 1)[1] for a in argv if a.startswith("label=com.docker.compose.service="))
+            return True, (self.live[service] + "\n") if service in self.live else "", ""
+        if argv[:2] == ["docker", "rm"]:
+            self.live = {name: cid for name, cid in self.live.items() if cid not in argv[2:]}
+        return True, "", ""
+
+
+DROPPED_BEFORE = """services:
+  web:
+    image: app:2
+    environment: {A: "1"}
+  worker:
+    image: app:2
+  celery:
+    image: app:2
+  docker-socket-proxy:
+    image: proxy:1
+  composer-executor:
+    image: composer:1
+    environment: {COMPOSER_AGENT_RESTART_SERVICES: "web,worker,celery"}
+  composer-agent:
+    image: composer:1
+    environment: {COMPOSER_AGENT_RESTART_SERVICES: "web,worker,celery"}
+"""
+DROPPED_AFTER = """services:
+  web:
+    image: app:2
+    environment: {A: "1", DLUX_UPDATE_POLICY: "all"}
+  worker:
+    image: app:2
+    environment: {DLUX_UPDATE_POLICY: "all"}
+  composer-executor:
+    image: composer:1
+    environment: {COMPOSER_AGENT_RESTART_SERVICES: "web,worker"}
+  composer-agent:
+    image: composer:1
+    environment: {COMPOSER_AGENT_RESTART_SERVICES: "web,worker"}
+"""
+
+
+class DroppedServiceRunTests(_InTempProject):
+    """S1 (1.11.0b1 live proof): a `check --fix` that drops a service still brings the stack to its files.
+
+    The runtime override was written once, at the start, naming every service then
+    defined; once a repair dropped celery or docker-socket-proxy, every later
+    Compose read failed, so nothing was removed or recreated and the run exited 1.
+    """
+
+    LIVE = {"web": "c-web", "worker": "c-worker", "celery": "c-celery", "docker-socket-proxy": "c-proxy",
+            "composer-executor": "c-exec", "composer-agent": "c-agent"}
+
+    def _launcher(self):
+        (self.root / "compose.yml").write_text(DROPPED_BEFORE, encoding="utf-8")
+        self.docker = _FakeDocker(self.LIVE)
+        launcher = DockerComposeLauncher()
+        stubs = {
+            "_check_docker": [], "_check_wrappers": [], "_check_composer_channel": _ok("composer-channel"),
+            "_check_compose_files": _ok("compose-files"), "_check_secrets": _ok("secrets"),
+            "_fix_composer_pin": [], "resolve_secrets": (True, ""), "_wait_healthy": (True, ""),
+        }
+        for name, value in stubs.items():
+            patch.object(launcher, name, return_value=value).start()
+        patch.object(launcher, "run_command", side_effect=self.docker).start()
+        patch.object(launcher, "run_command_streaming", side_effect=self.docker).start()
+        patch("composer.app_permissions.ensure_for_image", return_value=(True, "")).start()
+        patch("sys.stdout", new_callable=io.StringIO).start()
+        self.addCleanup(patch.stopall)
+        self.reads_after_repair = []
+
+        def repair(args, results):
+            """Like fix:celery and fix:resident-block: drop the services, then the next repair reads Compose."""
+            launcher._fix_confirmed = True
+            launcher._fix_baseline = launcher._lifecycle_baseline()
+            self.docker.live.pop("celery")
+            (self.root / "compose.yml").write_text(DROPPED_AFTER, encoding="utf-8")
+            self.reads_after_repair.append(launcher.compose_config_json())
+            return [{"level": OK, "name": "fix:celery", "message": "Removed celery."}]
+
+        patch.object(launcher, "_maybe_fix", side_effect=repair).start()
+        return launcher
+
+    def _run(self, **over):
+        launcher = self._launcher()
+        with patch.object(type(launcher), "_check_compose_parses",
+                          lambda self: _ok("compose-config") if self.discover_services(silent=True) else
+                          {"level": FAIL, "name": "compose-config", "message": ""}):
+            results, fixes = launcher.collect_checkup(_args(**over))
+        return launcher, results, fixes
+
+    def test_the_dropped_services_are_removed_and_the_changed_ones_recreated(self):
+        launcher, results, fixes = self._run()
+
+        self.assertIsNotNone(self.reads_after_repair[0], "a repair after the drop could not read Compose")
+        by_name = {entry["name"]: entry for entry in fixes}
+        self.assertEqual(by_name["fix:remove-services"]["level"], OK, fixes)
+        self.assertIn("docker-socket-proxy", by_name["fix:remove-services"]["message"])
+        self.assertIn(["docker", "rm", "c-proxy"], self.docker.calls)
+        self.assertEqual(by_name["fix:recreate"]["level"], OK, fixes)
+        self.assertEqual(by_name["fix:recreate-resident"]["level"], OK, fixes)
+        self.assertEqual(self.docker.recreated, [["web", "worker"], ["composer-executor", "composer-agent"]])
+        self.assertNotIn(FAIL, [entry["level"] for entry in results + fixes])
+        # The run reads the stack it left, not the one it started from.
+        self.assertEqual(sorted(launcher.services), ["composer-agent", "composer-executor", "web", "worker"])
+
+    def test_the_override_names_only_services_the_files_define(self):
+        import yaml
+
+        launcher, _results, _fixes = self._run()
+
+        override = yaml.safe_load(launcher.compose_runtime_override.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(override["services"]), ["composer-agent", "composer-executor", "web", "worker"])
+        for call in self.docker.calls:
+            if call[:2] == ["docker", "compose"] and call[-1] == "--services":
+                self.assertNotIn(str(launcher.compose_runtime_override), call, "read through the override")
+
+    def test_a_panel_apply_removes_and_recreates_all_but_the_pair(self):
+        _launcher, _results, fixes = self._run(resident_apply=True)
+
+        by_name = {entry["name"]: entry for entry in fixes}
+        self.assertEqual(by_name["fix:remove-services"]["level"], OK, fixes)
+        self.assertEqual(by_name["fix:recreate"]["level"], OK, fixes)
+        self.assertEqual(by_name["fix:recreate-resident"]["level"], WARN, fixes)
+        self.assertEqual(self.docker.recreated, [["web", "worker"]])
+
+
 class ImageDriftTests(unittest.TestCase):
     def test_a_tag_that_moved_since_the_container_started_is_reported(self):
         launcher = DockerComposeLauncher()
@@ -305,6 +486,41 @@ class ImageDriftTests(unittest.TestCase):
             held = launcher._image_drift(["web", "caddy"], baseline, before)
 
         self.assertEqual(list(held), ["web"])
+
+    def test_a_service_the_repairs_add_is_not_started_on_an_image_the_stack_does_not_run(self):
+        """S2: pull, check --fix, deploy. worker waits for the deploy of the pulled image."""
+        launcher = DockerComposeLauncher()
+        after = _model(web={"image": "app:2"}, worker={"image": "app:2"})
+        baseline = {"images": {"web": "app:2", "celery": "app:2"},
+                    "containers": [_row("web", cid="w1"), _row("celery", cid="k1")]}
+
+        def run_command(argv, timeout=None, env=None):
+            if argv[:2] == ["docker", "inspect"]:
+                return True, "w1 sha256:old\nk1 sha256:old\n", ""
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return True, {"app:2": "sha256:new"}[argv[-1]] + "\n", ""
+            return False, "", ""
+
+        with patch.object(launcher, "run_command", side_effect=run_command):
+            held = launcher._image_drift(["worker"], baseline, after)
+
+        self.assertEqual(list(held), ["worker"])
+        self.assertIn("than the one web runs", held["worker"])
+
+    def test_a_service_the_repairs_add_on_the_image_the_stack_runs_is_started(self):
+        launcher = DockerComposeLauncher()
+        after = _model(web={"image": "app:2"}, worker={"image": "app:2"})
+        baseline = {"images": {"web": "app:2"}, "containers": [_row("web", cid="w1")]}
+
+        def run_command(argv, timeout=None, env=None):
+            if argv[:2] == ["docker", "inspect"]:
+                return True, "w1 sha256:same\n", ""
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return True, "sha256:same\n", ""
+            return False, "", ""
+
+        with patch.object(launcher, "run_command", side_effect=run_command):
+            self.assertEqual(launcher._image_drift(["worker"], baseline, after), {})
 
 
 def _ok(name):

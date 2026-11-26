@@ -3165,7 +3165,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         Recreating one would deploy that image (pulled or built, never deployed),
         which ``check --fix`` must not do on the side. A repair that changes the
         reference itself (a Composer pin) is meant to, so only an unchanged
-        reference is compared.
+        reference is compared. A service the repairs add (``worker``) has no
+        container yet: it is compared through a running service on the same
+        reference, so it is not started on an image the stack does not run.
         """
         before_images = baseline.get("images") or {}
         after_images = stack_lifecycle.images(after)
@@ -3173,23 +3175,32 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             row["service"]: row["id"] for row in baseline.get("containers") or []
             if row.get("id") and row.get("state") in stack_lifecycle.LIVE_STATES
         }
-        candidates = [
-            name for name in services
-            if name in ids and after_images.get(name) and after_images.get(name) == before_images.get(name)
-        ]
-        if not candidates:
-            return {}
-        ok, out, _err = self.run_command(
-            ["docker", "inspect", "--format", "{{.Id}} {{.Image}}", *[ids[name] for name in candidates]], timeout=20
+        unchanged = sorted(
+            name for name in ids if after_images.get(name) and after_images.get(name) == before_images.get(name)
         )
+        probes: Dict[str, str] = {}
+        for name in services:
+            reference = after_images.get(name)
+            if name in ids:
+                if name in unchanged:
+                    probes[name] = name
+            elif reference and name not in before_images:
+                source = next((other for other in unchanged if after_images[other] == reference), None)
+                if source:
+                    probes[name] = source
+        if not probes:
+            return {}
+        containers = sorted({ids[source] for source in probes.values()})
+        ok, out, _err = self.run_command(["docker", "inspect", "--format", "{{.Id}} {{.Image}}", *containers], timeout=20)
         if not ok:
             return {}
         running = dict(line.split(None, 1) for line in out.splitlines() if len(line.split()) == 2)
         local: Dict[str, str] = {}
         held: Dict[str, str] = {}
-        for name in candidates:
+        for name, source in probes.items():
             image = next(
-                (value.strip() for cid, value in running.items() if cid.startswith(ids[name]) or ids[name].startswith(cid)),
+                (value.strip() for cid, value in running.items()
+                 if cid.startswith(ids[source]) or ids[source].startswith(cid)),
                 "",
             )
             reference = after_images[name]
@@ -3197,7 +3208,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 found, text, _ = self.run_command(["docker", "image", "inspect", "--format", "{{.Id}}", reference], timeout=15)
                 local[reference] = text.strip() if found else ""
             if image and local[reference] and local[reference] != image:
-                held[name] = f"{reference} now names another image than the one it runs"
+                runs = "the one it runs" if source == name else f"the one {source} runs"
+                held[name] = f"{reference} now names another image than {runs}"
         return held
 
     def _remove_dropped(self, project: str, services: List[str]) -> Dict[str, Any]:
@@ -3370,7 +3382,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         lines.append(
             f"Recreate each running service whose Compose definition this run changes{expected}, with its start-up "
             f"steps, and wait until it is healthy and has stayed up {settle_seconds():g} s. A service the repairs "
-            "add to a running stack is started."
+            "add to a running stack is started, unless its image is not the one the stack runs: the next deploy "
+            "starts it."
         )
         if life["resident"]:
             if self._resident_apply(args):
@@ -3419,12 +3432,40 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         entries.append({"name": "recreate-services", "files": [], "diff": "", "note": note})
         return entries
 
+    def _configured_dlux_version(self) -> Tuple[str, Optional[Tuple[int, int, int]]]:
+        """``(image, (major, minor, patch) or None)``: the DjangoLux baked into the app
+        image the Compose files name, read only when Docker already has that image.
+
+        Its baked-version label, else ``python -m dlux --version`` in a throwaway
+        container without network. Nothing is pulled.
+        """
+        from .agent_installer import parse_dlux_version
+        from .app_permissions import app_image
+        from .downgrade_guard import label_versions
+
+        image = app_image(self.compose_config_json() or {})
+        if not image:
+            return "", None
+        labels = self.image_labels(image)
+        if labels is None:
+            return image, None
+        baked = label_versions(labels).get("dlux")
+        if baked:
+            return image, parse_dlux_version(baked)
+        ok, out, _err = self.run_command(
+            ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "python",
+             image, "-m", "dlux", "--version"],
+            timeout=60,
+        )
+        return image, (parse_dlux_version(out) if ok else None)
+
     def _worker_gate(self) -> Tuple[bool, str]:
         """``(ready, why not)``: may ``worker`` be added to this stack now?
 
         Only once the stack's DjangoLux has ``dlux_worker``, or ``worker`` would
-        crash-loop: the running release, or in development (``-d``, built from
-        the project source) the version the project requires.
+        crash-loop: the image the Compose files name when Docker has it (pulled
+        or built, not deployed yet), the running release, or in development
+        (``-d``, built from the project source) the version the project requires.
         """
         if getattr(self, "_worker_gate_cache", None) is not None:
             return self._worker_gate_cache
@@ -3432,17 +3473,17 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         minimum = ".".join(map(str, floor))
         running = self._running_dlux_version()
         self._worker_running = running
+        self._worker_image, configured = self._configured_dlux_version()
+        self._worker_configured = configured
         declared = worker_migration.declared_dlux(Path(".")) if getattr(self, "dev_mode", False) else None
-        if running is not None and tuple(running) >= floor:
-            gate = (True, "")
-        elif declared is not None and declared >= floor:
+        if any(version is not None and tuple(version) >= floor for version in (running, configured, declared)):
             gate = (True, "")
         else:
             got = ".".join(map(str, running)) if running else "an unknown DjangoLux"
             gate = (False, (
                 f"The stack runs {'DjangoLux ' + got if running else got}, which has no dlux_worker: "
-                f"'worker' is added once the project image is on DjangoLux {minimum} or later "
-                "(in development, once the project requires it)."
+                f"'worker' is added once the project image is on DjangoLux {minimum} or later and present "
+                "here ('./start.sh pull', or a rebuild), or in development once the project requires it."
             ))
         self._worker_gate_cache = gate
         return gate
@@ -3490,6 +3531,15 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 f"DjangoLux {'.'.join(map(str, running))} runs its tasks in a 'worker' service, which this "
                 "stack does not have, so they are queued and never run: scheduled backups and jobs stop.",
                 fix="Run 'composer check --fix' to add it (stack schema 5), then deploy.",
+            )
+        configured = getattr(self, "_worker_configured", None)
+        if ready and configured is not None and tuple(configured) >= worker_migration.WORKER_FLOOR:
+            return _result(
+                OK,
+                "task-worker",
+                f"No 'worker' service yet; {self._worker_image}, the image this stack is set to run, has "
+                f"DjangoLux {'.'.join(map(str, configured))}, which runs its tasks there: run "
+                "'composer check --fix' (stack schema 5) before deploying it.",
             )
         if ready:
             return _result(

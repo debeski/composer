@@ -192,15 +192,23 @@ then reads wrongly. The guard is always on; it does not need the opt-in
   and the baked DjangoLux version (`org.<project>.dlux_baked_version`). A version
   either side does not label is not compared; an image with neither label is refused
   when the recorded release had them, since nothing shows it is not older.
-- **What it is compared with**: the labels of the app containers that exist now
-  (they ran the migrator, even if they then failed their health check), and the
-  deploy record, which Composer raises after every `up` so the floor survives a
-  `down`. The record is kept twice, and the newer copy counts:
+- **What it is compared with**: the labels of the app containers that have started
+  (they ran the migrator, even if they then failed their health check; one only
+  created, never started, ran nothing and is not counted), and the deploy record,
+  which Composer raises after every `up` so the floor survives a `down`. The record
+  is kept twice, and the newer copy counts:
   - `.xclude/composer-deploy/deployed.json` in the deploy root;
   - `state/composer-deployed.json` on the DjangoLux runtime volume, written in a
     throwaway Composer container (`--pull never`, `--network none`), so a deploy
     root Composer cannot write still keeps a record. `down -v` removes it, together
     with the database it protects.
+
+  Each copy names the database it describes (`database`: the Postgres data volume,
+  the named volume mounted at `/var/lib/postgresql/data` or `/var/lib/postgresql`,
+  and its creation time). A copy whose volume no longer exists, or was created
+  again since (`down -v`, a restore onto a new volume), describes another database:
+  it is not compared, the run says so, and the deploy's `up` replaces it. A copy
+  without `database`, or a stack whose volume Docker cannot describe, is compared.
 
   When neither copy can be written, the run says so as a
   [deploy-status](#deploy-status) warning: the guard then relies on container labels
@@ -234,7 +242,9 @@ pre-`up` refusal is the only defence there.
 
 After `up`, every monitored service must reach healthy (running, and `healthy` when
 it has a healthcheck) and its newest container must have been up for the settle
-window, 10 s by default (`COMPOSER_HEALTH_SETTLE_SECONDS`, `0` turns the window off).
+window, 10 s by default. `COMPOSER_HEALTH_SETTLE_SECONDS` sets it in seconds, `0`
+turns it off: in the shell for one run (`COMPOSER_HEALTH_SETTLE_SECONDS=0 ./start.sh`,
+which both wrappers pass to Composer), or in the secrets file for every run.
 The window is measured from each container's own Docker `StartedAt`, so a container
 that has already been up that long when the last service turns healthy (usually
 `web`, after its migrations) adds no wait, and one that just started is watched
@@ -276,7 +286,10 @@ back after its successor migrated the database would itself be a downgrade.
 - **Version**: every service gets `COMPOSER_VERSION`.
 - **Runtime override**: the generated Compose override is a private system-temp
   file, not a project-root file, so Composer supports host-owned and read-only
-  project mounts without extra Linux capabilities.
+  project mounts without extra Linux capabilities. It names only services the
+  Compose files define: when a file changes during the run (a `check --fix` repair
+  that drops `celery` or `docker-socket-proxy`), Composer rewrites it before its next
+  Compose call.
 - **Service exclusions**: `COMPOSER_EXCLUDE_SERVICES` is a comma/space-separated
   service list omitted from generated runtime overrides, bulk pulls, bulk `up -d`,
   health checks, and diagnostics. Explicit `update SERVICE`, `pull SERVICE`, and
