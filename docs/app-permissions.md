@@ -66,7 +66,8 @@ Composer reads the app image's `Config.User`:
   a `USER 10001:0` dev image gets its data granted before `up`, as in production;
 - for a non-root uid, when a named volume an app service mounts does not exist yet
   (a fresh install), Compose creates the app services' containers without starting
-  them (`up --no-start --no-deps` for those services). Docker fills each new volume
+  them (`up --no-start --no-deps --no-recreate` for those services; an existing
+  container is left as it is). Docker fills each new volume
   from the image and gives its root the owner and mode of the image's mount point,
   which for a plain `USER 10001:0` image is root `0755`; the volumes carry Compose's
   own labels. The grant then reaches them, and `up` starts the same containers;

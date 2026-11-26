@@ -664,14 +664,18 @@ def create_app_volumes(launcher, config: dict) -> Tuple[bool, str]:
     point's owner and mode. A plain ``USER 10001:0`` image has root 0755 mount
     points, so a volume first created by ``up`` refuses the app at its first
     start. Creating the app services' containers first (``up --no-start
-    --no-deps``: nothing starts, no other service is created) lets Docker do that
-    fill, with Compose's own labels on the volumes, before the grant; ``up`` then
-    starts these same containers. ``(ok, detail)``.
+    --no-deps --no-recreate``: nothing starts, no other service is created, and a
+    container that exists is left as it is, so a running stack keeps serving if
+    the grant then fails) lets Docker do that fill, with Compose's own labels on
+    the volumes, before the grant; ``up`` then starts these same containers.
+    ``(ok, detail)``.
     """
     services = app_services(config)
     if not services:
         return True, ""
-    ok, out, err = launcher.run_docker_compose(["up", "--no-start", "--no-deps", *services], timeout=CREATE_TIMEOUT)
+    ok, out, err = launcher.run_docker_compose(
+        ["up", "--no-start", "--no-deps", "--no-recreate", *services], timeout=CREATE_TIMEOUT,
+    )
     return ok, "" if ok else (err or out or "").strip()[-1500:]
 
 

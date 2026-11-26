@@ -461,7 +461,8 @@ class RunTests(unittest.TestCase):
 
         self.assertTrue(ready, note)
         self.assertIn("granted group access to 1 entries", note)
-        create = launcher.events.index(["compose", "up", "--no-start", "--no-deps", "ocr", "web", "worker"])
+        create = launcher.events.index(["compose", "up", "--no-start", "--no-deps", "--no-recreate",
+                                        "ocr", "web", "worker"])
         walks = [i for i, event in enumerate(launcher.events) if event[:2] == ["docker", "run"]]
         self.assertTrue(walks and create < walks[0], launcher.events)
         scan = launcher.events[walks[0]]
