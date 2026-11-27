@@ -408,7 +408,7 @@ class CheckFixLockTests(_Project):
                 with check_lock.hold(self.root):
                     pass
         message = str(raised.exception)
-        self.assertIn("Another 'composer check --fix' is running", message)
+        self.assertIn("Another Composer operation is running for this project", message)
         self.assertIn(f"pid {os.getpid()}", message)
         self.assertIn("nothing was changed", message)
 

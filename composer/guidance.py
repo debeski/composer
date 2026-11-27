@@ -16,7 +16,9 @@ copy of the secrets outlives their rotation.
 
 from __future__ import annotations
 
+import os
 import re
+import select
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -32,6 +34,60 @@ _LIFECYCLE = {"fix:recreate", "fix:recreate-resident", "fix:remove-services", "f
 _START_SH = re.compile(r"'(\./start\.sh[^']*)'")
 _SERVICE_PROBLEM = re.compile(r"(?:^|; )([A-Za-z0-9_.-]+) (?:keeps restarting|is unhealthy)")
 _UNSAFE_VALUE = re.compile(r"[\r\n\"'#\\]")
+#: How long a question waits for an answer before it counts as skipped.
+QUESTION_TIMEOUT_ENV = "COMPOSER_QUESTION_TIMEOUT_SECONDS"
+DEFAULT_QUESTION_TIMEOUT = 600.0
+#: Words accepted for a one-letter answer.
+_ALIASES = {"yes": "y", "no": "n", "skip": SKIP}
+
+
+class QuestionTimeout(EOFError):
+    """Nobody answered in time: the terminal may be gone while its client still runs (R2-017)."""
+
+
+def question_timeout() -> float:
+    raw = os.environ.get(QUESTION_TIMEOUT_ENV, "").strip()
+    try:
+        value = float(raw) if raw else DEFAULT_QUESTION_TIMEOUT
+    except ValueError:
+        value = DEFAULT_QUESTION_TIMEOUT
+    return max(1.0, value)
+
+
+def timed_input(prompt: str = "", *, stdin=None, timeout: Optional[float] = None) -> str:
+    """``input()`` that gives up after ``question_timeout()`` seconds.
+
+    A terminal that goes away while ``docker run -t`` keeps running never sends
+    end of input, so a plain ``input()`` waited for good and held the operation
+    lock (R2-017, R2-078). Where stdin cannot be waited on (Windows consoles),
+    it is a plain ``input()``.
+    """
+    stream = sys.stdin if stdin is None else stdin
+    try:
+        fd = stream.fileno()
+        select.select([fd], [], [], 0)
+    except (AttributeError, ValueError, OSError, TypeError):
+        return input(prompt)
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    ready, _, _ = select.select([fd], [], [], question_timeout() if timeout is None else timeout)
+    if not ready:
+        raise QuestionTimeout()
+    line = stream.readline()
+    if not line:
+        raise EOFError()
+    return line.rstrip("\r\n")
+
+
+def _reader(reader):
+    return timed_input if reader is None or reader is input else reader
+
+
+def _gave_up(error: BaseException, out) -> None:
+    if isinstance(error, QuestionTimeout):
+        print(f"\n  No answer in {question_timeout():g}s: skipped, nothing changed.", file=out, flush=True)
+    else:
+        print("", file=out)
 
 
 def interactive(args, *, resident: bool = False, stdin=None) -> bool:
@@ -54,11 +110,13 @@ def ask(
     *,
     intro: Sequence[str] = (),
     skip: bool = True,
-    reader: Callable[[str], str] = input,
+    reader: Optional[Callable[[str], str]] = None,
     stream=None,
 ) -> Optional[str]:
-    """The key of the chosen option, ``default`` on Enter, None for a skip, end of input or three wrong answers."""
+    """The key of the chosen option, ``default`` on Enter, None for a skip, end of input, no answer
+    within ``question_timeout()`` or three wrong answers. ``yes``/``no`` answer ``y``/``n``."""
     out = stream or sys.stderr
+    reader = _reader(reader)
     keys = [key for key, _label in options]
     lines = ["", f"? {question}", *(f"  {line}" for line in intro)]
     lines += [f"  [{key}] {label}" for key, label in options]
@@ -68,11 +126,13 @@ def ask(
     for _attempt in range(3):
         try:
             answer = str(reader(f"  Choice [{default}]: ")).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("", file=out)
+        except (EOFError, KeyboardInterrupt) as error:
+            _gave_up(error, out)
             return None
         if not answer:
             return default
+        if answer not in keys and _ALIASES.get(answer) in keys + ([SKIP] if skip else []):
+            answer = _ALIASES[answer]
         if skip and answer == SKIP:
             return None
         if answer in keys:
@@ -81,14 +141,15 @@ def ask(
     return None
 
 
-def ask_text(prompt: str, check: Callable[[str], str], *, reader=input, stream=None) -> Optional[str]:
-    """A typed value that ``check`` accepts (it returns an error, or ``""``); None when left empty."""
+def ask_text(prompt: str, check: Callable[[str], str], *, reader=None, stream=None) -> Optional[str]:
+    """A typed value that ``check`` accepts (it returns an error, or ``""``); None when left empty or unanswered."""
     out = stream or sys.stderr
+    reader = _reader(reader)
     for _attempt in range(3):
         try:
             value = " ".join(str(reader(prompt)).split())
-        except (EOFError, KeyboardInterrupt):
-            print("", file=out)
+        except (EOFError, KeyboardInterrupt) as error:
+            _gave_up(error, out)
             return None
         if not value:
             return None
@@ -99,7 +160,7 @@ def ask_text(prompt: str, check: Callable[[str], str], *, reader=input, stream=N
     return None
 
 
-def ask_front_proxy(*, reader=input, stream=None) -> Optional[str]:
+def ask_front_proxy(*, reader=None, stream=None) -> Optional[str]:
     """The ``DLUX_FRONT_PROXY`` value for the operator's answer, or None when skipped."""
     from . import front_proxy
 
@@ -136,7 +197,7 @@ def ask_front_proxy(*, reader=input, stream=None) -> Optional[str]:
     return None
 
 
-def ask_update_policy(current: str, *, reader=input, stream=None) -> Optional[str]:
+def ask_update_policy(current: str, *, reader=None, stream=None) -> Optional[str]:
     """The ``DLUX_UPDATE_POLICY`` value for the operator's answer (default: the policy in force), or None."""
     from . import update_policy
 
@@ -158,7 +219,7 @@ def ask_update_policy(current: str, *, reader=input, stream=None) -> Optional[st
     return by_key.get(choice) if choice else None
 
 
-def ask_redis(*, reader=input, stream=None) -> bool:
+def ask_redis(*, reader=None, stream=None) -> bool:
     """True to switch Redis to snapshots (the default), False to keep its append-only file."""
     choice = ask(
         "Redis keeps an append-only file, which a hard stop can leave half-written. Switch it to snapshots?",

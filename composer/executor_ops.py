@@ -44,11 +44,32 @@ def _op_env(operation_id: str) -> dict:
     return env
 
 
+#: The start of the operation lock's refusal (``check_lock``), forwarded to the panel.
+_LOCK_REFUSAL = "Another Composer operation is running for this project"
+
+
 def _run(argv, env) -> Tuple[int, str]:
+    """Run a Composer child; its output still goes to this executor's log.
+
+    A failure's detail is the child's operation-lock refusal when it printed one,
+    so the panel shows who holds the lock instead of "executor operation failed"
+    (R2-078). Nothing else of the output is forwarded.
+    """
     try:
-        return subprocess.run(argv, env=env).returncode, ""
+        proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors="replace")
     except OSError as exc:
         return 127, f"Composer process could not start: {exc}"
+    detail = ""
+    with proc.stdout:
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            found = line.find(_LOCK_REFUSAL)
+            if found >= 0 and not detail:
+                detail = line[found:].strip()[:1500]
+    code = proc.wait()
+    return code, detail if code else ""
 
 
 def _restart_policy(env) -> Tuple[set, list]:

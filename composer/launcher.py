@@ -222,6 +222,56 @@ class DockerComposeLauncher(
             os.environ.pop(k, None)
         self.remove_runtime_compose_override()
 
+    def release_project_lock(self) -> None:
+        stack = getattr(self, "_lock_stack", None)
+        if stack is not None:
+            self._lock_stack = None
+            stack.close()
+
+    def lock_command(self) -> str:
+        """What this run is, as another run's lock refusal names it."""
+        if self.pin_resident is not None:
+            return "composer agent update"
+        if self.down_mode:
+            return f"composer {self.stop_command.lstrip('-')}"
+        if self.restart_mode:
+            return "composer restart"
+        if self.update_images:
+            return "composer update"
+        return "composer up (./start.sh)"
+
+    def take_project_lock(self) -> None:
+        """Hold the project's operation lock for the rest of this run, or exit naming its holder.
+
+        Deploys, updates, restarts, stops, `check --fix` and the Operations
+        applies share it (``check_lock``): two of them at once recreated the same
+        containers under each other (R2-016, R2-079). A pull changes no
+        container and does not take it.
+        """
+        from contextlib import ExitStack
+
+        from . import check_lock
+
+        if self.pull_only_mode:
+            return
+        stack = ExitStack()
+        try:
+            previous = stack.enter_context(check_lock.hold(".", command=self.lock_command()))
+        except check_lock.CheckFixLockError as exc:
+            stack.close()
+            self.write_status("failed", error=str(exc))
+            print(f"\n✖ {exc}", file=sys.stderr, flush=True)
+            sys.exit(1)
+        self._lock_stack = stack
+        if previous:
+            warnings = getattr(self, "deploy_warnings", None)
+            if warnings is None:
+                warnings = self.deploy_warnings = []
+            warnings.append(
+                f"The previous {check_lock.describe(previous)} was stopped before it finished, so it may have "
+                "left a service half-recreated. This run deploys every service again."
+            )
+
     def handle_interrupt(self):
         if self.last_render_line_count or self.last_progress_text:
             print("\r\033[2K", end="")
@@ -937,6 +987,7 @@ class DockerComposeLauncher(
                     self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
                     self.exclude_services = parse_service_list(os.environ.get("COMPOSER_EXCLUDE_SERVICES"))
 
+            self.take_project_lock()
             self.extract_config()
             if self.dev_mode:
                 # Dev mode always runs with debug on, regardless of the
@@ -1172,4 +1223,7 @@ class DockerComposeLauncher(
             self.handle_interrupt()
             raise SystemExit(130)
         finally:
-            self.cleanup()
+            try:
+                self.cleanup()
+            finally:
+                self.release_project_lock()
