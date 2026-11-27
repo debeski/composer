@@ -151,4 +151,64 @@ cleanup_agent_lifecycle
 trap - EXIT
 echo "    agent lifecycle: update, restart, and off target composer-agent only"
 
+# 7. `./start.sh update self` through the real wrapper, without COMPOSER_SELF_IMAGE,
+# which skips the pin step (how the 1.11.0b1 live proof missed that its launcher
+# refused wrapper 7's `update self --pin`). A shim in front of docker serves this
+# image as the channel tag and never pulls. Resolving the pin may need GitHub and
+# the registry, so the run need not end in a pin, but the launcher must take the
+# command: no usage line and no exit 2 from the pin step.
+wrapper_project="$(mktemp -d "${TMPDIR:-/tmp}/composer-smoke-wrapper.XXXXXX")"
+wrapper_shim="$(mktemp -d "${TMPDIR:-/tmp}/composer-smoke-shim.XXXXXX")"
+cp start.sh "$wrapper_project/start.sh"
+cat > "$wrapper_shim/docker" <<'SHIM'
+#!/usr/bin/env bash
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    debeski/composer:latest|debeski/composer:beta) args+=("$SMOKE_IMAGE") ;;
+    *) args+=("$arg") ;;
+  esac
+done
+[ "${args[0]}" = pull ] && exit 0
+if [ "${args[0]}" = run ] && [[ " ${args[*]} " == *" update self --pin "* ]]; then
+  status=0
+  "$SMOKE_REAL_DOCKER" "${args[@]}" || status=$?
+  echo "$status" > "$SMOKE_PIN_STATUS"
+  exit "$status"
+fi
+exec "$SMOKE_REAL_DOCKER" "${args[@]}"
+SHIM
+chmod +x "$wrapper_shim/docker"
+wrapper_status=0
+wrapper_output="$(
+  env -u COMPOSER_SELF_IMAGE \
+    PATH="$wrapper_shim:$PATH" \
+    SMOKE_IMAGE="$IMAGE" \
+    SMOKE_REAL_DOCKER="$(command -v docker)" \
+    SMOKE_PIN_STATUS="$wrapper_shim/pin-status" \
+    bash "$wrapper_project/start.sh" update self 2>&1
+)" || wrapper_status=$?
+if echo "$wrapper_output" | grep -q "Usage: composer update self"; then
+  echo "$wrapper_output"
+  echo "::error::the launcher refused wrapper 7's 'update self --pin' with its usage line"
+  exit 1
+fi
+[ -s "$wrapper_shim/pin-status" ] || {
+  echo "$wrapper_output"
+  echo "::error::'./start.sh update self' never ran the pin step (is the image-pin label missing?)"
+  exit 1
+}
+pin_status="$(cat "$wrapper_shim/pin-status")"
+[ "$pin_status" != 2 ] || {
+  echo "$wrapper_output"
+  echo "::error::'update self --pin' exited 2 (usage error)"
+  exit 1
+}
+if [ "$wrapper_status" -eq 0 ]; then
+  echo "    update self: the real wrapper path pins or keeps the deployer (exit 0)"
+else
+  echo "$wrapper_output" | tail -3
+  echo "    update self: the launcher took 'update self --pin' (pin step exit $pin_status, no signed release reachable)"
+fi
+
 echo "==> All runtime smoke tests passed"

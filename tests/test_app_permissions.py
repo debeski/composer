@@ -366,6 +366,9 @@ class FakeLauncher:
         self.build_images = False
         self.commands = []
         self.compose = []
+        self.events = []
+        self.volumes_exist = True
+        self.create_ok = True
         self.last_runtime_diagnostic = ""
 
     def compose_config_json(self):
@@ -373,6 +376,10 @@ class FakeLauncher:
 
     def run_docker_compose(self, args, timeout=None):
         self.compose.append(list(args))
+        self.events.append(["compose", *args])
+        if args[:2] == ["up", "--no-start"]:
+            self.volumes_exist = self.volumes_exist or self.create_ok
+            return (True, "", "") if self.create_ok else (False, "", "volume driver refused")
         if args[0] == "pull" and self.pull_ok:
             self.local, self.user = True, self.pulled_user
             return True, "", ""
@@ -383,12 +390,13 @@ class FakeLauncher:
 
     def run_command(self, argv, timeout=None, env=None):
         self.commands.append(argv)
+        self.events.append(list(argv))
         if argv[:3] == ["docker", "image", "inspect"]:
             if not self.local:
                 return False, "", "No such image"
             return True, self.user + "\n", ""
         if argv[:3] == ["docker", "volume", "inspect"]:
-            return True, "[]", ""
+            return (True, "[]", "") if self.volumes_exist else (False, "", "no such volume")
         if argv[:2] == ["docker", "inspect"]:
             return True, "sha256:self\n", ""
         if argv[:2] == ["docker", "run"]:
@@ -435,6 +443,50 @@ class RunTests(unittest.TestCase):
 
         self.assertTrue(ready)
         self.assertIn("granted group access to 2 entries", note)
+
+    def test_a_fresh_install_has_compose_create_the_volumes_before_the_grant(self):
+        # A plain USER 10001:0 image on empty volumes exited 78 at its first start:
+        # the scan skipped static and dlux_runtime, which `up` then created from the
+        # image's root 0755 mount points.
+        def answer(action):
+            if action == "scan":
+                return [{"label": "volume static", "wrong": 1}]
+            return [{"label": "volume static", "wrong": 1, "changed": 1}]
+
+        launcher = FakeLauncher(self.project, answer)
+        launcher.volumes_exist = False
+        os.mkdir(os.path.join(self.project, "scanlink_releases"))
+        with patch("os.getcwd", return_value=self.project):
+            ready, note = ap.ensure_for_image(launcher, "debeski/archive:latest")
+
+        self.assertTrue(ready, note)
+        self.assertIn("granted group access to 1 entries", note)
+        create = launcher.events.index(["compose", "up", "--no-start", "--no-deps", "--no-recreate",
+                                        "ocr", "web", "worker"])
+        walks = [i for i, event in enumerate(launcher.events) if event[:2] == ["docker", "run"]]
+        self.assertTrue(walks and create < walks[0], launcher.events)
+        scan = launcher.events[walks[0]]
+        self.assertTrue(any(arg.startswith("type=volume,source=testbed-archive_static,") for arg in scan), scan)
+        self.assertTrue(any("source=custom_runtime" in arg for arg in scan), scan)
+        self.assertFalse(any(event[:2] == ["compose", "up"] and "--no-start" not in event for event in launcher.events))
+
+    def test_volumes_that_cannot_be_created_refuse_before_anything_starts(self):
+        launcher = FakeLauncher(self.project, lambda action: [])
+        launcher.volumes_exist, launcher.create_ok = False, False
+        with patch("os.getcwd", return_value=self.project):
+            ready, note = ap.ensure_for_image(launcher, "debeski/archive:latest")
+
+        self.assertFalse(ready)
+        self.assertIn("volume static", note)
+        self.assertIn("volume driver refused", note)
+        self.assertFalse(any(event[:2] == ["docker", "run"] for event in launcher.events))
+
+    def test_existing_volumes_create_nothing(self):
+        launcher = FakeLauncher(self.project, lambda action: [{"label": "./media", "wrong": 0}])
+        os.mkdir(os.path.join(self.project, "scanlink_releases"))
+        with patch("os.getcwd", return_value=self.project):
+            ap.ensure_for_image(launcher, "debeski/archive:latest")
+        self.assertFalse(any(args[:1] == ["up"] for args in launcher.compose), launcher.compose)
 
     def test_a_failed_grant_refuses(self):
         def answer(action):

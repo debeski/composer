@@ -522,9 +522,11 @@ def run(
 ) -> dict:
     """Scan, grant or revert app-data access for this stack; returns the summary.
 
-    Missing named volumes are left alone (Docker creates them on ``up``, from
-    the image). A missing bind directory is reported by a scan and created by a
-    grant, which then makes it usable to the app.
+    Missing named volumes are left alone here: ``ensure_for_image`` has Compose
+    create them before a start, and a ``docker run`` mount would create one
+    without Compose's labels or the image's content. A missing bind directory is
+    reported by a scan and created by a grant, which then makes it usable to the
+    app.
     """
     from .dlux_runtime_access import self_image
 
@@ -641,12 +643,50 @@ def fetch_app_image(launcher, config: dict, image: str) -> Tuple[str, Optional[i
     return kind, uid, gid, detail if kind == "unknown" else ""
 
 
+#: Seconds Compose may take to create the app services' containers and volumes.
+CREATE_TIMEOUT = 900
+
+
+def missing_app_volumes(launcher, config: dict, project_dir: Optional[str] = None) -> List[str]:
+    """The named volumes an app service mounts that Docker has not created yet."""
+    project = os.path.abspath(project_dir or os.getcwd())
+    return [
+        target.label for target in discover_targets(config, project)
+        if target.kind == "volume" and not _volume_exists(launcher.run_command, target.source)
+    ]
+
+
+def create_app_volumes(launcher, config: dict) -> Tuple[bool, str]:
+    """Have Compose create the app services' containers, and with them their missing volumes.
+
+    Docker fills a new named volume from the image's mount point when the first
+    container that mounts it is created, and gives the volume's root that mount
+    point's owner and mode. A plain ``USER 10001:0`` image has root 0755 mount
+    points, so a volume first created by ``up`` refuses the app at its first
+    start. Creating the app services' containers first (``up --no-start
+    --no-deps --no-recreate``: nothing starts, no other service is created, and a
+    container that exists is left as it is, so a running stack keeps serving if
+    the grant then fails) lets Docker do that fill, with Compose's own labels on
+    the volumes, before the grant; ``up`` then starts these same containers.
+    ``(ok, detail)``.
+    """
+    services = app_services(config)
+    if not services:
+        return True, ""
+    ok, out, err = launcher.run_docker_compose(
+        ["up", "--no-start", "--no-deps", "--no-recreate", *services], timeout=CREATE_TIMEOUT,
+    )
+    return ok, "" if ok else (err or out or "").strip()[-1500:]
+
+
 def ensure_for_image(launcher, image: str, config: Optional[dict] = None) -> Tuple[bool, str]:
     """Before ``up``: grant the image's non-root uid what it needs, or refuse.
 
     A root image needs nothing. An image that is not on the host yet is pulled
     (or built) first, so the uid is read from the image ``up`` will run; when it
-    still cannot be read, nothing is recreated.
+    still cannot be read, nothing is recreated. On a fresh install the app's
+    named volumes do not exist yet: Compose creates them (``create_app_volumes``)
+    before the grant, so the grant reaches what the app will mount.
     """
     if config is None:
         config = launcher.compose_config_json() or {}
@@ -664,6 +704,15 @@ def ensure_for_image(launcher, image: str, config: Optional[dict] = None) -> Tup
             f"{image} runs as a named user, so Composer cannot tell which uid needs access to "
             "the app's data. Use a numeric USER uid:gid in the Dockerfile (DjangoLux images use 10001:0)."
         )
+    missing = missing_app_volumes(launcher, config)
+    if missing:
+        created, detail = create_app_volumes(launcher, config)
+        if not created:
+            return False, (
+                f"Could not create {', '.join(missing)} for uid {uid} (gid {gid}) to be granted access "
+                "before the first start, so nothing was started."
+                + (f"\n{detail}" if detail else "")
+            )
     try:
         scan = run(launcher, "scan", uid=uid, gid=gid)
         if not totals(scan)["wrong"] and not scan["missing"]:

@@ -1,10 +1,33 @@
 import json
+import re
 from typing import Dict, List, Optional
 
 from .agent_protocol import redact_text
 
 from .constants import ANSI_ESCAPE_RE, ERROR_KEYWORDS, PROGRESS_KEYWORDS
 from .session import terminal_detached
+
+#: Terminal control sequences: OSC (titles, links), CSI (colours, ``ESC[2K``
+#: line erases, cursor moves, 7- and 8-bit), the other ESC sequences, and a
+#: stray ESC.
+_TERMINAL_SEQUENCE_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"
+    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    r"|\x1b(?:[@-Z\\-_]|[ -/]*[0-~])?"
+)
+#: Control characters left after that, except tab and newline.
+_CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def strip_terminal_controls(text) -> str:
+    """``text`` as plain text for a page: no escape sequences, no control characters.
+
+    A carriage return ends a line (a progress line redrawn in place becomes one
+    line per redraw), so what a terminal would have shown is still there.
+    """
+    plain = _TERMINAL_SEQUENCE_RE.sub("", str(text or ""))
+    plain = plain.replace("\r\n", "\n").replace("\r", "\n")
+    return _CONTROL_CHARACTER_RE.sub("", plain)
 
 
 class OutputUtilsMixin:

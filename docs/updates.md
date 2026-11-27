@@ -117,6 +117,13 @@ the resident `composer-agent` + `composer-executor` pair inside the stack.
 - Plain `./start.sh update` does both: the deployer first, then the stack, and the
   pair when its block names a pin ([image updates](#image-updates)).
 
+A stack pinned at 1.11.0b1 moves on with `./start.sh agent update`, not
+`./start.sh update self`. Wrapper 7 resolves the pin with the deployer the lock
+names, and 1.11.0b1's own launcher refuses the `update self --pin` that wrapper 7
+passes it, so its `update self` fails on every run. `agent update` pins the
+channel's newer release into `.composer-image` and the block and recreates the
+pair; from then on the wrapper runs that release, and `update self` works.
+
 `composer check` reports drift between the deployer, the wrappers and the pair
 ([`versions`](check.md#versions), [`composer-channel`](check.md#composer-channel),
 [wrappers](check.md#wrapperstartsh-wrapperstartps1)).
@@ -144,7 +151,7 @@ registry, so whoever can push to Docker Hub cannot change what a deployment runs
 4. It writes the result to `.composer-image` beside `.composer-channel`, and
    rewrites the generated block's `debeski/composer` lines to the same reference.
    The Compose edit is validated first and the original is kept under
-   `.xclude/composer-check/`.
+   `.xclude/dlux-agent-bootstrap/<UTC>/`.
 5. The wrapper then pulls that digest. A pull by digest is checked against the
    content, so the registry cannot substitute another image.
 
@@ -182,10 +189,32 @@ as the same switch. The output says `UNVERIFIED`. No flag accepts a signature,
 identity or statement that fails to match. A mirror is pinned with an explicit
 `COMPOSER_SELF_IMAGE=…@sha256:…`, which is never resolved over.
 
-**Releases before signing.** Releases before 1.11.0b1 have no statement. Updating
-away from them needs nothing from them. Switching to one (for example
-`check --stable` while the stable channel's newest is 1.10.4) is refused with that
-reason, unless `--allow-unverified-composer` pins its registry digest.
+**Releases before signing.** Releases before 1.11.0b1 have no statement, no
+`org.dlux.composer.image-pin` label, and cannot run a pinned stack: they cannot read
+a digest-pinned block, and their `update self` never moves the pin, so a lock naming
+one keeps the wrapper on it for good. Composer never pins one, verified or not: a
+switch or an `--allow-downgrade` to one (for example `check --stable` while the
+stable channel's newest is 1.10.4) is refused before anything changes, with or
+without `--allow-unverified-composer`. Stay on the beta channel until the stable
+channel publishes 1.11.0 or later, then run `check --stable`. Updating away from
+such a release needs nothing from it.
+
+A stack that 1.11.0b1 did pin to one (`check --stable --allow-unverified-composer`
+while stable was 1.10.4) runs that release as its deployer, which cannot get it out.
+Run the switch with a deployer that can, once:
+
+```bash
+docker pull debeski/composer:beta
+COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y
+```
+
+The wrapper runs the image `COMPOSER_SELF_IMAGE` names instead of the lock (and does
+not pull one it already has, hence the pull), trusting the beta tag once as a first
+pin does. That deployer verifies the beta channel's
+signed release, writes it to `.composer-image` and `.composer-channel`, rewrites the
+block and recreates the pair. Plain `./start.sh` commands then run the new pin.
+`check` reports the trapped state under [`composer-channel`](check.md#composer-channel)
+when a newer Composer reads it (the Operations panel, or `COMPOSER_SELF_IMAGE`).
 
 **First pin.** A deployment with no `.composer-image` runs its channel tag. Each
 `update self`, `./start.sh update`, `agent update` or channel switch trusts that tag
@@ -449,7 +478,10 @@ anything else in the block and anything outside the markers is untouched.
 
 Both flags are confirmation-gated (`-y` honoured), mutually exclusive, and dry-run
 first: the pin and the channel file are written only after the Compose edit
-validates. Plain `composer check` reports drift between the halves without changing
+validates. A switch that changed the block then recreates `composer-agent` and
+`composer-executor` on the new pin and waits for them, as `check --fix` does
+([lifecycle](check.md#after-the-repairs)); `--no-recreate` leaves them, recorded as
+[`pending-recreate`](check.md#pending-recreate) until `./start.sh` recreates them. Plain `composer check` reports drift between the halves without changing
 anything, and `check --fix` preserves the channel and pins the block to the existing
 lock. An explicit `COMPOSER_SELF_IMAGE` pin always wins over both: an operator who
 pinned an image asked for that image.

@@ -13,6 +13,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
@@ -319,6 +320,23 @@ class PinBlockTests(unittest.TestCase):
         self.assertEqual(again["files"], [], "a pinned block is already what the pin wants")
         self.assertFalse(again["lock_changed"])
 
+    def test_a_release_before_pinning_never_reaches_the_lock_or_the_block(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply), self.assertRaises(agent_installer.AgentInstallError) as caught:
+                agent_installer.pin_composer_image(
+                    str(self.project), pin=image_pin.Pin("1.10.4", DIGEST_A, verified=False), apply=apply,
+                    command_runner=lambda *a, **k: self.fail("validated"),
+                )
+            self.assertIn("cannot run a pinned stack", str(caught.exception))
+        with self.assertRaises(agent_installer.AgentInstallError):
+            agent_installer.switch_composer_channel(
+                str(self.project), channel="stable", apply=True, pin=image_pin.Pin("1.10.4", DIGEST_A),
+                command_runner=lambda *a, **k: self.fail("validated"),
+            )
+        self.assertIsNone(image_pin.read_lock(self.project))
+        self.assertEqual(channel_config.read_channel(self.project), "stable")
+        self.assertEqual((self.project / "compose.yml").read_text(encoding="utf-8"), BLOCK)
+
     def test_a_project_without_compose_gets_the_lock_only(self):
         (self.project / "compose.yml").unlink()
         outcome = self._pin(apply=True)
@@ -367,9 +385,43 @@ class CheckupPinTests(unittest.TestCase):
         os.environ.pop("COMPOSER_SELF_IMAGE", None)
         self.launcher = DockerComposeLauncher()
         self.launcher.compose_file = None
+        self.running = {}
+        # No Docker: what runs is given per test.
+        for name, value in (("_resident_running_images", None), ("compose_config_json", {}), ("_container_states", [])):
+            stub = (patch.object(self.launcher, name, side_effect=lambda: dict(self.running), create=True)
+                    if value is None else patch.object(self.launcher, name, return_value=value))
+            stub.start()
+            self.addCleanup(stub.stop)
 
     def _finding(self):
         return self.launcher._check_composer_channel()
+
+    def _pin_block(self, pin):
+        with patch("composer.agent_installer.shutil.which", return_value="/usr/bin/docker"):
+            agent_installer.pin_composer_image(str(self.project), pin=pin, apply=True, command_runner=_compose_ok)
+
+    def test_a_pair_still_running_the_old_image_warns(self):
+        # O4: the block and the lock named the new pin, `check` said OK, and the pair ran the old image.
+        pin = image_pin.Pin("1.11.0", DIGEST_A)
+        self._pin_block(pin)
+        self.running = {"composer-agent": pin.ref, "composer-executor": "debeski/composer:latest"}
+        result = self._finding()
+        self.assertEqual(result["level"], "warn", result)
+        self.assertIn("composer-executor still runs debeski/composer:latest", result["message"])
+        self.assertIn("./start.sh", result["fix"])
+        self.running = {"composer-agent": pin.ref, "composer-executor": pin.ref}
+        self.assertEqual(self._finding()["level"], "ok")
+
+    def test_a_lock_from_before_pinning_warns_with_the_way_out(self):
+        pin = image_pin.Pin("1.10.4", DIGEST_A, verified=False)
+        image_pin.write_lock(pin, self.project)
+        result = self._finding()
+        self.assertEqual(result["level"], "warn", result)
+        self.assertIn("predates digest pinning", result["message"])
+        self.assertIn("COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y", result["fix"])
+        fixed = self.launcher._fix_composer_pin(SimpleNamespace(file=None, yes=True))
+        self.assertEqual([f["level"] for f in fixed], ["warn"], fixed)
+        self.assertEqual((self.project / "compose.yml").read_text(encoding="utf-8"), BLOCK)
 
     def test_a_fresh_unpinned_project_is_ok(self):
         # The state `dlux startproject` writes: the scaffold alignment gate needs it clean.
@@ -426,6 +478,50 @@ class CheckupPinTests(unittest.TestCase):
         self.assertEqual(channel_config.read_channel(self.project), "beta")
         self.assertEqual(agent_installer.composer_images_in_block(
             (self.project / "compose.yml").read_text(encoding="utf-8")), [pinned, pinned])
+
+    def test_a_switch_to_a_release_before_signing_refuses_with_the_way_out(self):
+        # F2 + O6: stable advertised 1.10.4; the unverified escape pinned it and trapped the stack.
+        with patch("composer.image_pin.channel_version", return_value="1.10.4"), \
+             patch("composer.image_pin.verified_pin", side_effect=AssertionError("fetched")), \
+             patch("composer.registry.tag_digest", side_effect=AssertionError("pinned the registry digest")):
+            outcome = self.launcher._switch_channel(
+                SimpleNamespace(file=None, yes=True, allow_unverified_composer=True), "stable")
+        self.assertEqual(outcome[0]["level"], "fail", outcome)
+        self.assertIn("cannot run a pinned stack", outcome[0]["message"])
+        self.assertIn("Stay on the beta channel", outcome[0]["fix"])
+        self.assertNotIn("--allow-unverified-composer to pin", outcome[0]["fix"])
+        self.assertIsNone(image_pin.read_lock(self.project))
+        self.assertEqual((self.project / "compose.yml").read_text(encoding="utf-8"), BLOCK)
+
+    def test_a_channel_switch_recreates_the_pair_on_the_new_pin(self):
+        # O4: `check --beta` / `--stable` retagged the block and wrote the lock, and left the pair running.
+        def model():
+            images = agent_installer.composer_images_in_block(
+                (self.project / "compose.yml").read_text(encoding="utf-8"))
+            return {"name": "demo", "services": {
+                "composer-agent": {"image": images[0]}, "composer-executor": {"image": images[1]},
+                "web": {"image": "demo:latest"},
+            }}
+
+        rows = [{"service": name, "name": f"demo-{name}-1", "id": f"id-{name}", "state": "running",
+                 "health": "", "restarts": 0, "started_at": ""} for name in ("composer-agent", "composer-executor", "web")]
+        recreate = unittest.mock.Mock(return_value=(True, "", ""))
+        resolution = image_pin.Resolution(pin=image_pin.Pin("1.11.0b2", DIGEST_A), current=None, changed=True)
+        with patch("composer.image_pin.resolve", return_value=resolution), \
+             patch("composer.agent_installer.shutil.which", return_value="/usr/bin/docker"), \
+             patch("composer.agent_installer.switch_composer_channel",
+                   functools.partial(agent_installer.switch_composer_channel, command_runner=_compose_ok)), \
+             patch.object(self.launcher, "compose_config_json", side_effect=model), \
+             patch.object(self.launcher, "_container_states", return_value=rows), \
+             patch.object(self.launcher, "resolve_secrets", return_value=(True, "")), \
+             patch.object(self.launcher, "recreate_containers", recreate), \
+             patch.object(self.launcher, "_wait_healthy", return_value=(True, "")), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            outcome = self.launcher._switch_channel(
+                SimpleNamespace(file=None, yes=True, no_recreate=False, resident_apply=False), "beta")
+        self.assertEqual(outcome[0]["level"], "ok", outcome)
+        self.assertEqual([call.args[0] for call in recreate.call_args_list], [["composer-executor", "composer-agent"]])
+        self.assertIn("fix:recreate-resident", [entry["name"] for entry in outcome])
 
     def test_a_channel_switch_that_cannot_be_verified_changes_nothing(self):
         with patch("composer.image_pin.resolve", side_effect=image_pin.PinError("bad signature")):
@@ -561,7 +657,24 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaises(image_pin.PinError) as caught:
             self._resolve("1.10.4", allow_downgrade=True, pin_reader=lambda v: self.fail("fetched"))
         self.assertIn("predates signed releases", str(caught.exception))
-        self.assertTrue(caught.exception.unavailable, "the escape may pin its registry digest")
+        self.assertFalse(caught.exception.unavailable, "no flag may pin it")
+        self.assertIn("Stay on the beta channel", caught.exception.way_out)
+
+    def test_a_release_before_signing_is_never_pinned_even_unverified(self):
+        # F2 (1.11.0b1 beta channel, H6): `check --stable --allow-unverified-composer`
+        # pinned 1.10.4, which cannot read a pinned block or move the pin again.
+        with self.assertRaises(image_pin.PinError) as caught:
+            self._resolve("1.10.4", allow_downgrade=True, allow_unverified=True,
+                          pin_reader=lambda v: self.fail("fetched"),
+                          digest_reader=lambda ref: self.fail("pinned the registry digest"))
+        self.assertIn("--allow-unverified-composer included", str(caught.exception))
+        self.assertIn("check --stable", str(caught.exception))
+
+    def test_moving_away_from_a_lock_before_signing_is_an_ordinary_update(self):
+        resolution, fetched = self._resolve("1.11.0b2", current=image_pin.Pin("1.10.4", DIGEST_B),
+                                            running="1.10.4")
+        self.assertTrue(resolution.changed)
+        self.assertEqual(fetched, ["1.11.0b2"])
 
     def test_update_pin_changes_nothing_when_there_is_nothing_to_update(self):
         with tempfile.TemporaryDirectory() as holder:

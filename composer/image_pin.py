@@ -75,11 +75,16 @@ DIGEST_RE = re.compile(rf"^{_DIGEST}$")
 
 
 class PinError(RuntimeError):
-    """A pin could not be resolved. ``unavailable`` marks a reachability problem."""
+    """A pin could not be resolved. ``unavailable`` marks a reachability problem.
 
-    def __init__(self, message: str, *, unavailable: bool = False):
+    ``way_out`` says what to do instead, when the refusal is not one a retry or
+    `--allow-unverified-composer` can change.
+    """
+
+    def __init__(self, message: str, *, unavailable: bool = False, way_out: str = ""):
         super().__init__(message)
         self.unavailable = unavailable
+        self.way_out = way_out
 
 
 @dataclass(frozen=True)
@@ -278,11 +283,32 @@ class Resolution:
 
 
 #: The first release whose GitHub Release carries a signed digest statement.
+#: It is also the first that can run a pinned stack: an older one has no
+#: ``org.dlux.composer.image-pin`` label, cannot read a digest-pinned block and
+#: never moves a pin, so the wrapper would run it from the lock for good.
 SIGNED_SINCE = "1.11.0b1"
 
 
 def predates_signing(version: str) -> bool:
     return versions.parse(version) < versions.parse(SIGNED_SINCE)
+
+
+#: What to do instead of pinning a release from before `SIGNED_SINCE`.
+PREDATES_PINNING_WAY_OUT = (
+    "Stay on the beta channel until the stable channel publishes Composer 1.11.0 or later, then run "
+    "'./start.sh check --stable'."
+)
+
+
+def predates_pinning_refusal(version: str, channel: str = "") -> str:
+    """Why ``version`` is never pinned, and what to do instead."""
+    where = f"the {channel} channel's newest release, " if channel else ""
+    return (
+        f"Composer {version} ({where}from before {SIGNED_SINCE}) cannot run a pinned stack: it predates "
+        "signed releases and digest pinning, so it can neither read the pinned Composer block nor move "
+        "the pin again, and the wrapper would keep running it from .composer-image. No flag pins it, "
+        f"--allow-unverified-composer included. {PREDATES_PINNING_WAY_OUT}"
+    )
 
 
 def channel_version(channel: str, *, label_reader=None, strict: bool = True) -> str:
@@ -363,8 +389,9 @@ def resolve(
     - **An unreadable channel:** nothing changes, except for an explicit move,
       which fails.
 
-    A release before `SIGNED_SINCE` has no statement. Pinning it needs the
-    escape, and only an explicit move can ask for an older release.
+    A release before `SIGNED_SINCE` is never pinned, verified or not: it
+    cannot run a pinned stack (`predates_pinning_refusal`). Moving away from a
+    lock that names one is an ordinary update.
     """
     try:
         version = channel_version(channel, label_reader=label_reader)
@@ -385,18 +412,16 @@ def resolve(
         return _keep(current, note)
     required = allow_downgrade or order is None or order > 0
     if predates_signing(version):
-        failure = PinError(
-            f"Composer {version} predates signed releases (the first is {SIGNED_SINCE}), so it has no "
-            "digest statement to verify.",
-            unavailable=True,
-        )
+        refusal = predates_pinning_refusal(version, channel)
+        if required:
+            raise PinError(refusal, way_out=PREDATES_PINNING_WAY_OUT)
+        return _keep(current, f"{refusal} Nothing changed.")
+    try:
+        pin = (pin_reader or verified_pin)(version)
+    except PinError as exc:
+        failure = exc
     else:
-        try:
-            pin = (pin_reader or verified_pin)(version)
-        except PinError as exc:
-            failure = exc
-        else:
-            return Resolution(pin=pin, current=current, changed=_moved(pin, current))
+        return Resolution(pin=pin, current=current, changed=_moved(pin, current))
     if failure.unavailable and allow_unverified:
         pin = _unverified_pin(version, digest_reader=digest_reader)
         return Resolution(pin=pin, current=current, changed=_moved(pin, current), note=(

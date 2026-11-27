@@ -8,7 +8,7 @@ reads wrongly, and nothing undoes that. The break-it run (2026-11-25, finding
 database.
 
 The guard runs before every ``up`` and compares the target app image with the
-newest release this deployment has run:
+newest image this deployment has deployed:
 
 - the images of the app containers that have started, which are what last ran
   the migrator (even when they failed their health check afterwards); one that
@@ -25,7 +25,13 @@ newest release this deployment has run:
 Versions come from image labels DjangoLux project images already carry: the
 baked DjangoLux version (``org.<project>.dlux_baked_version``) and the app
 version in the project release manifest (``org.dlux.project.release-manifest``,
-falling back to ``org.opencontainers.image.version``). A dimension either side
+falling back to ``org.opencontainers.image.version``). So the record's ``dlux``
+is the newest *baked* DjangoLux deployed, not the release that runs: an inline
+update activates a newer release on the runtime volume without a deploy, and the
+record keeps the image's version. That is enough. DjangoLux's supervisor serves
+a volume release only while it is newer than the baked package, so an image
+baked older than the active release still runs the active release, and the
+floor check below refuses an image that release cannot run on. A dimension either side
 does not label is not compared; a target that labels neither while the
 recorded release did is refused, since nothing shows it is not older.
 

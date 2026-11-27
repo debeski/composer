@@ -23,6 +23,7 @@ from .cli import (
     parse_update_args,
     parse_update_self_args,
     parse_watch_args,
+    update_self_options,
 )
 from .checkup import CheckupMixin
 from .config import ConfigMixin
@@ -107,13 +108,17 @@ def _normalize_leading_global_options(argv: List[str]) -> List[str]:
     return rest[:1] + leading + rest[1:]
 
 
-def _update_self_help_args(argv: List[str]) -> Optional[List[str]]:
-    """The -h/--help among `update ... self` arguments, or None if they name more.
+def _update_self_args(argv: List[str]) -> Optional[List[str]]:
+    """The arguments `update self` takes among `update ... self`, or None if they name more.
 
-    Global -f/-d options may sit anywhere, since leading ones are moved behind
-    the command. A deployer pull has no Compose file to scope, so they drop.
+    Its own options (``--pin``, which wrapper 7 passes, ``--allow-downgrade``,
+    ``--allow-unverified-composer``, ``-h``) pass through. Global -f/-d options
+    may sit anywhere, since leading ones are moved behind the command. A deployer
+    pull has no Compose file to scope, so they drop. A service name or an
+    update option means more than the deployer, so it is refused.
     """
-    help_args: List[str] = []
+    accepted = update_self_options()
+    kept: List[str] = []
     selves = 0
     index = 0
     while index < len(argv):
@@ -123,12 +128,12 @@ def _update_self_help_args(argv: List[str]) -> Optional[List[str]]:
             continue
         if token == "self":
             selves += 1
-        elif token in {"-h", "--help"}:
-            help_args.append(token)
+        elif token in accepted:
+            kept.append(token)
         elif token not in {"-d", "--dev"} and not token.startswith("--file="):
             return None
         index += 1
-    return help_args if selves == 1 else None
+    return kept if selves == 1 else None
 
 
 class DockerComposeLauncher(
@@ -760,18 +765,20 @@ class DockerComposeLauncher(
                 print("Note: 'self update' is deprecated; use 'composer update self'.", file=sys.stderr)
                 self.handle_update_self(argv[2:])
                 return
-            # Wrappers 5+ refresh the deployer themselves and never pass this
-            # on; an older wrapper does, and still gets the pull for its next run.
+            # Wrapper 7 resolves the pin with `update self --pin` from the
+            # deployer it runs; an older wrapper passes a bare `update self`
+            # and still gets the pull for its next run.
             if argv and argv[0] == "update" and "self" in argv[1:]:
-                help_args = _update_self_help_args(argv[1:])
-                if help_args is None:
+                self_args = _update_self_args(argv[1:])
+                if self_args is None:
                     print(
-                        "Usage: composer update self  (updates only the deployer; "
+                        "Usage: composer update self [--pin] [--allow-downgrade] "
+                        "[--allow-unverified-composer]  (updates only the deployer; "
                         "takes no services or update options)",
                         file=sys.stderr,
                     )
                     sys.exit(2)
-                self.handle_update_self(help_args)
+                self.handle_update_self(self_args)
                 return
             if argv and argv[0] == "run":
                 self.handle_run(argv[1:])

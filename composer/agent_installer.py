@@ -1624,6 +1624,14 @@ def retag_composer_image(contents: str, image: str) -> str:
     return contents[:start] + rewritten + contents[end:]
 
 
+def _refuse_unpinnable(pin) -> None:
+    """A release from before digest pinning never reaches the lock or the block."""
+    from . import image_pin
+
+    if image_pin.predates_signing(pin.version):
+        raise AgentInstallError(image_pin.predates_pinning_refusal(pin.version) + " The project is unchanged.")
+
+
 def switch_composer_channel(
     project_dir: str = ".",
     *,
@@ -1650,6 +1658,8 @@ def switch_composer_channel(
     from . import channel_config
 
     channel = channel_config.normalize_channel(channel)
+    if pin is not None:
+        _refuse_unpinnable(pin)
     # A verified pin (``image_pin.resolve``) replaces the moving tag; the lock is
     # written with the channel so the wrapper follows the same image.
     image = pin.ref if pin is not None else channel_config.image_for_channel(channel)
@@ -1698,6 +1708,7 @@ def pin_composer_image(
     """
     from . import image_pin
 
+    _refuse_unpinnable(pin)
     try:
         project_root, _selected, compose_path = _selected_compose_path(project_dir, compose_file)
     except AgentInstallError:

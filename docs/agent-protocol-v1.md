@@ -46,7 +46,11 @@ services; optional for `logs-tail`) and `logs-tail` a `lines` count (1–1000).
 | `logs-tail` | read-only | the last `lines` of one service's logs, or with no `service` the newest `lines` of every service merged in time order, each line with Compose's own `service-N \|` prefix, redacted and capped at 60000 characters |
 
 Findings and diffs are redacted and bounded (200 findings, 2000 characters each,
-20000 per diff) before publication, because DjangoLux renders them in a browser. A
+20000 per diff) before publication, because DjangoLux renders them in a browser.
+Every text a result carries (findings, repair notes and diffs, logs, the error) is
+plain text: terminal escape sequences (colours, the `ESC[2K` line erases of
+Composer's own progress output) and control characters other than tab and newline
+are removed, and a carriage return ends a line. A
 handler that raises, returns nothing usable, or cannot write its result is reported
 in the ack and never reaches the watch loop.
 

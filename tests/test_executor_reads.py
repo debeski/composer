@@ -125,6 +125,20 @@ class ExecutorHandlerTests(unittest.TestCase):
         self.assertIn("booting", result["logs"])
         self.assertNotIn("supersecret", result["logs"])
 
+    def test_logs_tail_is_plain_text(self):
+        # O3 (1.11.0b1 beta channel): the Logs view showed composer-executor's raw ESC[2K.
+        self.compose.logs = (
+            "\x1b[2K \x1b[1m🛡️  COMPOSER\x1b[0m · Orchestrator\r\n"
+            "\x1b[2K   [Compose] Container web Started\x1b[14F\x1b[2K\n\x1b]0;title\x07done\n"
+        )
+        result = self._handle("logs_tail", {"service": "web", "lines": 5})
+        self.assertEqual(result["state"], "succeeded")
+        self.assertNotIn("\x1b", result["logs"])
+        self.assertNotIn("\r", result["logs"])
+        self.assertIn("🛡️  COMPOSER · Orchestrator", result["logs"])
+        self.assertIn("[Compose] Container web Started", result["logs"])
+        self.assertIn("done", result["logs"])
+
     def test_a_container_swapped_during_the_read_is_read_again_once(self):
         # 1.11.0b1 live proof E3 (N-9): 2 of ~70 reads during an image update failed here.
         self.compose.logs_answers = [
@@ -211,6 +225,14 @@ class AgentReadsTests(unittest.TestCase):
         self.assertEqual(read.call_args.args, ("logs_tail", {"dev": False, "file": "", "service": "web", "lines": 50}))
         self.assertIn("hello", result["logs"])
         self.assertNotIn("supersecret", result["logs"])
+
+    def test_logs_from_an_older_executor_are_plain_text_too(self):
+        services = {"state": "succeeded", "services": [
+            {"name": "web", "state": "running", "health": "", "status": "", "restart_label": "safe"}]}
+        logs = {"state": "succeeded", "logs": "\x1b[2Kone\r\x1b[32mtwo\x1b[0m\n"}
+        with patch("composer.executor_client.read", side_effect=[services, logs]):
+            result = ops._tail_logs(_runtime(), {"service": "web", "lines": 50})
+        self.assertEqual(result["logs"].rstrip("\n"), "one\ntwo")
 
     def test_the_digest_probe_asks_the_executor_not_docker(self):
         digest = "sha256:" + "b" * 64
