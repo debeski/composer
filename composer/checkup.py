@@ -137,6 +137,38 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             fix="Fix the reported YAML/interpolation/network error; missing env vars are reported separately.",
         )
 
+    _PROJECT_NAME = re.compile(r"""^name:[ \t]*["']?([^"'#\s]+)""", re.MULTILINE)
+
+    def _check_project_name(self) -> Optional[Dict[str, Any]]:
+        """Do the active Compose files agree on the project's ``name:``? Compose takes the last one.
+
+        With ``-d``, a ``compose.dev.yml`` that keeps the scaffold's name starts a
+        second project beside the deployed one: its own containers, fresh volumes
+        and a second Docker-authority pair. None when they agree or name nothing.
+        """
+        names: Dict[str, str] = {}
+        for name in self.active_compose_files:
+            try:
+                match = self._PROJECT_NAME.search(Path(name).read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            if match:
+                names[name] = match.group(1)
+        if len(set(names.values())) <= 1:
+            return None
+        listed = "; ".join(f"{name} names it {value}" for name, value in names.items())
+        last = list(names.values())[-1]
+        return _result(
+            FAIL,
+            "project-name",
+            f"The active Compose files disagree on the project name ({listed}). Compose takes the last one, so "
+            f"this would run project {last}: a second stack with its own containers and fresh volumes beside "
+            "the deployed one.",
+            fix="Give every Compose file the same top-level name: (the deployed project's), or remove name: from "
+            "the override.",
+            manual="give every Compose file the same top-level name: by hand",
+        )
+
     def _compose_config_error(self) -> str:
         """Compose's own words for why the configuration does not resolve (its last lines)."""
         ok, out, err = self.run_docker_compose(["config", "--quiet"], timeout=30)
@@ -193,6 +225,18 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             resident = self._check_executor_secret_access(Path(path))
             if resident is not None and resident["level"] != OK:
                 return resident
+        if len(candidates) > 1:
+            shadowed = ", ".join(str(other) for other in candidates[1:])
+            return _result(
+                WARN,
+                "secrets",
+                f"{path} shadows {shadowed}: './start.sh' and Composer read only {path}, the first of .env, "
+                f"secrets/.env and .secrets/.env that exists, so {shadowed} is not used. A deploy then runs on "
+                "whatever it lacks from the Compose file's defaults.",
+                fix=f"Move {path} out of the project folder (into .xclude/, for example), or merge its keys into "
+                f"{candidates[-1]} first.",
+                manual=f"move {path} aside so {candidates[-1]} is read",
+            )
         loose = self._loose_secrets_mode(Path(path))
         if loose is not None:
             return loose
@@ -1829,7 +1873,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 return _result(
                     WARN,
                     "composer-channel",
-                    f"{note}, but the resident pair runs {', '.join(drifted)}.",
+                    f"{note}, but the generated block names {', '.join(drifted)}.{self._running_pair_note()}",
                     fix=f"Run 'composer check --{state['channel']}' to move both together.",
                 )
             return _result(
@@ -1842,7 +1886,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return _result(
                 WARN,
                 "composer-channel",
-                f"{note}, but the resident pair runs {', '.join(drifted)}.",
+                f"{note}, but the generated block names {', '.join(drifted)}.{self._running_pair_note()}",
                 fix="Run 'composer check --fix' to pin the resident pair to .composer-image.",
             )
         # The block names the pin; the containers keep the image they were created from.
@@ -1861,6 +1905,15 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "on the pinned image.",
             )
         return _result(OK, "composer-channel", f"{note}; resident pair pinned to Composer {lock.short}.")
+
+    def _running_pair_note(self) -> str:
+        """What the resident pair's containers run now, which the block does not say."""
+        running = self._resident_running_images()
+        if not running:
+            return " The resident pair is not running."
+        version = self._resident_agent_version()
+        shown = "; ".join(f"{service} runs {image}" for service, image in sorted(running.items()))
+        return f" Running now: {shown}" + (f" (Composer {version})." if version else ".")
 
     def _resident_running_images(self) -> Dict[str, str]:
         """``{service: image}``: the reference each running resident container was created from.
@@ -2064,6 +2117,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         results.extend(self._check_docker())
         results.append(self._check_compose_files())
         results.append(self._check_compose_parses())
+        project_name = self._check_project_name()
+        if project_name is not None:
+            results.append(project_name)
         results.append(self._check_secrets())
         results.extend(self._check_wrappers())
         results.append(self._check_composer_channel())
@@ -4317,9 +4373,15 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         now = now or datetime.now(timezone.utc)
         return (now - started).total_seconds() < cls.CRASH_LOOP_WINDOW_SECONDS
 
+    _ADDRESS = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?![\w.])")
+
     def _last_error_line(self, service: str) -> str:
+        """The last error line of the service's log, container addresses replaced by "<address>"."""
         ok, out, err = self.run_docker_compose(["logs", "--no-color", "--tail", "30", service], timeout=20)
-        lines = [line.split("|", 1)[-1].strip() for line in (out or err or "").splitlines() if line.strip()]
+        lines = [
+            self._ADDRESS.sub("<address>", line.split("|", 1)[-1].strip())
+            for line in (out or err or "").splitlines() if line.strip()
+        ]
         for line in reversed(lines):
             if "error" in line.lower() or "exception" in line.lower():
                 return line[:200]

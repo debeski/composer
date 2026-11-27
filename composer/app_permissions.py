@@ -802,6 +802,22 @@ def _project_containers(runner, project: str) -> List[Tuple[str, str]]:
     return rows
 
 
+def converge_app_containers(launcher, config: dict) -> Tuple[bool, str]:
+    """Create or recreate, without starting, the app containers ``up`` would create or recreate.
+
+    No ``--no-recreate`` and no ``--force-recreate``: Compose decides as ``up``
+    does (a changed definition or image), so a container that is current, and
+    running, is left as it is. ``(ok, detail)``.
+    """
+    services = app_services(config)
+    if not services:
+        return True, ""
+    ok, out, err = launcher.run_docker_compose(
+        ["up", "--no-start", "--no-deps", *services], timeout=CREATE_TIMEOUT,
+    )
+    return ok, "" if ok else (err or out or "").strip()[-1500:]
+
+
 def missing_app_containers(launcher, config: dict) -> List[str]:
     """The app services that have no container yet (all of them when Docker cannot say)."""
     services = app_services(config)
@@ -950,10 +966,15 @@ def ensure_for_image(launcher, image: str, config: Optional[dict] = None) -> Tup
     Docker refills an empty named volume from the image, and resets its root to
     the image's mount point, each time it creates a container that mounts it.
     So the app's containers are created first whenever one of them, or one of
-    its volumes, does not exist yet (``create_app_volumes``): ``up`` then only
-    starts them. A writable volume still empty after that gets ``KEEP_NAME``, so
-    no later create (an image update, a force-recreate, ``compose run``) undoes
-    the grant. App containers already looping on the refusal are restarted.
+    its volumes, does not exist yet (``create_app_volumes``). When a writable
+    volume is still empty after the grant, the containers ``up`` would recreate
+    (a changed definition or image) are recreated now, unstarted
+    (``converge_app_containers``), so Docker fills or resets the volume before
+    the grant runs again; that grant writes ``KEEP_NAME`` into each volume still
+    empty, so no later create (a force-recreate, ``compose run``) undoes it, and
+    no image content is held out of a volume Docker had not filled yet. ``up``
+    then only starts them. App containers already looping on the refusal are
+    restarted.
     """
     if config is None:
         config = launcher.compose_config_json() or {}
@@ -987,12 +1008,34 @@ def ensure_for_image(launcher, image: str, config: Optional[dict] = None) -> Tup
         empty = any(item.get("empty") for item in scan["targets"])
         if not totals(scan)["wrong"] and not scan["missing"] and not empty:
             return True, ""
-        summary = run(launcher, "apply", uid=uid, gid=gid, keep_empty=True)
+        summary = run(launcher, "apply", uid=uid, gid=gid) if totals(scan)["wrong"] or scan["missing"] else None
     except PermissionsError as exc:
         return False, f"Could not prepare the app's data for uid {uid} (gid {gid}): {exc}"
-    counts = totals(summary)
-    if counts["errors"] or not summary.get("ok", True):
+    if summary is not None and (totals(summary)["errors"] or not summary.get("ok", True)):
         return False, refusal(summary, uid, gid, "run ./start.sh again", outcome=", so nothing was recreated")
+    changed = totals(summary)["changed"] if summary is not None else 0
+    manifests = [summary["manifest"]] if summary is not None and summary.get("manifest") else []
+    if empty:
+        converged, detail = converge_app_containers(launcher, config)
+        if not converged:
+            return False, (
+                f"Could not create the app's containers for uid {uid} (gid {gid}) before the grant, so nothing "
+                "was started." + (f"\n{detail}" if detail else "")
+            )
+        try:
+            summary = run(launcher, "apply", uid=uid, gid=gid, keep_empty=True)
+        except PermissionsError as exc:
+            return False, f"Could not prepare the app's data for uid {uid} (gid {gid}): {exc}"
+        if totals(summary)["errors"] or not summary.get("ok", True):
+            return False, refusal(
+                summary, uid, gid, "run ./start.sh again",
+                outcome=" (its containers were created but not started)",
+            )
+        changed += totals(summary)["changed"]
+        if summary.get("manifest"):
+            manifests.append(summary["manifest"])
+    counts = dict(totals(summary), changed=changed)
+    summary = dict(summary, manifest=", ".join(manifests))
     restarted = restart_refused(launcher, config) if counts["changed"] else []
     if not counts["changed"] and not counts["kept"] and not counts["hardlinks"]:
         return True, ""

@@ -701,6 +701,10 @@ class ContainerFirstTests(unittest.TestCase):
         ready, note = self._ensure(launcher)
         self.assertTrue(ready)
         self.assertIn(ap.KEEP_NAME, note)
+        # What `up` would recreate is recreated, unstarted, before the file goes in.
+        converge = launcher.events.index(["compose", "up", "--no-start", "--no-deps", "ocr", "web", "worker"])
+        apply = next(i for i, e in enumerate(launcher.events) if e[:2] == ["docker", "run"] and "apply" in e)
+        self.assertLess(converge, apply)
         apply = next(c for c in launcher.commands if c[:2] == ["docker", "run"] and "apply" in c)
         spec = json.loads(apply[-1])
         static = next(t for t in spec["targets"] if t["label"] == "volume static")
@@ -708,6 +712,24 @@ class ContainerFirstTests(unittest.TestCase):
         runtime = next(t for t in spec["targets"] if t["label"] == "volume dlux_runtime")
         self.assertTrue(runtime["keep"])
         self.assertFalse(any(t.get("keep") for t in spec["targets"] if t["kind"] == "bind"))
+
+    def test_an_empty_volume_with_a_stale_container_grants_twice(self):
+        # C3-01 scenario D: web and worker exist on another definition, so `up` would
+        # recreate them onto the empty volumes and Docker would reset the granted roots.
+        launcher = FakeLauncher(self.project, lambda action: [
+            {"label": "volume static", "wrong": 1, "empty": True, "changed": int(action == "apply"),
+             "kept": int(action == "apply" and "keep" in launcher.commands[-1][-1])}])
+        ready, note = self._ensure(launcher)
+        self.assertTrue(ready, note)
+        applies = [i for i, e in enumerate(launcher.events) if e[:2] == ["docker", "run"] and "apply" in e]
+        converge = launcher.events.index(["compose", "up", "--no-start", "--no-deps", "ocr", "web", "worker"])
+        self.assertEqual(len(applies), 2)
+        self.assertLess(applies[0], converge)
+        self.assertLess(converge, applies[1])
+        first, second = (json.loads(launcher.events[i][-1]) for i in applies)
+        self.assertFalse(any(t.get("keep") for t in first["targets"]))
+        self.assertTrue(any(t.get("keep") for t in second["targets"]))
+        self.assertIn("granted group access to 2 entries", note)
 
     def test_a_container_looping_on_the_refusal_is_restarted_after_the_grant(self):
         launcher = FakeLauncher(self.project, lambda action: [{"label": "volume static", "wrong": 1,

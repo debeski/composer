@@ -247,6 +247,17 @@ FAIL, the fix, and what `--fix` does.
   are reported separately ([`env-vars`](#env-vars)).
 - **`--fix`:** nothing.
 
+#### `project-name`
+
+- **Checks:** that the active Compose files (`-f`, `-d`) agree on the top-level
+  `name:`. No finding when they do, or when at most one names the project.
+- **FAIL** they differ: Compose takes the last one, so `./start.sh -d` with a
+  `compose.dev.yml` that keeps another name would start a second project with its own
+  containers, fresh volumes and a second resident pair.
+- **Fix:** give every Compose file the deployed project's `name:`, or drop `name:`
+  from the override.
+- **`--fix`:** nothing.
+
 #### `secrets`
 
 - **Checks:** the secrets file (the first of `.env`, `secrets/.env`, `.secrets/.env`)
@@ -261,8 +272,11 @@ FAIL, the fix, and what `--fix` does.
   Compose file's built-in defaults, a placeholder secret key and default database
   credentials. The message lists the keys, credentials first. Also FAIL: unreadable,
   unparseable or empty (an empty file falls through to Compose defaults), or
-  unreadable by the executor. Also WARN: its group or other users on the host may read
-  or write it (any mode bit beyond `0600`).
+  unreadable by the executor. Also WARN: the file found shadows another candidate
+  (a stray project-root `.env` beside `.secrets/.env`: only the first is read, so the
+  deploy runs on the Compose defaults for what it lacks), named without reading
+  either; or its group or other users on the host may read or write it (any mode bit
+  beyond `0600`; only the mode is read).
 - **Fix:** restore the secrets file from your backup, or supply the values through the
   environment; for an unreadable file, the `sudo setfacl` commands for the mapped host
   UID ([when the executor cannot read the file](deploying.md#when-the-executor-cannot-read-the-file));
@@ -294,7 +308,8 @@ FAIL, the fix, and what `--fix` does.
   channel tag ("not pinned yet": the next Composer update pins it); or no Composer
   image is declared in the generated block. A `COMPOSER_SELF_IMAGE` pin is noted.
 - **WARN** the block names another image than the pin, or than the channel tag when
-  there is no pin; the block names the pin but a running container of the pair was
+  there is no pin (the message names the block's image, then what each running
+  container of the pair runs and its Composer version); the block names the pin but a running container of the pair was
   created from another image (not recreated since the pin moved); the pin is a beta
   while the channel is stable; or the pin names a release from before 1.11.0b1, which
   cannot run a pinned stack.
@@ -660,7 +675,8 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   while the rest of the stack runs, `composer-executor` or `composer-agent` does not
   run (updates, rollbacks and the Operations panel stop). **FAIL** a service is
   crash-looping: restarting now, or restarted 3+ times and started less than 2
-  minutes ago, with the restart count and the last error line of its log; or, while
+  minutes ago, with the restart count and the last error line of its log (container
+  addresses shown as `<address>`); or, while
   the rest of the stack runs, `web` or `worker` has no container, was created and
   never started (its `pre_start` step failed), or has stopped (with its exit code). A
   stack that is stopped as a whole is not a finding.

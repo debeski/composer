@@ -103,9 +103,13 @@ Composer reads the app image's `Config.User`:
   point, which for a plain `USER 10001:0` image is root `0755`; the volumes carry
   Compose's own labels. The grant then reaches them, and `up` starts the same
   containers;
-- for a non-root uid it scans and, when something is missing or a writable named
-  volume is still empty, grants access first ([empty volumes](#empty-volumes)), and
-  restarts app containers looping on the refusal;
+- for a non-root uid it scans and, when something is missing, grants access first;
+- when a writable named volume is still empty after that, the app containers `up`
+  would recreate (a changed definition or image) are recreated now without starting
+  (`up --no-start --no-deps`, Compose deciding as `up` does, so a current container
+  is left running), Docker fills or resets the volume, and a second grant adds
+  `.composer-keep` ([empty volumes](#empty-volumes)); `up` then only starts them;
+- app containers looping on the refusal are restarted;
 - when the image cannot be read or the grant fails, it reports `failed` and
   recreates nothing, so the running stack keeps serving;
 - a user name instead of a numeric `uid:gid` is refused, because Composer cannot

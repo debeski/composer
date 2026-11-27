@@ -90,6 +90,63 @@ class SecretsModeTests(_Project):
         self.assertEqual(self._check(0o600)["level"], OK)
 
 
+class ShadowedSecretsTests(_Project):
+    """R2-029: a one-key project-root .env replaced .secrets/.env, and `check` said it was fine."""
+
+    def test_the_shadowing_file_is_named(self):
+        self.write(".env", "TIME_ZONE=UTC\n")
+        secrets = self.write(".secrets/.env", "DJANGO_SECRET_KEY=x\nPOSTGRES_PASSWORD=y\n")
+        secrets.chmod(0o600)
+        self.launcher.services = ["web"]
+        with _in(self.root):
+            result = self.launcher._check_secrets()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn(".env shadows .secrets/.env", result["message"])
+        self.assertNotIn("UTC", json.dumps(result))
+
+
+class ProjectNameTests(_Project):
+    """R2-083: a compose.dev.yml with another `name:` started a second stack under -d."""
+
+    def test_differing_names_fail_and_agreeing_ones_say_nothing(self):
+        self.write("compose.yml", "name: shop\nservices: {}\n")
+        self.write("compose.dev.yml", "name: bk2nr\nservices: {}\n")
+        self.launcher.active_compose_files = ["compose.yml", "compose.dev.yml"]
+        with _in(self.root):
+            result = self.launcher._check_project_name()
+            self.assertEqual(result["level"], FAIL)
+            self.assertIn("compose.yml names it shop; compose.dev.yml names it bk2nr", result["message"])
+            self.write("compose.dev.yml", "services: {}\n")
+            self.assertIsNone(self.launcher._check_project_name())
+
+
+class RunningPairTests(unittest.TestCase):
+    """R2-023: `check` called the block's image the one "the resident pair runs"."""
+
+    def test_the_block_and_the_running_images_are_told_apart(self):
+        launcher = DockerComposeLauncher()
+        with patch.object(launcher, "_resident_running_images",
+                          return_value={"composer-agent": "debeski/composer@sha256:b2", "composer-executor": "debeski/composer@sha256:b2"}), \
+                patch.object(launcher, "_resident_agent_version", return_value="1.11.0b2"):
+            note = launcher._running_pair_note()
+        self.assertIn("composer-agent runs debeski/composer@sha256:b2", note)
+        self.assertIn("(Composer 1.11.0b2)", note)
+
+
+class LastErrorAddressTests(unittest.TestCase):
+    """R2-086 (e): the services finding quoted a container's internal address."""
+
+    def test_addresses_are_replaced(self):
+        launcher = DockerComposeLauncher()
+        log = "web-1  | Error: connection to db (172.29.0.3) 5432 refused; upstream 10.0.0.5:8000\n"
+        with patch.object(launcher, "run_docker_compose", return_value=(True, log, "")):
+            line = launcher._last_error_line("web")
+        self.assertNotIn("172.29.0.3", line)
+        self.assertNotIn("10.0.0.5", line)
+        self.assertIn("db (<address>) 5432", line)
+        self.assertIn("upstream <address>", line)
+
+
 class StrictStampTests(_Project):
     """R2-068: "99" and "0" only warned, "5x" read as 5, "-1" as no stamp."""
 
