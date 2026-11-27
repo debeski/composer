@@ -1893,6 +1893,18 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         note = f"Composer channel: {state['channel']} ({state['image']})"
         if state["pinned"]:
             note += " — COMPOSER_SELF_IMAGE pin overrides the channel"
+        if lock is None and not state["pinned"] and image_pin.lock_state(".")[0] == "unreadable":
+            # Present but not a pinned reference: both wrappers and Composer read it as no lock
+            # (R2-024), so the deployer runs the moving channel tag while the file looks like a pin.
+            return _result(
+                WARN,
+                "composer-channel",
+                f"{note}, but .composer-image is present and holds no pinned reference that the wrappers can "
+                f"read (its first non-empty line must be debeski/composer:vX.Y.Z@sha256:…), so the deployer runs "
+                f"the moving tag {state['channel_image']} instead of a verified digest.",
+                fix="Run './start.sh agent update' to write the channel's verified pin, or move .composer-image "
+                "into .xclude/ to follow the channel tag on purpose.",
+            )
         try:
             declared = set(composer_images_in_block(self._compose_contents()))
         except Exception:

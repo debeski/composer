@@ -424,6 +424,19 @@ class CheckupPinTests(unittest.TestCase):
         self.assertEqual([f["level"] for f in fixed], ["warn"], fixed)
         self.assertEqual((self.project / "compose.yml").read_text(encoding="utf-8"), BLOCK)
 
+    def test_a_lock_that_cannot_be_read_warns(self):
+        """R2-024: a present but unreadable lock looked like a pin while the wrapper ran the channel tag."""
+        for text in ("debeski/composer:beta\n", f"debeski/composer:v1.11.0 @{DIGEST_A}\n", "\n\n"):
+            (self.project / ".composer-image").write_text(text, encoding="utf-8")
+            result = self._finding()
+            self.assertEqual(result["level"], "warn", (text, result))
+            self.assertIn(".composer-image is present and holds no pinned reference", result["message"])
+            self.assertIn("./start.sh agent update", result["fix"])
+
+    def test_a_readable_lock_with_a_blank_first_line_is_not_unreadable(self):
+        (self.project / ".composer-image").write_text(f"\n{image_pin.Pin('1.11.0', DIGEST_A).ref}\n", encoding="utf-8")
+        self.assertNotIn("holds no pinned reference", self._finding()["message"])
+
     def test_a_fresh_unpinned_project_is_ok(self):
         # The state `dlux startproject` writes: the scaffold alignment gate needs it clean.
         result = self._finding()

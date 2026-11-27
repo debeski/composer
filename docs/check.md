@@ -317,13 +317,17 @@ FAIL, the fix, and what `--fix` does.
   there is no pin (the message names the block's image, then what each running
   container of the pair runs and its Composer version); the block names the pin but a running container of the pair was
   created from another image (not recreated since the pin moved); the pin is a beta
-  while the channel is stable; or the pin names a release from before 1.11.0b1, which
-  cannot run a pinned stack. **FAIL** the lock's tag and digest disagree: the image
+  while the channel is stable; the pin names a release from before 1.11.0b1, which
+  cannot run a pinned stack; or `.composer-image` is present but its first non-empty
+  line is not a whole pinned reference, so the wrappers and Composer read it as no
+  lock and the deployer runs the channel tag. **FAIL** the lock's tag and digest disagree: the image
   the digest names (when it is on this host) carries another Composer release than the
   tag says, read from its release-manifest label, else `/app/VERSION`.
 - **Fix:** `composer check --fix` for a block that does not follow the pin;
   `./start.sh` for a pair still running the old image (it recreates both on the pin);
-  `composer check --stable` for a beta pin on the stable channel; `--beta` or
+  `composer check --stable` for a beta pin on the stable channel; `./start.sh agent
+  update` for an unreadable `.composer-image` (or move the file into `.xclude/` to
+  follow the channel tag); `--beta` or
   `--stable` to move both halves to a channel. For a pin from before 1.11.0b1:
   `docker pull debeski/composer:beta`, then
   `COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y`
