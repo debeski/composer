@@ -43,10 +43,29 @@ image runs its own supervisor, which never checks, so this guard is the only
 defence there. It is read in a throwaway Composer container with the volume
 mounted read-only, and only when the volume already exists.
 
+The records can describe another database than the one the stack has (a host
+move, a disaster-recovery restore into a new volume, a fresh clone), so the
+database is also asked directly: its ``django_migrations`` rows are read in the
+stack's own Postgres service (``exec``, no new network path), and the migrations
+the target image ships are listed in a throwaway container of that image
+(``--network none``, ``--pull never``, read-only, nothing imported). A database
+holding a migration of an app the target ships but does not know was migrated by
+newer code, whatever the records say.
+
+Older DjangoLux code on a newer schema follows the rule DjangoLux's own rollback
+follows (``migrations.rollback_compatible`` in the DjangoLux release manifest):
+it is allowed, with a warning, only when the release being left declares it, and
+so does every release between it and the target that Composer can read (the
+releases on the runtime volume, the images it deployed). The release being left
+must be readable, and, when the database has migrations the target does not
+know, it must know every one of them. A project app's own migrations, and an
+older app version, are never covered by that rule.
+
 ``--force`` deploys anyway and makes the forced release the new record.
 """
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -79,6 +98,7 @@ try:
     record = json.loads((root / "state" / "composer-deployed.json").read_text(encoding="utf-8"))
     if isinstance(record, dict):
         out["record"] = {key: str(record[key]) for key in ("app", "dlux") if record.get(key)}
+        out["record_image"] = {key: str(record[key]) for key in ("image", "image_id") if record.get(key)}
         if isinstance(record.get("database"), dict):
             out["record_database"] = {key: str(value) for key, value in record["database"].items()}
 except Exception:
@@ -94,6 +114,26 @@ try:
         out["floor"] = floor.strip().lstrip(">=").strip()
 except Exception:
     pass
+manifests = {}
+try:
+    for release in sorted((root / "releases").iterdir()):
+        name = release.name
+        if "/" in name or name.startswith("."):
+            continue
+        try:
+            manifest = json.loads((release / "dlux" / "release-manifest.json").read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(manifest, dict):
+            compatible = (manifest.get("migrations") or {}).get("rollback_compatible")
+            manifests[name] = {
+                "version": str(manifest.get("version") or name),
+                "rollback_compatible": compatible if isinstance(compatible, bool) else None,
+            }
+except Exception:
+    pass
+if manifests:
+    out["manifests"] = manifests
 print(json.dumps(out))
 """
 
@@ -108,6 +148,88 @@ temporary.write_text(sys.argv[2] + "\\n", encoding="utf-8")
 os.chmod(temporary, 0o664)
 os.replace(temporary, path)
 """
+
+# Runs in a throwaway container of an app image (``--network none``, read-only):
+# lists the Django migrations on disk, without importing Django or the project.
+# Each root is one group: the image's working directory and PYTHONPATH (the
+# project), its site-packages, and every extra argument (a DjangoLux release on
+# the runtime volume). ``--only`` scans the arguments alone. A group's ``known``
+# maps an app label (the directory holding ``migrations/``) to the migration
+# names it ships, the ones a squashed migration ``replaces`` included; its
+# ``manifest`` is the DjangoLux release manifest found in it.
+MIGRATIONS_SCRIPT = r"""
+import ast, json, os, site, sys, sysconfig
+SKIP = {"__pycache__", "node_modules", ".git", "static", "staticfiles", "media", "locale", "templates"}
+args = sys.argv[1:]
+only = bool(args) and args[0] == "--only"
+extra = args[1:] if only else args
+packages = []
+for path in [sysconfig.get_paths().get("purelib"), sysconfig.get_paths().get("platlib")] + list(getattr(site, "getsitepackages", lambda: [])()):
+    if path and os.path.isdir(path) and os.path.realpath(path) not in packages:
+        packages.append(os.path.realpath(path))
+roots = []
+if not only:
+    for path in [os.getcwd()] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]:
+        if os.path.isdir(path):
+            roots.append((os.path.realpath(path), "project"))
+    roots += [(path, "package") for path in packages]
+roots += [(os.path.realpath(path), "package") for path in extra if os.path.isdir(path)]
+def replaced(path):
+    try:
+        if os.path.getsize(path) > 512 * 1024:
+            return []
+        text = open(path, encoding="utf-8", errors="replace").read()
+        if "replaces" not in text:
+            return []
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "replaces" for t in node.targets):
+                return [tuple(map(str, pair)) for pair in ast.literal_eval(node.value) if len(pair) == 2]
+    except Exception:
+        return []
+    return []
+def manifest_in(root):
+    for candidate in (os.path.join(root, "dlux", "release-manifest.json"),):
+        try:
+            data = json.load(open(candidate, encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            compatible = (data.get("migrations") or {}).get("rollback_compatible")
+            return {"version": str(data.get("version") or ""),
+                    "rollback_compatible": compatible if isinstance(compatible, bool) else None}
+    return None
+groups, seen = [], set()
+for root, kind in roots:
+    if root in seen:
+        continue
+    seen.add(root)
+    nested = [other for other, _ in roots if other != root and other.startswith(root + os.sep)]
+    known = {}
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith(".") and os.path.join(directory, d) not in nested]
+        if os.path.basename(directory) != "migrations" or "__init__.py" not in files:
+            continue
+        label = os.path.basename(os.path.dirname(directory))
+        names = known.setdefault(label, set())
+        for name in files:
+            if name.endswith(".py") and not name.startswith(("_", "~")):
+                names.add(name[:-3])
+                for app, old in replaced(os.path.join(directory, name)):
+                    known.setdefault(app, set()).add(old)
+    groups.append({"root": root, "kind": kind, "known": {k: sorted(v) for k, v in known.items()},
+                   "manifest": manifest_in(root)})
+print(json.dumps({"groups": groups}))
+"""
+
+# Runs in the stack's Postgres service: one ``app name`` line per applied migration.
+APPLIED_SQL = "SELECT app || ' ' || name FROM django_migrations"
+PSQL_COMMAND = (
+    'psql -X -A -t -q -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-postgres}" '
+    '-d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}" -c "$0"'
+)
+#: Errors that mean Postgres is still starting: the read is retried.
+_PG_STARTING = ("the database system is starting up", "could not connect", "connection refused",
+                "no such file or directory", "is not running")
 
 _GO_NO_VALUE = "<no value>"
 #: Docker's ``State.StartedAt`` of a container that never started (Go's zero time).
@@ -187,6 +309,29 @@ def read_record_database(root: Path = Path(".")) -> Dict[str, str]:
     except (OSError, ValueError):
         return {}
     return record_database(payload)
+
+
+def database_service(config: Mapping) -> str:
+    """The service that keeps the stack's Postgres data (mounts it at a PGDATA target), or ""."""
+    from .dlux_runtime_access import _mounts
+
+    for name, spec in (config.get("services") or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        for _kind, _source, target in _mounts(spec):
+            if target.rstrip("/") in POSTGRES_DATA_TARGETS:
+                return str(name)
+    return ""
+
+
+def stale_note(where: str, why: str, compared: bool) -> str:
+    """What the run says about a record that names another database."""
+    tail = (
+        "The database's own migrations were compared with the target image instead."
+        if compared else
+        "This database's own migrations could not be read either, so nothing older is refused on its account."
+    )
+    return f"The deploy record {where} is not compared: {why}. {tail} This deploy's `up` replaces the record."
 
 
 def database_volume(config: Mapping) -> str:
@@ -316,6 +461,150 @@ def below_runtime_floor(target: Mapping[str, str], runtime: Mapping[str, str]) -
         f"DjangoLux {target['dlux']} is below the image floor {runtime['floor']} of the "
         f"active runtime release {runtime.get('active') or '(unknown)'}"
     )
+
+
+def parse_applied(output: str) -> set:
+    """``{(app, name)}`` from the ``app name`` lines ``APPLIED_SQL`` prints."""
+    found = set()
+    for line in (output or "").splitlines():
+        app, _, name = line.strip().partition(" ")
+        if app and name:
+            found.add((app, name.strip()))
+    return found
+
+
+def parse_scan(output: str) -> List[Dict[str, object]]:
+    """The groups ``MIGRATIONS_SCRIPT`` printed, or [] when its output is not that."""
+    lines = (output or "").strip().splitlines()
+    try:
+        payload = json.loads(lines[-1]) if lines else {}
+    except ValueError:
+        return []
+    groups = payload.get("groups") if isinstance(payload, dict) else None
+    result = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict) or not isinstance(group.get("known"), dict):
+            continue
+        result.append({
+            "root": str(group.get("root") or ""),
+            "kind": "project" if group.get("kind") == "project" else "package",
+            "known": {str(label): set(map(str, names)) for label, names in group["known"].items()
+                      if isinstance(names, list)},
+            "manifest": group.get("manifest") if isinstance(group.get("manifest"), dict) else None,
+        })
+    return result
+
+
+def merged_known(groups) -> Tuple[Dict[str, set], set]:
+    """``(known, project_labels)``: every migration the groups ship, and the labels of the project's own apps."""
+    known: Dict[str, set] = {}
+    project = set()
+    for group in groups:
+        for label, names in group["known"].items():
+            known.setdefault(label, set()).update(names)
+            if group["kind"] == "project":
+                project.add(label)
+    return known, project
+
+
+def unknown_migrations(applied, known: Mapping[str, set]) -> List[Tuple[str, str]]:
+    """Applied migrations of an app the code ships whose name it does not know.
+
+    An app the code does not ship at all (removed since, or one a newer release
+    added) is not compared: its rows prove nothing about the apps that run.
+    """
+    return sorted((app, name) for app, name in applied if app in known and name not in known[app])
+
+
+def group_manifest(groups) -> Dict[str, object]:
+    """The DjangoLux release manifest summary among ``groups``, or {}."""
+    for group in groups:
+        manifest = group.get("manifest")
+        if isinstance(manifest, dict) and versions.try_parse(manifest.get("version")) is not None:
+            return dict(manifest)
+    return {}
+
+
+def _covers(known: Mapping[str, set], migrations) -> bool:
+    return all(name in known.get(app, set()) for app, name in migrations)
+
+
+def rollback_verdict(
+    target_dlux: str, left_dlux: str, unknown: List[Tuple[str, str]], releases: List[Mapping[str, object]],
+) -> Tuple[bool, str]:
+    """``(allowed, why)`` for DjangoLux ``target_dlux`` on a schema newer code migrated.
+
+    ``left_dlux`` is the newest DjangoLux the records and containers name for this
+    database ("" when none does), ``unknown`` the database's migrations the target
+    does not know, and ``releases`` every DjangoLux release Composer could read:
+    ``{"version", "rollback_compatible", "known"}`` (``known`` is None when its
+    migrations were not listed). The release being left is ``left_dlux``, or the
+    oldest readable release that knows every ``unknown`` migration, whichever is
+    newer. It and every readable release after the target up to it must declare
+    ``rollback_compatible: true`` (see DjangoLux ``RELEASING.md``).
+    """
+    target = versions.try_parse(target_dlux)
+    if target is None:
+        return False, "the target image labels no DjangoLux version"
+    readable = {}
+    for release in releases:
+        parsed = versions.try_parse(release.get("version"))
+        if parsed is not None and parsed > target:
+            readable.setdefault(str(release["version"]), release)
+    left = versions.try_parse(left_dlux)
+    if unknown:
+        covering = [release for release in readable.values()
+                    if release.get("known") is not None and _covers(release["known"], unknown)]
+        if not covering:
+            return False, "no DjangoLux release Composer can read knows those migrations"
+        oldest = min(covering, key=lambda release: versions.parse(release["version"]))
+        if left is None or versions.parse(oldest["version"]) > left:
+            left_dlux, left = str(oldest["version"]), versions.parse(oldest["version"])
+    if left is None or left <= target:
+        return False, "the release that migrated this database cannot be named"
+    if left_dlux not in readable and not any(versions.parse(v) == left for v in readable):
+        return False, f"DjangoLux {left_dlux}'s release manifest cannot be read here"
+    crossed = sorted(
+        (release for release in readable.values() if versions.parse(release["version"]) <= left),
+        key=lambda release: versions.parse(release["version"]),
+    )
+    refusing = [str(release["version"]) for release in crossed if release.get("rollback_compatible") is not True]
+    if refusing:
+        return False, (
+            f"DjangoLux {', '.join(refusing)} {'does' if len(refusing) == 1 else 'do'} not declare "
+            "migrations.rollback_compatible"
+        )
+    return True, left_dlux
+
+
+def rollback_warning(target_dlux: str, left_dlux: str) -> str:
+    """The warning DjangoLux's own rollback shows for the same move."""
+    return (
+        f"DjangoLux {target_dlux} now runs on the schema DjangoLux {left_dlux} migrated, which "
+        "that release declares compatible with the code before it (migrations.rollback_compatible). "
+        "The database keeps the newer migrations: migrations are never reversed. Restoring a backup "
+        "taken before the newer release later needs 'Ignore version mismatch'."
+    )
+
+
+def migration_refusal(image: str, unknown: List[Tuple[str, str]], why: str = "") -> str:
+    """The refusal for a database holding migrations ``image`` does not know."""
+    shown = ", ".join(f"{app}.{name}" for app, name in unknown[:6])
+    more = f" and {len(unknown) - 6} more" if len(unknown) > 6 else ""
+    lines = [
+        f"Refusing to deploy {image}: this database has {len(unknown)} migration(s) the image does not "
+        f"know ({shown}{more}), so newer code migrated it" + (f", and {why}" if why else "") + "."
+    ]
+    lines.append(
+        "Migrations do not run backwards, and older code on a newer schema can fail or write data the "
+        "newer release then reads wrongly. That holds whatever the deploy records say: a restored or "
+        "moved database carries its schema with it."
+    )
+    lines.append(
+        "Deploy a release at least as new as the one that migrated it. To go back on purpose, restore a "
+        "database backup taken before the newer release first, then deploy with --force."
+    )
+    return "\n".join(lines)
 
 
 def refusal(
@@ -501,7 +790,149 @@ class DowngradeGuardMixin:
         if isinstance(record, dict):
             state["record"] = {key: str(record[key]) for key, _ in DIMENSIONS if record.get(key)}
             state["record_database"] = record_database({DATABASE_KEY: payload.get("record_database")})
+            if isinstance(payload.get("record_image"), dict):
+                state["record_image"] = {key: str(value) for key, value in payload["record_image"].items()}
+        manifests = payload.get("manifests")
+        if isinstance(manifests, dict):
+            state["manifests"] = {
+                str(name): {"version": str(entry.get("version") or name),
+                            "rollback_compatible": entry.get("rollback_compatible")}
+                for name, entry in manifests.items() if isinstance(entry, dict)
+            }
         return state
+
+    def service_running(self, service: str) -> bool:
+        ok, entries, _ = self.get_compose_ps_entries()
+        return ok and any(
+            entry.get("Service") == service and str(entry.get("State") or "").lower() == "running"
+            for entry in entries
+        )
+
+    def applied_migrations(self, database: Optional[Mapping[str, str]]) -> Tuple[Optional[set], str]:
+        """``(applied, why)``: the database's applied migrations, or None and why they cannot be read.
+
+        Read in the stack's own Postgres service. One that is not running is
+        started first, as the `up` that follows would; ``guard_started_db``
+        remembers it so a refusal stops it again. No data volume means nothing
+        was migrated. A stack with no Postgres service is not read ("" reason).
+        """
+        service = database_service(self.compose_config_json() or {})
+        if not service:
+            return None, ""
+        if not self.service_running(service):
+            if database == {}:
+                return set(), ""
+            ok, out, err = self.run_docker_compose(
+                ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", service], timeout=180
+            )
+            if not ok:
+                detail = (err or out or "").strip().splitlines()
+                return None, f"its {service} service did not start ({detail[-1][:200] if detail else 'no output'})"
+            self.guard_started_db = service
+        last = ""
+        for attempt in range(30):
+            ok, out, err = self.run_docker_compose(
+                ["exec", "-T", service, "sh", "-c", PSQL_COMMAND, APPLIED_SQL], timeout=60
+            )
+            if ok:
+                return parse_applied(out), ""
+            text = f"{out}\n{err}"
+            lowered = text.lower()
+            if "django_migrations" in lowered and "does not exist" in lowered:
+                return set(), ""
+            lines = text.strip().splitlines()
+            last = lines[-1][:200] if lines else "no output"
+            if not any(marker in lowered for marker in _PG_STARTING):
+                break
+            time.sleep(1)
+        return None, f"{service} answered: {last}"
+
+    def stop_started_database(self) -> None:
+        service = getattr(self, "guard_started_db", "") or ""
+        if service:
+            self.run_docker_compose(["stop", service], timeout=120)
+            self.guard_started_db = ""
+
+    def scan_migrations(self, image: str, extra: Tuple[str, ...] = (), volume: str = "",
+                        only: bool = False) -> Optional[List[Dict[str, object]]]:
+        """The migration groups ``image`` ships (``MIGRATIONS_SCRIPT``), or None when it cannot be listed."""
+        argv = [
+            "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
+            "-e", "PYTHONDONTWRITEBYTECODE=1",
+        ]
+        if volume:
+            argv += ["-v", f"{volume}:{RUNTIME_ROOT}:ro"]
+        argv += ["--entrypoint", "python", image, "-I", "-c", MIGRATIONS_SCRIPT]
+        argv += (["--only"] if only else []) + list(extra)
+        ok, out, _ = self.run_command(argv, timeout=120)
+        if not ok:
+            return None
+        groups = parse_scan(out)
+        return groups if groups or (out or "").strip().endswith("}") else None
+
+    def target_migrations(self, image: str, runtime: Mapping[str, object]):
+        """What the target runs knows: its image, plus the active release on the runtime volume."""
+        active = str(runtime.get("active") or "")
+        volume = getattr(self, "guard_volume", "") or ""
+        if active and volume:
+            return self.scan_migrations(image, (f"{RUNTIME_ROOT}/releases/{active}",), volume)
+        return self.scan_migrations(image)
+
+    def deployed_app_images(self, services: List[str]) -> List[str]:
+        """Image IDs of the app containers of ``services`` (any state)."""
+        ok, entries, _ = self.get_compose_ps_entries(include_all=True)
+        images: List[str] = []
+        for entry in entries if ok else []:
+            container = str(entry.get("ID") or "").strip()
+            if entry.get("Service") not in services or not container:
+                continue
+            found, out, _ = self.run_command(["docker", "inspect", "--format", "{{.Image}}", container], timeout=15)
+            image = (out or "").strip() if found else ""
+            if image and image not in images:
+                images.append(image)
+        return images
+
+    def readable_releases(self, image: str, services: List[str], runtime: Mapping[str, object],
+                          unknown: List[Tuple[str, str]]) -> List[Dict[str, object]]:
+        """Every DjangoLux release Composer can read for the rollback rule.
+
+        The releases on the runtime volume (their manifests; their migrations
+        too when ``unknown`` needs them), and the images this deployment ran:
+        the records' images and the app containers' images, when they are local.
+        """
+        releases: List[Dict[str, object]] = []
+        manifests = runtime.get("manifests") or {}
+        volume = getattr(self, "guard_volume", "") or ""
+        listed: Dict[str, Dict[str, set]] = {}
+        if unknown and manifests and volume:
+            from .dlux_runtime_access import self_image
+
+            roots = tuple(f"{RUNTIME_ROOT}/releases/{name}" for name in manifests)
+            for group in self.scan_migrations(self_image(self.run_command), roots, volume, only=True) or []:
+                listed[group["root"].rsplit("/", 1)[-1]] = group["known"]
+        for name, entry in manifests.items():
+            releases.append({**entry, "known": listed.get(name) if unknown else None})
+        candidates: List[str] = []
+        for recorded in (read_deployed_image(), runtime.get("record_image") or {}):
+            for key in ("image_id", "image"):
+                if recorded.get(key) and recorded[key] not in candidates:
+                    candidates.append(recorded[key])
+        candidates += [ref for ref in self.deployed_app_images(services) if ref not in candidates]
+        target_id = self._image_id(image)
+        for ref in candidates[:6]:
+            if target_id and self._image_id(ref) == target_id:
+                continue
+            if self.image_labels(ref) is None:
+                continue
+            groups = self.scan_migrations(ref)
+            manifest = group_manifest(groups or [])
+            if manifest:
+                releases.append({**manifest, "known": merged_known(groups)[0]})
+        return releases
+
+    def _image_id(self, image: str) -> str:
+        ok, out, _ = self.run_command(["docker", "image", "inspect", "--format", "{{.Id}}", image], timeout=15)
+        return (out or "").strip() if ok else ""
 
     def write_runtime_record(self, volume: str, payload: Mapping[str, str]) -> Optional[str]:
         """Write the downgrade record to the runtime volume; why it failed, or None."""
@@ -516,6 +947,7 @@ class DowngradeGuardMixin:
     def downgrade_guard(self) -> Tuple[bool, str]:
         """``(ok, message)``. Remembers the target for ``record_deployed_release``."""
         self.guard_target = None
+        self.guard_started_db = ""
         if getattr(self, "dev_mode", False) or getattr(self, "build_images", False):
             return True, ""
         image, services = self.app_image_target()
@@ -527,6 +959,20 @@ class DowngradeGuardMixin:
         self.guard_volume = self.runtime_volume()
         runtime = self.runtime_state(self.guard_volume)
         database = self.database_identity()
+        applied, applied_reason = self.applied_migrations(database)
+        known: Dict[str, set] = {}
+        project: set = set()
+        if applied:
+            groups = self.target_migrations(image, runtime)
+            if groups is None:
+                applied, applied_reason = None, f"the migrations {image} ships could not be listed"
+            else:
+                known, project = merged_known(groups)
+        if applied is None and applied_reason:
+            self.warn_operator(
+                f"The downgrade guard could not compare this database's migrations with {image}: "
+                f"{applied_reason}. It compared the deploy records and the app containers only."
+            )
         records = []
         for where, recorded, recorded_database in (
             (str(RECORD), read_record(), read_record_database()),
@@ -535,10 +981,7 @@ class DowngradeGuardMixin:
         ):
             why = stale_database(recorded_database, database) if recorded else ""
             if why:
-                self.note_operator(
-                    f"The deploy record {where} is not compared: {why}, so the release it names did not "
-                    "migrate this database. This deploy's `up` replaces it."
-                )
+                self.note_operator(stale_note(where, why, applied is not None))
                 continue
             records.append(recorded)
         self.guard_records = newest(*records)
@@ -547,11 +990,34 @@ class DowngradeGuardMixin:
         runtime_reason = below_runtime_floor(target, runtime) if target.get("dlux") else None
         found = downgrades(target, floor)
         unlabeled = not target and bool(floor)
-        if not found and not unlabeled and not runtime_reason:
+        unknown = unknown_migrations(applied or set(), known)
+        if not found and not unlabeled and not runtime_reason and not unknown:
             return True, ""
-        message = refusal(image, found, unlabeled, [runtime_reason] if runtime_reason else None)
+        own = sorted({app for app, _ in unknown} & project)
+        why = ""
+        if own:
+            why = f"the project's own app{'s' if len(own) > 1 else ''} {', '.join(own)} {'are' if len(own) > 1 else 'is'} among them"
+        elif not unlabeled and not runtime_reason and all(label == "DjangoLux" for label, _, _ in found):
+            allowed, verdict = rollback_verdict(
+                target.get("dlux", ""), floor.get("dlux", ""), unknown,
+                self.readable_releases(image, services, runtime, unknown),
+            )
+            if allowed:
+                self.warn_operator(rollback_warning(target["dlux"], verdict))
+                return True, ""
+            why = verdict
+        if found or unlabeled or runtime_reason:
+            extra = [runtime_reason] if runtime_reason else []
+            if unknown:
+                extra.append(f"the database has {len(unknown)} migration(s) it does not know")
+            if why and (unknown or found):
+                extra.append(why)
+            message = refusal(image, found, unlabeled, extra)
+        else:
+            message = migration_refusal(image, unknown, why)
         if getattr(self, "force", False):
             return True, "--force: " + message.splitlines()[0].replace("Refusing to deploy", "Deploying", 1)
+        self.stop_started_database()
         return False, message
 
     def record_deployed_release(self) -> None:
