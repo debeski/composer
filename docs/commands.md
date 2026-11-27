@@ -174,7 +174,7 @@ What each step does: [inline DjangoLux updates](updates.md#inline-djangolux-upda
 | --- | --- |
 | `composer dlux check [--version V] [--availability-file PATH] [-f FILE] [-d]` | publishes what is available to `state/package-available.json` |
 | `composer dlux update [--dry-run] [--version V] [--retry-quarantined] [--backup data\|full\|skip] [--restart-service SERVICE] [--status-file PATH] [-f FILE] [-d]` | applies the newest release on the channel, or `--version V` |
-| `composer dlux rollback [--backup data\|full\|skip] [--restart-service SERVICE] [--status-file PATH] [-f FILE] [-d]` | restores the previous release |
+| `composer dlux rollback [--version X] [--force] [--backup data\|full\|skip] [--restart-service SERVICE] [--status-file PATH] [-f FILE] [-d]` | restores the previous release, or the staged release (or image version) `--version` names; `--force` overrides a release in between that forbids older code on its schema; sets an unusable `state/active.json` aside |
 | `composer dlux channel [stable\|beta] [-f FILE] [-d]` | reports or requests DjangoLux's channel ([channels](updates.md#djangoluxs-channel)) |
 
 `dlux update` and `dlux rollback` exit `0` on success (and when a rollback has

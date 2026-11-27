@@ -300,17 +300,35 @@ the quarantine still decide.
    after a publish;
 2. verifies its Trusted Publisher attestation and SHA-256, and honours the
    manifest's `inline_safe` ([release manifests](#release-manifests));
-3. takes a backup ([below](#backups));
-4. activates it under `state/active.json`;
-5. brings up the services that load DjangoLux (by default `web`, `worker` and
+3. unpacks only the `dlux` package and its `django_lux-*.dist-info` into the
+   runtime volume's `staging/`. Any other top-level entry in the wheel (a
+   `sitecustomize.py`, a `.pth` file, another package) refuses the release, so
+   nothing but DjangoLux reaches the app's interpreter path. So does an archive
+   that unpacks to more than 256 MB, or one the volume has no room for with 16 MB
+   to spare (the message names the free space). A copy that is not staged, after
+   a refusal or a failure, is removed;
+4. refuses a release whose `requires.baked_image` floor the project image is
+   below, read the way DjangoLux's supervisor reads it, before the backup: the
+   supervisor would keep serving the baked DjangoLux, so activating it would only
+   report a success that is not running. Composer reads the baked version as the
+   rollback does ([below](#rolling-back-dlux-rollback)); when it cannot, the floor
+   is not checked;
+5. takes a backup ([below](#backups));
+6. activates it under `state/active.json`;
+7. brings up the services that load DjangoLux (by default `web`, `worker` and
    `celery`, each where the stack defines it; `--restart-service` or
    `COMPOSER_DLUX_RESTART_SERVICES` choose others; `dlux-updater` is deliberately
    excluded) with the same health wait `composer update` uses. The service whose
    `pre_start` applies migrations is **recreated** so Compose runs those hooks (a
    plain restart skips them, and a release carrying migrations would then activate
-   with nobody applying them); every other service is restarted.
+   with nobody applying them). `web` is restarted. Any other service whose command
+   runs `python -m dlux.updater.supervisor` without `--no-watch` (a project
+   `celery`) is not: its supervisor restarts it when the activation advances
+   `state/generation`, and a second restart from Composer stopped it mid-task.
 
-`--dry-run` resolves and verifies without activating.
+`--dry-run` resolves and verifies without activating. Asking for the release that
+is already active reports it and changes nothing; with `--version` nothing is
+fetched or unpacked.
 
 **Quarantine.** When the services do not come back healthy, the update restores the
 previous release and quarantines the new one: it moves to `failed/<version>/` on the
@@ -329,13 +347,33 @@ one a caller must not retry.
 
 `composer dlux rollback` restores the previous release: the newest staged release
 below the active one that is newer than the DjangoLux baked into the project image,
-else the image's own release. DjangoLux's runtime supervisor runs a volume release
+else the image's own release. `--version X` names the target instead: a staged
+release below the active one, or the baked version for the image's own release.
+Any other version is refused with nothing changed, and the message lists the
+targets there are. DjangoLux's runtime supervisor runs a volume release
 only when it is newer than the baked one, so an older staged release would be
 activated and never run. Composer reads the baked version from the image in a fresh
 `web` container (`docker compose run --rm --no-deps`, `DLUX_BAKED_VERSION` else
 `dlux.__version__`); when it cannot, it takes the newest staged release below the
 active one. When the image's own release is already running, there is nothing older
 to return to: it says so and exits `0` without a backup or a restart.
+
+A rollback runs older DjangoLux code on the newer database schema. It is refused
+when the release being left, or a staged release between it and the target,
+declares `migrations.rollback_compatible: false`: restore a pre-update backup, then
+roll back with `--force`. Otherwise it prints the same warning as the Updates
+card: a rollback changes code and static files only and never reverses
+migrations, so the pre-update backup no longer matches the database; restoring it
+later means updating back to its version first, or DjangoLux's **Ignore database
+version mismatch**.
+
+**An unusable pointer.** When `state/active.json` exists but cannot be used (not a
+JSON object, unreadable, a symbolic link or FIFO, or naming a release that is not
+staged), `dlux check` and `dlux channel` say so and exit `1`, and `dlux update`
+refuses; each names `dlux rollback` as the way out. `dlux rollback` then renames the
+file to `state/active.json.unusable-<UTC time>` (kept, never deleted), advances
+`state/generation` and restarts on the image's own release. DjangoLux rebuilds the
+pointer from the release it recorded on its next state tick.
 
 ### Backups
 

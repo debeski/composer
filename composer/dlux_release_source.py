@@ -553,25 +553,74 @@ def describe(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
     }
 
 
+#: The most an unpacked release may take; a real one is well under a tenth of it.
+MAX_UNPACKED_BYTES = 256 * 1024 * 1024
+#: Free space kept beyond the unpacked release, for Composer's status and ack.
+UNPACK_SPACE_MARGIN = 16 * 1024 * 1024
+_DIST_INFO_RE = re.compile(r"^django_lux-[^/]+\.dist-info$", re.IGNORECASE)
+
+
+def _allowed_top_level(name: str) -> bool:
+    """Only the ``dlux`` package and its own metadata go onto the interpreter path."""
+    return name == "dlux" or bool(_DIST_INFO_RE.match(name))
+
+
+def _free_bytes(path: Path) -> Optional[int]:
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
 def unpack(wheel_path, destination) -> Path:
-    """Extract a wheel into a fresh directory, refusing any path that escapes it."""
+    """Extract a wheel's ``dlux`` package into a fresh directory.
+
+    Refused, with nothing left behind: a path that escapes the target, a
+    top-level entry other than ``dlux/`` and its ``django_lux-*.dist-info/`` (a
+    ``sitecustomize.py`` beside the package would run in every app process), an
+    archive that unpacks to more than ``MAX_UNPACKED_BYTES``, and one the volume
+    has no room for, with ``UNPACK_SPACE_MARGIN`` to spare.
+    """
     destination = Path(destination)
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
     root = destination.resolve()
-    with zipfile.ZipFile(wheel_path) as archive:
-        for member in archive.namelist():
-            target = (root / member).resolve()
-            try:
-                target.relative_to(root)
-            except ValueError as exc:
-                raise ReleaseSourceError(f"The wheel contains an unsafe path: {member}") from exc
-        archive.extractall(root)
-    if not (root / "dlux").is_dir():
-        raise ReleaseSourceError("The wheel does not contain a 'dlux' package.")
+    try:
+        with zipfile.ZipFile(wheel_path) as archive:
+            members = archive.infolist()
+            size = 0
+            for member in members:
+                target = (root / member.filename).resolve()
+                try:
+                    relative = target.relative_to(root)
+                except ValueError as exc:
+                    raise ReleaseSourceError(f"The wheel contains an unsafe path: {member.filename}") from exc
+                if not relative.parts or not _allowed_top_level(relative.parts[0]):
+                    raise ReleaseSourceError(
+                        f"The wheel carries {member.filename!r} outside the dlux package; an "
+                        "inline update installs only dlux/ and its .dist-info."
+                    )
+                size += max(0, int(member.file_size))
+            if size > MAX_UNPACKED_BYTES:
+                raise ReleaseSourceError(
+                    f"The wheel unpacks to {size // (1024 * 1024)} MB, more than the "
+                    f"{MAX_UNPACKED_BYTES // (1024 * 1024)} MB a DjangoLux release may take."
+                )
+            free = _free_bytes(root)
+            if free is not None and free < size + UNPACK_SPACE_MARGIN:
+                raise ReleaseSourceError(
+                    f"The DjangoLux runtime volume has {free // (1024 * 1024)} MB free; unpacking "
+                    f"DjangoLux needs {(size + UNPACK_SPACE_MARGIN) // (1024 * 1024)} MB. Free space "
+                    "on the volume (old releases/, downloads/), then try again."
+                )
+            archive.extractall(root)
+        if not (root / "dlux").is_dir():
+            raise ReleaseSourceError("The wheel does not contain a 'dlux' package.")
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
     return destination
-
 
 
 def obtain(target_version="", *, channel=dlux_channel.STABLE, workdir=None,
