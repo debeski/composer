@@ -70,6 +70,93 @@ REMOVED_COMMANDS = {
 }
 
 
+def declared_project_name(path) -> str:
+    """The top-level ``name:`` a Compose file declares, or "" (read without a YAML parser)."""
+    import re
+
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = re.search(r"^name:[ \t]*([^#\r\n]*)", text, re.MULTILINE)
+    return match.group(1).strip().strip("'\"") if match else ""
+
+
+def default_project_name(directory) -> str:
+    """Compose's project name for a directory with no ``name:``: lower case, ``[a-z0-9_-]`` only."""
+    import re
+
+    return re.sub(r"[^a-z0-9_-]", "", Path(directory).resolve().name.lower())
+
+
+def project_name_conflict(files: List[str], directory=".") -> str:
+    """Why the active Compose files make another project than the first file alone, or "".
+
+    The last ``name:`` wins in Compose, so an overlay naming another project
+    starts a second stack beside the real one (fresh volumes, a second
+    Docker-authority pair: R2-083).
+    """
+    if len(files) < 2 or os.environ.get("COMPOSE_PROJECT_NAME", "").strip():
+        return ""
+    base = declared_project_name(files[0]) or default_project_name(directory)
+    for other in files[1:]:
+        named = declared_project_name(other)
+        if named and named != base:
+            return (
+                f"{other} names the Compose project '{named}', and {files[0]} makes it '{base}': Compose would "
+                f"start a second stack, with its own volumes, beside the real one. Give {other} the same "
+                f"`name: {base}`, or remove its `name:` line."
+            )
+    return ""
+
+
+#: Start of a Compose temporary name: ``<12 hex>_<project>-<service>-<n>`` (a recreate in progress).
+INTERRUPTED_NAME = __import__("re").compile(r"^/?([0-9a-f]{12})_(.+)$")
+#: What `python -m dlux.ocr.serve` needs: the django-lux[ocr] extra.
+OCR_COMMAND = "dlux.ocr.serve"
+OCR_MODULES = ("indra_ocr", "onnxruntime")
+OCR_PROBE = (
+    "import importlib.util, sys; "
+    "missing = [m for m in sys.argv[1:] if importlib.util.find_spec(m) is None]; "
+    "print('ocr-engine: ' + ('missing ' + ','.join(missing) if missing else 'present'))"
+)
+
+
+def stop_on_sigterm() -> Dict[str, bool]:
+    """Let `docker stop` end a resident role at once instead of killing it at the timeout (R2-073).
+
+    PID 1 in a container ignores SIGTERM unless it handles it, so the pair sat
+    out the whole stop timeout and was SIGKILLed, possibly mid-write. SIGTERM now
+    stops the loop the way Ctrl+C does; the returned flag says it came.
+    """
+    import signal
+
+    state = {"signalled": False}
+
+    def _stop(signum, frame):
+        state["signalled"] = True
+        raise KeyboardInterrupt()
+
+    try:
+        signal.signal(signal.SIGTERM, _stop)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return state
+
+
+def registry_hint(output: str) -> str:
+    """A pointer to the registry login when a pull was refused for want of one (R2-086)."""
+    lowered = (output or "").lower()
+    markers = ("unauthorized", "denied", "authentication required", "no basic auth credentials")
+    if not any(marker in lowered for marker in markers):
+        return ""
+    return (
+        "\n\nThe registry refused the pull. For a private image, set COMPOSER_REGISTRY_HOST, "
+        "COMPOSER_REGISTRY_USERNAME and COMPOSER_REGISTRY_PASSWORD in the secrets file "
+        "(docs/private-registry.md)."
+    )
+
+
 def _group_usage(group: str, commands: List[str]) -> str:
     return f"Usage: composer {group} {{{'|'.join(commands)}}} ..."
 
@@ -835,6 +922,88 @@ class DockerComposeLauncher(
                 service for service in self.restart_services if service not in excluded
             ]
 
+    def clear_interrupted_recreates(self) -> List[str]:
+        """Tidy the containers a killed recreate left behind, before `up` (R2-028).
+
+        Compose recreates a service by renaming the old container to
+        ``<12 hex>_<name>``, creating the new one and removing the old. A deploy
+        killed in between leaves the renamed one, and the next `up` failed on it
+        ("container 2fff…_…-smtp-relay-1 has no healthcheck configured") and took
+        the site down. A stopped leftover is removed (its volumes stay); a running
+        one gets its own name back when that name is free. Returns what was done.
+        """
+        project = str((self.compose_config_json() or {}).get("name") or "").strip()
+        if not project:
+            return []
+        ok, out, _ = self.run_command(
+            ["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={project}",
+             "--format", "{{.ID}} {{.Names}} {{.State}}"],
+            timeout=20,
+        )
+        if not ok:
+            return []
+        rows = [line.split() for line in (out or "").splitlines() if len(line.split()) >= 3]
+        names = {row[1].lstrip("/") for row in rows}
+        done = []
+        for container, name, state in (row[:3] for row in rows):
+            match = INTERRUPTED_NAME.match(name)
+            if not match:
+                continue
+            original = match.group(2)
+            if state.lower() in {"created", "exited", "dead"}:
+                removed, _, _ = self.run_command(["docker", "rm", container], timeout=30)
+                if removed:
+                    done.append(f"removed {name}, left {state} by an interrupted recreate")
+            elif original not in names:
+                renamed, _, _ = self.run_command(["docker", "rename", container, original], timeout=30)
+                if renamed:
+                    names.add(original)
+                    done.append(f"renamed {name} back to {original}")
+        if done:
+            print(f"ℹ A previous deploy stopped halfway: {'; '.join(done)}.", flush=True)
+            self.append_console("Interrupted recreate tidied: " + "; ".join(done))
+        return done
+
+    def leave_out_ocr_without_engine(self) -> List[str]:
+        """Leave out an OCR service whose image has no OCR engine, and stop it (R2-057).
+
+        `docs/ocr.md` allows a project without the django-lux[ocr] extra, but the
+        scaffold's `ocr` service still runs ``python -m dlux.ocr.serve`` on the app
+        image, which then crash-loops and failed every `./start.sh`. The image is
+        asked (``--network none``, ``--pull never``) whether it ships the engine;
+        an image that cannot be asked is left to `up` as before.
+        """
+        from .service_selection import scoped_service_list
+
+        config = self.compose_config_json() or {}
+        scoped = scoped_service_list(self.up_service)
+        held = []
+        for name, spec in (config.get("services") or {}).items():
+            if not isinstance(spec, dict) or name in (self.exclude_services or []):
+                continue
+            if scoped and name not in scoped:
+                continue
+            command = spec.get("command")
+            text = " ".join(map(str, command)) if isinstance(command, list) else str(command or "")
+            image = str(spec.get("image") or "")
+            if OCR_COMMAND not in text or not image:
+                continue
+            ok, out, _ = self.run_command(
+                ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "python",
+                 image, "-I", "-c", OCR_PROBE, *OCR_MODULES],
+                timeout=60,
+            )
+            if ok and "ocr-engine: missing" in (out or ""):
+                held.append(str(name))
+        for name in held:
+            self.run_docker_compose(["stop", name], timeout=120)
+            self._leave_out([name], (
+                f"{name} was left out and stopped: its image has no OCR engine (the django-lux[ocr] extra), so "
+                f"'python -m {OCR_COMMAND}' cannot start. Build the image with the extra, or add "
+                f"COMPOSER_EXCLUDE_SERVICES={name} to the secrets file to say so."
+            ))
+        return held
+
     def prepare_app_data(self, services: Optional[List[str]] = None) -> Tuple[bool, str]:
         """``(ready, note)``: give a non-root app image access to its data before ``up``.
 
@@ -974,7 +1143,9 @@ class DockerComposeLauncher(
                 elif action == "run":
                     from .agent import run_agent
 
-                    sys.exit(run_agent(parse_agent_args(argv[2:])))
+                    stopping = stop_on_sigterm()
+                    code = run_agent(parse_agent_args(argv[2:]))
+                    sys.exit(0 if stopping["signalled"] else code)
                 elif action == "enable":
                     from .agent_installer import run_enable_agent
 
@@ -990,7 +1161,9 @@ class DockerComposeLauncher(
                 if argv[1] == "run":
                     from .executor import run_executor
 
-                    sys.exit(run_executor(parse_executor_args(argv[2:])))
+                    stopping = stop_on_sigterm()
+                    code = run_executor(parse_executor_args(argv[2:]))
+                    sys.exit(0 if stopping["signalled"] else code)
                 if argv[1] == "enable":
                     from .agent_installer import run_enable_executor
 
@@ -1054,6 +1227,10 @@ class DockerComposeLauncher(
                     self.active_version_key = os.environ.get("COMPOSER_ACTIVE_VERSION_KEY") or None
                     self.exclude_services = parse_service_list(os.environ.get("COMPOSER_EXCLUDE_SERVICES"))
 
+            conflict = project_name_conflict(self.active_compose_files)
+            if conflict:
+                print(f"✖ {conflict}", file=sys.stderr)
+                sys.exit(2)
             self.take_project_lock()
             self.extract_config()
             if self.dev_mode:
@@ -1182,7 +1359,7 @@ class DockerComposeLauncher(
                 ok, out, err = self.pull_images()
                 if not ok:
                     self.sections["pull"] = ERROR
-                    detail = self.build_failure_detail(out, err)
+                    detail = self.build_failure_detail(out, err) + registry_hint(f"{out}\n{err}")
                     self.write_status("failed", error=detail)
                     self.render(f"Failed to pull images\n\n{detail}")
                     sys.exit(1)
@@ -1240,6 +1417,9 @@ class DockerComposeLauncher(
             if note:
                 print(f"🔐 {note}")
 
+            self.clear_interrupted_recreates()
+            self.leave_out_ocr_without_engine()
+
             ok, out, err = self.launch_containers()
             # `up` ran the migrator whether or not it then succeeded.
             self.record_deployed_release()
@@ -1277,10 +1457,17 @@ class DockerComposeLauncher(
                 self.write_status("failed", error=hooks_detail)
                 self.render(f"Failed to execute post_start commands\n\n{hooks_detail}")
                 sys.exit(1)
-            else:
-                self.sections["post_start"] = OK
-                self.write_status("ready")
-                self.render()
+            self.sections["post_start"] = OK
+            # A crash loop slower than the settle window shows only now (R2-031).
+            stable_ok, stable_detail = self.confirm_stable()
+            if not stable_ok:
+                self.sections["health"] = ERROR
+                stable_detail = self.keep_site_reachable(stable_detail)
+                self.write_status("failed", error=stable_detail)
+                self.render(stable_detail)
+                sys.exit(1)
+            self.write_status("ready")
+            self.render()
 
             print("\n🎉 Environment ready")
             for warning in getattr(self, "deploy_warnings", None) or []:

@@ -873,7 +873,8 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
     def test_a_start_with_an_explicit_composer_image_behaves_as_before(self):
         calls, _, commands = self._start(tag_version="1.10.4", env={"COMPOSER_SELF_IMAGE": "mirror/composer:1.10.4"})
         self.assertEqual(calls, [["up", "-d"]])
-        self.assertEqual(commands, [])
+        # Only the interrupted-recreate listing (R2-028); no resident version is read.
+        self.assertEqual([argv for argv in commands if argv[:3] != ["docker", "ps", "-a"]], [])
 
     def test_a_start_on_the_image_the_pair_already_runs_reads_no_versions(self):
         calls, _, commands = self._start(tag_version="1.10.4", tag_id="sha256:running")

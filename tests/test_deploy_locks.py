@@ -121,6 +121,37 @@ class DeployLockTests(_InTemp):
                 self.assertIsNone(previous)
 
 
+class ProjectNameTests(_InTemp):
+    """R2-083: `./start.sh -d` silently started a second stack."""
+
+    def test_an_overlay_naming_another_project_is_refused(self):
+        from composer.launcher import project_name_conflict
+
+        Path("compose.yml").write_text("name: testbed-breakit2-nonroot\nservices: {}\n")
+        Path("compose.dev.yml").write_text("# dev\nname: 'bk2nr'  # scaffold\nservices: {}\n")
+        message = project_name_conflict(["compose.yml", "compose.dev.yml"])
+        self.assertIn("names the Compose project 'bk2nr'", message)
+        self.assertIn("`name: testbed-breakit2-nonroot`", message)
+
+    def test_matching_or_absent_names_pass(self):
+        from composer.launcher import project_name_conflict
+
+        Path("compose.yml").write_text("name: demo\nservices: {}\n")
+        Path("compose.dev.yml").write_text("services:\n  web:\n    name: not-top-level\n")
+        self.assertEqual(project_name_conflict(["compose.yml", "compose.dev.yml"]), "")
+        Path("compose.dev.yml").write_text("name: demo\n")
+        self.assertEqual(project_name_conflict(["compose.yml", "compose.dev.yml"]), "")
+        self.assertEqual(project_name_conflict(["compose.yml"]), "")
+
+    def test_an_overlay_name_against_the_directory_default(self):
+        from composer.launcher import default_project_name, project_name_conflict
+
+        Path("compose.yml").write_text("services: {}\n")
+        Path("compose.dev.yml").write_text("name: other\n")
+        self.assertIn(f"makes it '{default_project_name('.')}'",
+                      project_name_conflict(["compose.yml", "compose.dev.yml"]))
+
+
 class ExecutorForwardsTheRefusalTests(unittest.TestCase):
     """R2-078 (a): the panel showed only "executor operation failed."."""
 
