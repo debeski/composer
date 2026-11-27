@@ -782,6 +782,8 @@ class ComposerAgent:
         from . import maintenance_page
 
         self._next_page_check = time.monotonic() + MAINTENANCE_PAGE_RECHECK_SECONDS
+        if not Path(self.watch.runtime_root).is_dir():
+            return  # no runtime volume here: nothing for the proxy to serve
         try:
             if maintenance_page.publish(self.watch.runtime_root):
                 print("✔ maintenance page published", flush=True)
