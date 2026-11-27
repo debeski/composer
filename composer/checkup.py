@@ -259,6 +259,7 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
             "password, SECRET_KEY).",
             fix=f"Run 'chmod 600 {path}'. The user that runs ./start.sh keeps reading it, and composer-executor "
             "reads it through its DAC_OVERRIDE capability.",
+            manual=f"chmod 600 {path}",
         )
 
     def _check_executor_secret_access(self, path: Path) -> Dict[str, Any]:
@@ -3143,8 +3144,11 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     ".", self._maintenance_compose_files(), environment=self._compose_env_with_secrets()
                 )
                 if outcome["applied"]:
+                    sharing = stack_lifecycle.join(
+                        name for name in ("web", "worker", "smtp-relay") if name in set(self.services)
+                    ) or "The services"
                     detail = (
-                        "web, worker and smtp-relay share the SMTP relay's settings (password excepted): "
+                        f"{sharing} share the SMTP relay's settings (password excepted): "
                         + ", ".join(outcome["files"])
                     )
                     if outcome["recreated"]:

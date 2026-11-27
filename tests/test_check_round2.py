@@ -85,6 +85,7 @@ class SecretsModeTests(_Project):
         self.assertEqual(result["level"], WARN)
         self.assertIn("mode 0644", result["message"])
         self.assertIn("chmod 600 .secrets/.env", result["fix"])
+        self.assertEqual(dict(guidance.summary([result], [], [])["still"])["secrets"], "chmod 600 .secrets/.env")
 
     def test_0600_passes(self):
         self.assertEqual(self._check(0o600)["level"], OK)
