@@ -24,7 +24,7 @@ Both carry a marker (line 2 of `start.sh`, after the shebang; line 1 of
 `start.ps1`):
 
 ```bash
-# composer-wrapper: 7
+# composer-wrapper: 8
 ```
 
 It is a plain integer, bumped only when the wrapper bytes change, deliberately
@@ -59,9 +59,19 @@ Publishing a new wrapper version is a release step: see
 
 ## Secrets
 
-Composer resolves secrets automatically. It looks for a plaintext env file
-(`.env`, `secrets/.env`, then `.secrets/.env`) and uses the first one that exists.
+Composer resolves secrets automatically. The wrappers look for a plaintext env file
+(`.env`, `secrets/.env`, then `.secrets/.env`) and pass the first one that exists to
+Composer as `--env-file`. They refuse to start, naming the files and the keys, when
+another of those files holds keys the first one lacks: a stray project-root `.env`
+would otherwise shadow `.secrets/.env` and the deploy would run on compose defaults.
+Move the file you do not use into `.xclude/`, or merge them.
 [`check`](check.md#secrets) warns when that file shadows another of them.
+
+Docker reads the file as `--env-file`, so every value line is `KEY=value`: no
+`export`, no spaces around `=`. The wrappers refuse any other shape and name the
+line. Compose variables reach Composer only through this file: a variable set in the
+shell (`WEB_IMAGE=… ./start.sh`) is not passed, and the wrappers warn when the
+Compose file reads one that is set only there.
 
 `check --fix` writes to that file only when an operator at a terminal answers one
 of its questions (`DLUX_FRONT_PROXY`, `DLUX_UPDATE_POLICY`): the one line is set in
@@ -206,17 +216,50 @@ then reads wrongly. The guard is always on; it does not need the opt-in
   Each copy names the database it describes (`database`: the Postgres data volume,
   the named volume mounted at `/var/lib/postgresql/data` or `/var/lib/postgresql`,
   and its creation time). A copy whose volume no longer exists, or was created
-  again since (`down -v`, a restore onto a new volume), describes another database:
-  it is not compared, the run says so, and the deploy's `up` replaces it. A copy
-  without `database`, or a stack whose volume Docker cannot describe, is compared.
+  again since (`down -v`, a restore onto a new volume, a move to another host), is
+  not compared with the target: the run says so, and the deploy's `up` replaces it.
+  A copy without `database`, or a stack whose volume Docker cannot describe, is
+  compared.
+- **The database itself**: the records cannot follow the data (a restore into a new
+  volume, a move to another host, a fresh clone with no record), so the guard also
+  reads the database's applied migrations (`django_migrations`) in the stack's own
+  Postgres service, with `docker compose exec` and the container's own
+  `POSTGRES_USER` / `POSTGRES_DB`. A Postgres service that is not running is started
+  first, as the `up` that follows would start it, and stopped again when the deploy
+  is refused. It lists the migrations the target ships in a throwaway container of
+  the target image (`--network none`, `--pull never`, read-only, nothing imported):
+  the `migrations/` packages under its working directory, `PYTHONPATH` and
+  site-packages, the names a squashed migration `replaces` included, and the
+  runtime volume's active DjangoLux release when there is one. The database has
+  newer code's migrations when it holds a migration of an app the target ships under
+  a name the target does not know; an app the target does not ship at all is not
+  compared. A stack with no Postgres service, or an empty database, has nothing to
+  compare. When the database or the image cannot be read, the run warns and
+  compares the records and containers only.
 
   When neither copy can be written, the run says so as a
   [deploy-status](#deploy-status) warning: the guard then relies on container labels
   alone, which a `down` removes. When only the deploy-root copy fails, the console
   log notes it.
+- **Older DjangoLux code on a newer schema**: a target whose only difference is an
+  older DjangoLux (the app version is not older, and every migration the target does
+  not know belongs to DjangoLux or its dependencies, none to the project's own apps)
+  follows DjangoLux's own rollback rule, `migrations.rollback_compatible` in the
+  DjangoLux release manifest. The release being left is the newest DjangoLux the
+  records and containers name for this database, or the oldest readable release that
+  knows every migration the target does not, whichever is newer. It must be readable
+  (a release on the runtime volume, or a local image this deployment ran: the
+  records' images and the app containers' images), and it and every readable
+  release between the target and it must declare `rollback_compatible: true`. Then
+  the deploy goes ahead with a warning: migrations are never reversed, so the
+  database keeps the newer release's migrations and a backup taken before that
+  release no longer matches it. To restore that backup later, update back to its
+  version first, or restore it with “Ignore database version mismatch”. Otherwise
+  it is refused, saying why.
 - **Refused**: the run stops before anything is recreated and names each older
-  version. To go back on purpose, restore a database backup taken before the newer
-  release, then deploy with `--force`; a forced deploy becomes the new record.
+  version, or the migrations the target does not know. To go back on purpose,
+  restore a database backup taken before the newer release, then deploy with
+  `--force`; a forced deploy becomes the new record.
 - **Not compared**: `-d` and `-b` runs (local builds carry no labels) and scoped
   runs that do not touch the app services.
 - **What was deployed**: the record also names the image `up` used, by tag
@@ -249,6 +292,38 @@ runtime supervisor serves an image's baked package when the image is below that
 floor; an older image runs its own supervisor, which never checks, so this
 pre-`up` refusal is the only defence there.
 
+### One operation at a time
+
+A deploy (`./start.sh`, `update`, `restart`, `stop`, `agent update`, and the
+resident pair's updates and recoveries), a `check --fix` and an Operations-panel
+apply hold one lock per project, `.xclude/composer-check/check-fix.lock` (`flock`),
+for their whole run. A second one started meanwhile is refused at once and changes
+nothing; the refusal names what holds the lock (the command, its container when it
+runs in one, pid, host and start time) and how to stop a holder that waits for an
+answer (`docker stop <container>`). An Operations apply refused this way shows that
+refusal in the panel. A `pull` changes no container and takes no lock. The system
+frees the lock when the holder ends, however it ends; a holder that was killed is
+reported by the next run, which deploys every service again. The resident pair
+mounts the project read-only and takes the same lock through a read-only
+descriptor.
+
+### Before `up`
+
+- **An interrupted recreate**: Compose recreates a service by renaming the old
+  container to `<12 hex>_<name>`, creating the new one and removing the old. A
+  deploy killed in between leaves the renamed container. Before `up`, Composer
+  removes such a container when it is stopped (its volumes stay) and gives a
+  running one its own name back when that name is free, and says so.
+- **OCR without its engine**: a service that runs `python -m dlux.ocr.serve` on an
+  image without the `django-lux[ocr]` extra cannot start. Composer asks the image
+  (`--network none`, `--pull never`) whether it ships the engine; when it does not,
+  the service is left out of the run and stopped, with a warning. Build the image
+  with the extra, or add `COMPOSER_EXCLUDE_SERVICES=ocr` to the secrets file.
+- **The dev overlay's project**: with `-d`, `compose.dev.yml` must not name another
+  Compose project (`name:`) than `compose.yml`. The last `name:` wins in Compose, so
+  it would start a second stack with fresh volumes beside the real one; the run is
+  refused (exit 2) and names both.
+
 ### Health check
 
 After `up`, every monitored service must reach healthy (running, and `healthy` when
@@ -268,7 +343,12 @@ healthy. The run fails, naming the service and its last log lines, when:
   crash-looping service without a healthcheck reads as running between crashes, so
   one healthy poll is not proof;
 - a service that was healthy leaves that state before every service has passed;
-- not every service is healthy within 180 s of the last state change.
+- not every service is healthy within 180 s of the last state change;
+- after the post-start tasks, a container has restarted since the first health poll,
+  or a service is no longer healthy. Composer then waits, when needed, until every
+  container has been up for the confirmation window, 30 s by default and never
+  shorter than the settle window (`COMPOSER_HEALTH_CONFIRM_SECONDS`), so a crash
+  loop slower than the settle window still fails the deploy.
 
 The failure also names the likely cause when the service's last log lines or exit
 code show one: a Python module missing from the image (a service left over from an
@@ -277,7 +357,13 @@ missing command, a port already in use, an unreachable database or Redis, a sche
 that does not match the code, incomplete settings, a permission problem, or exit 137
 (out of memory). It ends with the next steps: `./start.sh logs SERVICE`, and adding
 `COMPOSER_EXCLUDE_SERVICES=SERVICE` to the secrets file to deploy without it while it
-is fixed. A failed `up` and a failed `restart` carry the same diagnosis.
+is fixed. The service that failed comes first and is the one the next steps name:
+one whose `pre_start` hook failed, then one that crashes (restarting, or exited
+non-zero), before a service that is only unhealthy because it waits for it (`web`
+waiting for the migrations a crashing `worker` never applies). Quoted log lines and
+a failed hook's message carry the exception line, never a traceback's caret line
+(`~~~^^`) or a blank one. A failed `up` and a failed `restart` carry the same
+diagnosis.
 
 `restart` and inline DjangoLux updates (`dlux update`, `dlux rollback`) use the same check.
 

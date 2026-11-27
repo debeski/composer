@@ -225,16 +225,28 @@ keeps the tag and says so. `check` reports the unpinned state as OK, and
 `check --fix` only pins the block to a lock that already exists. It never goes to
 the network.
 
-That pull of the channel tag also moves the local tag the pair's block names. When
-it now names an older Composer than the running pair, or an image whose release
-cannot be read, `./start.sh` and every other `up` leave `composer-agent` and
-`composer-executor` as they are, warn with both versions and exit 0: move the pair
-with `agent update`, which verifies, or switch on purpose with `check --beta` /
-`check --stable`. A newer or equal release, a stopped pair and an explicit
-`COMPOSER_SELF_IMAGE` are started as the block says.
+That pull of the channel tag also moves the local tag the pair's block names, and a
+`compose.yml` restored from git or a backup, or an edited pin line, can name an
+older pinned release. When the block names an older Composer than the running pair
+(the image's own version, or the pinned tag's when the image is not local yet), an
+image whose release cannot be read, or a pinned image whose version is not the one
+its tag names, `./start.sh` and every other `up` leave `composer-agent` and
+`composer-executor` as they are, warn and exit 0: move the pair with `agent
+update`, which verifies, or switch on purpose with `check --beta` / `check
+--stable`. A newer or equal release, a stopped pair and an explicit
+`COMPOSER_SELF_IMAGE` are started as the block says. A pair left on an older
+Composer than the deployer is named in the deploy's warnings, with `agent update` as
+the way on.
+
+`.composer-image` is read the same way by both wrappers and by Composer: the first
+non-empty line, stripped at its ends (and of a byte-order mark), must be a pinned
+reference whole. Nothing inside it is removed, so a malformed lock reads as no lock
+everywhere.
 
 Wrapper 7 is the first that reads `.composer-image`. An older wrapper keeps pulling
-the channel tag for the deployer, and `check --fix` replaces it.
+the channel tag for the deployer, and `check --fix` replaces it. When the deployer
+the lock names cannot resolve the pin (a release from before that route prints only
+its usage line), the wrapper points to `./start.sh agent update`.
 
 ## Inline DjangoLux updates
 

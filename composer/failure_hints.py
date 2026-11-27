@@ -7,6 +7,16 @@ DjangoLux stacks; anything else gets only the generic next steps.
 import re
 from typing import Iterable, List, Optional
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+#: Compose's log prefix, ``worker-1  | ``.
+_LOG_PREFIX = re.compile(r"^[A-Za-z0-9_.-]+-\d+\s+\|\s?")
+#: Python's traceback marker lines (``~~~~^^``): they point at text, they say nothing.
+_CARET = re.compile(r"^[\s~^]*$")
+_FRAME = re.compile(r'^\s*(File "|Traceback \(most recent call last\)|\.\.\.)')
+_EXCEPTION = re.compile(r"^[A-Za-z_][\w.]*(Error|Exception|Exit|Interrupt|Warning|Failure)\b")
+#: Compose's message for a failed lifecycle hook; the tail is the hook's last output line.
+_HOOK = re.compile(r'service "([^"]+)" (pre_start|post_start)\[\d+\] exited with code (\d+)(?::[ \t]*(.*))?$')
+
 _CAUSES = (
     (
         re.compile(r"No module named '?([A-Za-z0-9_.]+)'?"),
@@ -81,3 +91,59 @@ def next_steps(services: Iterable[str]) -> str:
         f"COMPOSER_EXCLUDE_SERVICES={joined} to the secrets file (.secrets/.env); Composer then "
         "leaves it out of `up` and the health check"
     )
+
+
+def _clean(line: str) -> str:
+    return _LOG_PREFIX.sub("", _ANSI.sub("", line)).strip()
+
+
+def uninformative(line: str) -> bool:
+    """A blank line, a traceback caret line or a traceback frame line."""
+    line = _clean(line)
+    return not line or bool(_CARET.match(line)) or bool(_FRAME.match(line))
+
+
+def meaningful_line(text: str) -> str:
+    """The last line of ``text`` that says what went wrong (R2-002, R2-126).
+
+    The last exception line (``AttributeError: …``) when there is one, else the
+    last line that is neither blank, a caret line (``~~~~^^``) nor a frame line.
+    """
+    lines = [_clean(line) for line in (text or "").splitlines()]
+    for line in reversed(lines):
+        if _EXCEPTION.match(line):
+            return line
+    for line in reversed(lines):
+        if not uninformative(line):
+            return line
+    return ""
+
+
+def hook_failures(text: str) -> List[str]:
+    """Services whose Compose ``pre_start``/``post_start`` hook failed, in order."""
+    found: List[str] = []
+    for line in (text or "").splitlines():
+        match = _HOOK.search(_clean(line))
+        if match and match.group(1) not in found:
+            found.append(match.group(1))
+    return found
+
+
+def clarify_hook_lines(text: str) -> str:
+    """Give each failed-hook line the hook's meaningful line instead of a caret or nothing.
+
+    Compose quotes only the hook's last output line, which for a Python
+    traceback is the caret line under the failing call. The meaningful line is
+    taken from what follows in ``text`` (Compose and the logs print it there).
+    """
+    lines = (text or "").splitlines()
+    result = []
+    for index, line in enumerate(lines):
+        match = _HOOK.search(_clean(line))
+        if match and uninformative(match.group(4) or ""):
+            reason = meaningful_line("\n".join(lines[index + 1:index + 40]))
+            head = line[:line.find(match.group(0)) + len(match.group(0)) - len(match.group(4) or "")].rstrip()
+            head = head[:-1] if head.endswith(":") else head
+            line = f"{head}: {reason}" if reason else head
+        result.append(line)
+    return "\n".join(result)

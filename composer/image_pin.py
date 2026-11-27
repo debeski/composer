@@ -122,17 +122,45 @@ def lock_file(project_dir=".") -> Path:
     return Path(project_dir) / LOCK_FILENAME
 
 
+#: What the wrappers strip from the ends of the lock's line (bash and PowerShell alike).
+_LOCK_BLANKS = " \t\r\v\f"
+
+
+def _lock_line(raw: str) -> str:
+    """The first non-empty line, stripped at its ends only, as both wrappers read it.
+
+    A leading UTF-8 byte-order mark is dropped, as PowerShell's ``Get-Content`` drops it.
+    """
+    raw = raw[1:] if raw.startswith("\ufeff") else raw
+    for line in raw.split("\n"):
+        line = line.strip(_LOCK_BLANKS)
+        if line:
+            return line
+    return ""
+
+
 def read_lock(project_dir=".") -> Optional[Pin]:
     """The pin in ``.composer-image``, or ``None``. Never raises.
 
-    A malformed lock reads as no lock. The wrapper applies the same rule, so the
-    two never disagree about which image runs.
+    The first non-empty line, stripped at its ends, must be a pinned reference
+    whole; nothing inside it is removed. A malformed lock reads as no lock. The
+    wrappers apply the same rule, so they never disagree about which image runs.
     """
     try:
         raw = lock_file(project_dir).read_text(encoding="utf-8")
     except (OSError, ValueError):
         return None
-    return parse_ref(raw.strip().splitlines()[0] if raw.strip() else "")
+    match = PINNED_REF.match(_lock_line(raw))
+    return Pin(version=match.group("tag")[1:], digest=match.group("digest")) if match else None
+
+
+def lock_state(project_dir=".") -> "tuple[str, Optional[Pin]]":
+    """``("absent" | "unreadable" | "valid", pin)``: a lock present but unusable is not "no lock"."""
+    path = lock_file(project_dir)
+    if not path.exists():
+        return "absent", None
+    pin = read_lock(project_dir)
+    return ("valid", pin) if pin is not None else ("unreadable", None)
 
 
 def write_lock(pin: Pin, project_dir=".") -> Path:

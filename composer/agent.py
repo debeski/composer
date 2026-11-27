@@ -29,6 +29,8 @@ MAINTENANCE_PAGE_RECHECK_SECONDS = 10.0
 
 # DjangoLux's snapshot.json is the largest document the agent reads off the
 # shared volume; anything bigger is not a snapshot it wrote.
+#: agent-status.json is rewritten at least this often while the agent runs (R2-102).
+STATUS_HEARTBEAT_SECONDS = 60
 MAX_SNAPSHOT_BYTES = 256 * 1024
 
 
@@ -273,6 +275,10 @@ class ComposerAgent:
         status = {
             "schema_version": 1,
             "observed_at": utc_now(),
+            # The file is rewritten at least this often while the agent runs, so its
+            # age says whether the agent is alive (DjangoLux's doctor: older than 3x
+            # is stale). Unchanged content alone used to leave it untouched for days.
+            "heartbeat_seconds": STATUS_HEARTBEAT_SECONDS,
             "enrolled": enrolled,
             "control_url": self.control_url,
             "agent_id": credentials.get("agent_id") if credentials else "",
@@ -306,10 +312,14 @@ class ComposerAgent:
         digest = hashlib.sha256(
             json.dumps({k: v for k, v in status.items() if k != "observed_at"}, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        if not force and self.store.get_meta("agent_status_digest") == digest:
+        now = time.monotonic()
+        written = getattr(self, "_status_written_at", None)
+        fresh = written is not None and now - written < STATUS_HEARTBEAT_SECONDS
+        if not force and fresh and self.store.get_meta("agent_status_digest") == digest:
             return
         self.store.set_meta("agent_status_digest", digest)
         self._atomic_json(self.agent_status_path, status)
+        self._status_written_at = now
 
     def _atomic_json(self, path: Path, payload: Dict[str, Any]):
         safe_files.atomic_write_json(path, payload)

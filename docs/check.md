@@ -47,9 +47,12 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
 
 ## How `--fix` is guarded
 
-0. **One at a time.** `--fix` holds `.xclude/composer-check/check-fix.lock` (`flock`)
-   for the whole run. A second `--fix` on the same project is refused at once with
-   `check-fix` FAIL, naming the holder's pid, host and start time, and changes
+0. **One at a time.** `--fix` holds the project's operation lock,
+   `.xclude/composer-check/check-fix.lock` (`flock`), for the whole run; deploys and
+   Operations applies hold the same lock ([one operation at a
+   time](deploying.md#one-operation-at-a-time)). A `--fix` started while another
+   operation runs on the same project is refused at once with `check-fix` FAIL,
+   naming the holder (its command, container, pid, host and start time), and changes
    nothing. A run keeps going when its terminal is closed or its `./start.sh` is
    killed (the Composer container finishes it), so wait for it (`docker ps` lists
    it). The system frees the lock when the holder ends, however it ends. The holder
@@ -168,7 +171,10 @@ archived) and the resident pair is left as it is. Every remaining step is a
 Some findings are the operator's choice rather than a defect. With a terminal on
 stdin and without `-y`, `COMPOSER_ASSUME_YES` or `--json`, `check --fix` asks them as
 short questions before it plans, each with the recommended answer as the default
-(Enter) and `s` to skip. A script, the resident pair and an Operations panel apply
+(Enter) and `s` to skip; `yes` and `no` answer `y` and `n`. A question nobody answers
+within 600 s (`COMPOSER_QUESTION_TIMEOUT_SECONDS`) counts as skipped, and an
+unanswered confirmation as not confirmed, so a run whose terminal went away ends and
+frees the lock. A script, the resident pair and an Operations panel apply
 are never asked: they keep the WARN and its advice, as without the questions.
 
 | Question | Asked when | Answer |

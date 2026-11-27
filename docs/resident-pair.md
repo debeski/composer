@@ -55,6 +55,15 @@ Both halves read `DLUX_UPDATE_POLICY` from their own environment and refuse the
 update requests it does not allow, the executor even when the agent asks for them
 ([what the application may request](updates.md#what-the-application-may-request)).
 
+Both stop on SIGTERM the way they stop on Ctrl+C, so `docker compose stop` and a
+recreate end them at once instead of killing them at the stop timeout. Their
+deploys and recoveries take the project's operation lock like any other deploy
+([one operation at a time](deploying.md#one-operation-at-a-time)).
+
+The agent writes `agent-status.json` on the runtime volume whenever its content
+changes and at least every `heartbeat_seconds` (60) while it runs, with a fresh
+`observed_at`, so the file's age tells DjangoLux whether the agent is alive.
+
 ## `agent watch`
 
 `composer agent watch --trigger-file PATH [--interval N]` is the plain watcher that

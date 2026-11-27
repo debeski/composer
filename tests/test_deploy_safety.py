@@ -591,6 +591,8 @@ class DatabaseRecordTests(unittest.TestCase):
             return False, "", "unexpected"
 
         self.launcher.run_command = run_command
+        # The records alone: the database's migrations cannot be read here.
+        self.launcher.applied_migrations = lambda database: (None, "")
         downgrade_guard.write_record(
             downgrade_guard.label_versions(NEW), "debeski/decrees:v2.2.1", replace=False, database=self.MIGRATED
         )
@@ -802,7 +804,9 @@ class RuntimeFloorTests(unittest.TestCase):
             [sys.executable, "-I", "-c", downgrade_guard.RUNTIME_STATE_SCRIPT, str(root)],
             capture_output=True, text=True, check=True,
         ).stdout
-        return json.loads(out)
+        payload = json.loads(out)
+        payload.pop("manifests", None)
+        return payload
 
     def test_the_script_reads_the_active_release_floor(self):
         self.assertEqual(
