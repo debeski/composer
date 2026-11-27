@@ -529,23 +529,29 @@ class DockerComposeLauncher(
         return out.strip() if ok else ""
 
     def hold_older_resident_tag(self) -> List[str]:
-        """Keep an unscoped `up` from recreating the pair on an older Composer behind its channel tag.
+        """Keep an unscoped `up` from recreating the pair on an older Composer.
 
-        Before the first pin the wrapper pulls the channel tag, so the tag the
-        block names can come to name an older Composer than the running pair, and
-        `up` would recreate the pair on it (a new image ID behind the same
-        reference). A running resident whose tag now names an older release, or an
-        image whose release cannot be read, is left out of `up`. A newer or equal
-        release, a stopped pair and an explicit ``COMPOSER_SELF_IMAGE`` go ahead as
-        before. Returns the services held.
+        The block can come to name an older Composer than the running pair in two
+        ways: the wrapper pulled the channel tag before the first pin (a new image
+        ID behind the same reference), or the pinned block itself names an older
+        release (a ``compose.yml`` restored from git or a backup, an edited pin
+        line: R2-023). Either way `up` would recreate the pair backwards. A
+        running resident whose block names an older release, an image whose
+        release cannot be read, or a pinned image whose version is not the one
+        its tag names (R2-025) is left out of `up`. A newer or equal release, a
+        stopped pair and an explicit ``COMPOSER_SELF_IMAGE`` go ahead as before.
+        Returns the services held.
         """
+        from . import image_pin
         from .service_selection import scoped_service_list
-        from .stack_lifecycle import join
+        from .stack_lifecycle import RESIDENT_SERVICES, images, join
         from .versions import try_parse
 
         if os.environ.get("COMPOSER_SELF_IMAGE", "").strip() or scoped_service_list(self.up_service):
             return []
-        candidates, defined = self._resident_on_moving_tag()
+        excluded = set(self.exclude_services or [])
+        defined = images(self.compose_config_json())
+        candidates = [name for name in RESIDENT_SERVICES if name not in excluded and name in defined]
         if not candidates:
             return []
         ok, rows, _ = self.get_compose_ps_entries()
@@ -556,36 +562,97 @@ class DockerComposeLauncher(
         }
         held, seen = [], {}
         detail = ""
+        running_versions = []
         for name in candidates:
             if not containers.get(name):
                 continue
             found, out, _ = self.run_command(
                 ["docker", "inspect", "--format", "{{.Image}}", containers[name]], timeout=15)
             running = out.strip() if found else ""
-            tagged = self._local_image_id(defined[name])
+            reference = defined[name]
+            tagged = self._local_image_id(reference)
+            pin = image_pin.parse_ref(reference)
+            if running and running == tagged and pin is not None:
+                seen.setdefault(running, self._composer_image_version(running))
+                if try_parse(seen[running]) not in (None, try_parse(pin.version)):
+                    self.warn_operator(
+                        f"{name} runs {reference}, whose tag names Composer {pin.version}, but that image is "
+                        f"Composer {seen[running]}: the lock or the block pins a digest of another release. Run "
+                        "'./start.sh agent update' to pin the channel's verified release."
+                    )
             if not running or running == tagged:
                 continue
             for image in (running, tagged):
                 if image and image not in seen:
                     seen[image] = self._composer_image_version(image)
-            mine, theirs = try_parse(seen.get(running)), try_parse(seen.get(tagged) if tagged else "")
+            actual = seen.get(tagged, "") if tagged else ""
+            mine = try_parse(seen.get(running))
+            running_versions.append(seen.get(running) or "")
+            if pin is not None and actual and try_parse(actual) is not None and \
+                    try_parse(actual) != try_parse(pin.version):
+                held.append(name)
+                detail = (f"names Composer {pin.version} in its tag, but that image is Composer {actual}: "
+                          "the tag and the digest disagree")
+                continue
+            theirs = try_parse(actual) if actual else (try_parse(pin.version) if pin is not None else None)
             if mine is None or (theirs is not None and theirs >= mine):
                 continue
             held.append(name)
+            named = actual or (pin.version if pin is not None else "")
             detail = (
-                f"now names Composer {seen[tagged]}, older than the running {seen[running]}"
+                f"now names Composer {named}, older than the running {seen[running]}"
                 if theirs is not None else
                 f"now names an image whose Composer release cannot be read (running: {seen[running]})"
             )
-        if not held:
-            return []
-        one = len(held) == 1
-        self._leave_out(held, (
-            f"{join(held)} {'was' if one else 'were'} left as {'it is' if one else 'they are'}: "
-            f"{defined[held[0]]} {detail}. Run './start.sh agent update', which verifies the channel's "
-            "release, or 'check --beta' / 'check --stable' to switch on purpose."
-        ))
+        if held:
+            one = len(held) == 1
+            self._leave_out(held, (
+                f"{join(held)} {'was' if one else 'were'} left as {'it is' if one else 'they are'}: "
+                f"{defined[held[0]]} {detail}. Run './start.sh agent update', which verifies the channel's "
+                "release, or 'check --beta' / 'check --stable' to switch on purpose. To run that image on "
+                "purpose, set COMPOSER_SELF_IMAGE to it."
+            ))
+        self.warn_pair_behind_deployer([name for name in candidates if name not in held], seen, containers)
         return held
+
+    def warn_pair_behind_deployer(self, services: List[str], seen: Dict[str, str], containers: Dict[str, str]) -> None:
+        """Say so when the resident pair stays on an older Composer than this deployer (C1-11).
+
+        A plain `./start.sh` never moves the pair forward on its own (only its pin
+        does), so a pair left on an old moving tag used to stay there silently.
+        """
+        from .stack_lifecycle import join
+        from .versions import try_parse
+
+        deployer = try_parse(self.composer_version)
+        if deployer is None:
+            return
+        behind, version = [], ""
+        for name in services:
+            container = containers.get(name)
+            if not container:
+                continue
+            found, out, _ = self.run_command(["docker", "inspect", "--format", "{{.Image}}", container], timeout=15)
+            image = out.strip() if found else ""
+            if not image:
+                continue
+            if image not in seen:
+                seen[image] = self._composer_image_version(image)
+            parsed = try_parse(seen[image])
+            if parsed is not None and parsed < deployer:
+                behind.append(name)
+                version = seen[image]
+        if not behind:
+            return
+        one = len(behind) == 1
+        warnings = getattr(self, "deploy_warnings", None)
+        if warnings is None:
+            warnings = self.deploy_warnings = []
+        warnings.append(
+            f"{join(behind)} run{'s' if one else ''} Composer {version}, older than this deployer "
+            f"({self.composer_version}). Run './start.sh agent update' to move "
+            f"{'it' if one else 'them'} to the channel's signed release."
+        )
 
     def configure_update(self, argv):
         """Configure `composer update [opts] [service...]` for the update pipeline."""

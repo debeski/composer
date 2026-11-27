@@ -787,7 +787,8 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
             launcher.run()
         return compose_calls, out.getvalue(), launcher
 
-    def _start(self, *, tag_version, running_version="1.11.0b1", tag_id="sha256:tag", pair_running=True, env=None):
+    def _start(self, *, tag_version, running_version="1.11.0b1", tag_id="sha256:tag", pair_running=True, env=None,
+               resident_image="debeski/composer:beta"):
         """A plain `./start.sh` after the wrapper re-pointed the local `debeski/composer:beta`."""
         from composer.version import RELEASE_MANIFEST_LABEL
 
@@ -808,7 +809,7 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
             "get_compose_ps_entries": lambda include_all=False: (True, rows, ""),
             "image_labels": lambda image: {RELEASE_MANIFEST_LABEL: json.dumps({"version": versions.get(image, "")})},
         }
-        calls, out, _ = self._run([], env=env, effects=effects)
+        calls, out, _ = self._run([], env=env, effects=effects, resident_image=resident_image)
         return calls, out, commands
 
     def test_agent_update_with_nothing_to_pin_pulls_and_recreates_nothing(self):
@@ -878,6 +879,45 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
         calls, _, commands = self._start(tag_version="1.10.4", tag_id="sha256:running")
         self.assertEqual(calls, [["up", "-d"]])
         self.assertFalse(any(argv[:2] == ["docker", "run"] for argv in commands))
+
+    def test_a_start_leaves_the_pair_off_an_older_pinned_block(self):
+        """R2-023: a b1-pinned compose.yml restored over a b2 pair moved it back to b1."""
+        b1 = f"debeski/composer:v1.11.0b1@{DIGEST_A}"
+        calls, out, _ = self._start(tag_version="1.11.0b1", running_version="1.11.0b2", resident_image=b1)
+        self.assertEqual(calls, [["up", "-d", "web", "worker"]])
+        self.assertIn("now names Composer 1.11.0b1, older than the running 1.11.0b2", out)
+
+    def test_an_older_pinned_block_not_pulled_yet_is_judged_by_its_tag(self):
+        b1 = f"debeski/composer:v1.11.0b1@{DIGEST_A}"
+        calls, out, _ = self._start(tag_version="", running_version="1.11.0b2", tag_id="", resident_image=b1)
+        self.assertEqual(calls, [["up", "-d", "web", "worker"]])
+        self.assertIn("now names Composer 1.11.0b1", out)
+
+    def test_a_newer_pinned_block_recreates_the_pair(self):
+        b3 = f"debeski/composer:v1.11.0b3@{DIGEST_A}"
+        calls, _, _ = self._start(tag_version="1.11.0b3", running_version="1.11.0b2", resident_image=b3)
+        self.assertEqual(calls, [["up", "-d"]])
+
+    def test_a_pin_whose_image_is_another_release_is_held(self):
+        """R2-025: `v1.11.0b2@<b1 digest>` ran b1 under a b2 name."""
+        lying = f"debeski/composer:v1.11.0b2@{DIGEST_A}"
+        calls, out, _ = self._start(tag_version="1.11.0b1", running_version="1.11.0b1", resident_image=lying)
+        self.assertEqual(calls, [["up", "-d", "web", "worker"]])
+        self.assertIn("names Composer 1.11.0b2 in its tag, but that image is Composer 1.11.0b1", out)
+
+    def test_a_pair_already_on_a_mislabelled_pin_is_warned_about(self):
+        lying = f"debeski/composer:v1.11.0b2@{DIGEST_A}"
+        _, out, _ = self._start(tag_version="1.11.0b1", running_version="1.11.0b1", tag_id="sha256:running",
+                                resident_image=lying)
+        self.assertIn("whose tag names Composer 1.11.0b2, but that image is Composer 1.11.0b1", out)
+
+    def test_a_pair_behind_the_deployer_is_named(self):
+        """C1-11: a beta-channel stack kept its pair on `:latest` 1.10.4 silently."""
+        calls, out, _ = self._start(tag_version="1.10.4", running_version="1.10.4", tag_id="sha256:running",
+                                    resident_image="debeski/composer:latest")
+        self.assertEqual(calls, [["up", "-d"]])
+        self.assertIn("run Composer 1.10.4, older than this deployer", out)
+        self.assertIn("./start.sh agent update", out)
 
     def test_a_start_leaves_the_pair_off_a_tag_it_cannot_read(self):
         calls, out, _ = self._start(tag_version="", tag_id="")
