@@ -21,12 +21,25 @@ applies (default 900). A new token in `state/check-request.json` makes the agent
 re-check images and packages immediately and write `check-request.json.ack` with
 that token, once per token, including across restarts.
 
+Every trigger and request here (`image-update-request.json`,
+`package-update-request.json`, `check-request.json`, `ops-request.json`) and its ack
+is read without blocking, without following a link, only when it is a regular file
+and only up to 64 KiB. Anything else at that name (a FIFO, a symlink, a directory, a
+larger file) is renamed to `<name>.refused`, logged and never read, and the next
+request DjangoLux writes by rename is read as usual. "Once per token" covers the
+recent tokens, not only the last one: the agent remembers the newest 256 and keeps
+the newest 32 in the ack's `recent_tokens`, so a replay of an older request is
+skipped, also after a restart.
+
 ## Operations requests from DjangoLux
 
 DjangoLux's Operations card asks the resident Composer to perform one **named**
 operation: it writes `state/ops-request.json` with a token and an operation name,
 and the agent (or `watch`) publishes `state/ops-result.json` and
-`ops-request.json.ack` under that token, once per token and across restarts.
+`ops-request.json.ack` under that token, once per token and across restarts. The
+operation runs beside the agent's loop, one at a time: check requests, the relay
+and availability keep answering while it waits on the executor, and an image or
+package update waits for it to finish.
 `composer/ops.py` owns the table of operations that exist (`HANDLERS`); anything
 else is refused with a message rather than attempted, and the request carries no
 command, path or flag. The operation name is the whole input, except that the
@@ -43,7 +56,7 @@ services; optional for `logs-tail`) and `logs-tail` a `lines` count (1–1000).
 | `services` | read-only | every Compose service with its state, health, `org.dlux.restart` label, `can_restart` (allow-listed in `COMPOSER_AGENT_RESTART_SERVICES`, not protected), and `can_lifecycle`, `can_start` and `can_stop` |
 | `service-restart`, `service-recreate` | write | hand one such service to the executor (`restart`, or `recreate`: `docker compose up -d --no-deps --force-recreate SERVICE`, run with the deployment's secrets resolved like any deploy and refused when they cannot be read), which re-applies the same policy |
 | `service-start`, `service-stop` | write | hand one required `service` to the executor's `start`/`stop`: `docker compose start SERVICE` / `stop SERVICE` |
-| `logs-tail` | read-only | the last `lines` of one service's logs, or with no `service` the newest `lines` of every service merged in time order, each line with Compose's own `service-N \|` prefix, redacted and capped at 60000 characters |
+| `logs-tail` | read-only | the last `lines` of one service's logs, or with no `service` the newest `lines` of every service merged in time order, each line with Compose's own `service-N \|` prefix, redacted as a whole, then capped at 60000 characters by dropping the oldest lines; output that is not valid UTF-8 is read with replacement characters, and bidirectional controls (U+202A–U+202E, U+2066–U+2069) are shown as `<U+202E>` |
 
 Findings and diffs are redacted and bounded (200 findings, 2000 characters each,
 20000 per diff) before publication, because DjangoLux renders them in a browser.

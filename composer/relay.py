@@ -37,6 +37,7 @@ import os
 import re
 import socket
 import ssl
+import stat
 import time
 import uuid
 from collections import deque
@@ -46,7 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlencode
 
-from . import safe_files
+from . import request_files, safe_files
 from .agent_protocol import redact_text
 
 SCHEMA_VERSION = 1
@@ -58,6 +59,8 @@ MAX_DECLARATION_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_RESULT_BYTES = MAX_RESPONSE_BYTES + 64 * 1024
 MAX_REQUEST_LIFETIME = timedelta(seconds=120)
+#: How far ahead of the agent's clock a sender's ``created_at`` may be.
+MAX_CLOCK_SKEW = timedelta(seconds=30)
 RESULT_RETENTION = 300
 PROCESSED_RETENTION = 3600
 MAX_PENDING = 64
@@ -781,7 +784,19 @@ class RelayResponder:
             directory.mkdir(parents=True, exist_ok=True)
         self.catalog = build_catalog(self.relay_dir)
         self._publish()
-        pending = sorted(self.requests.glob("*.json"), key=lambda p: (p.stat().st_mtime, p.name))
+        pending = []
+        for path in self.requests.glob("*.json"):
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                # A link (dangling or not), FIFO or directory is never opened.
+                request_files.refuse(path, "it is not a regular file", aside=False)
+                self._archive(path)
+                continue
+            pending.append((info.st_mtime, path.name, path))
+        pending = [path for _mtime, _name, path in sorted(pending)]
         handled = 0
         for index, path in enumerate(pending):
             if index < PER_TICK:
@@ -856,10 +871,11 @@ class RelayResponder:
         return True
 
     def _process(self, path: Path) -> None:
-        try:
-            raw = path.read_bytes() if path.stat().st_size <= MAX_REQUEST_BYTES else b""
-        except OSError:
+        got = request_files.read_bytes(path, MAX_REQUEST_BYTES, aside=False)
+        if got is None and not request_files.is_regular(path):
+            self._archive(path)
             return
+        raw = got[0] if got else b""
         digest = hashlib.sha256(raw).hexdigest()
         try:
             operation_id = str(uuid.UUID(path.stem))
@@ -881,7 +897,10 @@ class RelayResponder:
             now = datetime.fromtimestamp(self._clock(), timezone.utc)
             if expires <= now:
                 raise RelayFailure("expired", "the request expired before it was answered")
-            if expires - created > MAX_REQUEST_LIFETIME:
+            # Bounded by this agent's clock, not only the sender's own stamps.
+            if created > now + MAX_CLOCK_SKEW:
+                raise RelayFailure("invalid", "the request was created in the future")
+            if expires - created > MAX_REQUEST_LIFETIME or expires > now + MAX_REQUEST_LIFETIME + MAX_CLOCK_SKEW:
                 raise RelayFailure("invalid", "the request lifetime is too long")
             params = request.get("params", {})
             if not isinstance(params, dict):
@@ -915,7 +934,7 @@ class RelayResponder:
         for directory, keep in ((self.results, RESULT_RETENTION), (self.processed, PROCESSED_RETENTION)):
             for path in directory.glob("*.json"):
                 try:
-                    if now - path.stat().st_mtime > keep:
+                    if now - os.lstat(path).st_mtime > keep:
                         path.unlink()
                 except OSError:
                     continue
