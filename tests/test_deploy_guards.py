@@ -249,8 +249,9 @@ class RollbackRuleTests(GuardHarness, unittest.TestCase):
         ok, message = self.launcher.downgrade_guard()
         self.assertTrue(ok, message)
         self.assertIn("DjangoLux 1.16.3 now runs on a schema with DjangoLux 1.17.0b2's migrations", self.output())
-        self.assertIn("migrations are never reversed", self.output())
-        self.assertIn("Ignore version mismatch", self.output())
+        self.assertIn("never reverses database migrations", self.output())
+        self.assertIn("update back to its version first", self.output())
+        self.assertIn("“Ignore database version mismatch”", self.output())
 
     def test_a_release_that_does_not_declare_it_is_refused(self):
         self.image_scans["debeski/archive:overlay"] = self.image_scans["debeski/archive:overlay"].replace(

@@ -250,9 +250,11 @@ then reads wrongly. The guard is always on; it does not need the opt-in
   (a release on the runtime volume, or a local image this deployment ran: the
   records' images and the app containers' images), and it and every readable
   release between the target and it must declare `rollback_compatible: true`. Then
-  the deploy goes ahead with a warning: the database keeps the newer migrations,
-  migrations are never reversed, and restoring a backup taken before the newer
-  release later needs "Ignore version mismatch". Otherwise it is refused, saying why.
+  the deploy goes ahead with a warning: migrations are never reversed, so the
+  database keeps the newer release's migrations and a backup taken before that
+  release no longer matches it. To restore that backup later, update back to its
+  version first, or restore it with “Ignore database version mismatch”. Otherwise
+  it is refused, saying why.
 - **Refused**: the run stops before anything is recreated and names each older
   version, or the migrations the target does not know. To go back on purpose,
   restore a database backup taken before the newer release, then deploy with

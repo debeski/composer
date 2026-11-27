@@ -582,8 +582,9 @@ def rollback_warning(target_dlux: str, left_dlux: str) -> str:
     return (
         f"DjangoLux {target_dlux} now runs on a schema with DjangoLux {left_dlux}'s migrations, which "
         "that release declares compatible with the code before it (migrations.rollback_compatible). "
-        "The database keeps the newer migrations: migrations are never reversed. Restoring a backup "
-        "taken before the newer release later needs 'Ignore version mismatch'."
+        "This deploy never reverses database migrations: the database keeps the newer release's "
+        "migrations, so a backup taken before that release no longer matches it. To restore that backup "
+        "later, update back to its version first, or restore it with “Ignore database version mismatch”."
     )
 
 
