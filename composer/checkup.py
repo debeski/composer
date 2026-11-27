@@ -2,6 +2,7 @@ import json
 import os
 import re
 import stat
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1303,6 +1304,125 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             manual=f"convert {' '.join(mixed)} to one line-ending style by hand, then ./start.sh check --fix",
         )
 
+    # --- The first admin and the database password ------------------------------
+
+    def _compose_value(self, key: str) -> Tuple[bool, Optional[str], bool]:
+        """``(referenced, value, supplied)`` for ``key`` as the Compose files set it, resolved as Compose would.
+
+        ``supplied``: the environment or the secrets file sets it, so the value
+        is not the Compose default. The value stays in this process.
+        """
+        pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*:[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+        for name in self._maintenance_compose_files():
+            try:
+                match = pattern.search(Path(name).read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            if match:
+                written = getattr(self, "_written_secrets", None) or {}
+                if key in written:
+                    return True, written[key], True
+                raw = match.group(1).split(" #", 1)[0].strip().strip("'\"")
+                values = guidance.secret_values(Path(".")) or {}
+                supplied = key in os.environ or key in values
+                return True, self.resolve_compose_value(raw), supplied
+        return False, None, False
+
+    ADMIN_WAY_OUT = (
+        "Set ADMIN_PASS in the secrets file and run './start.sh' again, run './start.sh check --fix' at a terminal to "
+        "be asked for it, or create the account now with './start.sh run -m web createsuperuser'."
+    )
+
+    def _check_admin_pass(self) -> Optional[Dict[str, Any]]:
+        """Will the migrator create the first admin? Only when ``ADMIN_PASS`` is set and not ``admin``."""
+        referenced, value, _supplied = self._compose_value(guidance.ADMIN_KEY)
+        if not referenced:
+            return None
+        if not guidance.admin_pass_unset(value):
+            return _result(OK, "admin-pass", f"ADMIN_PASS is set. {guidance.ADMIN_WHY}")
+        what = "empty" if not str(value or "").strip() else "the default 'admin'"
+        return _result(
+            WARN,
+            "admin-pass",
+            f"ADMIN_PASS is {what}, so DjangoLux's migrator creates no admin account: a stack that has none yet "
+            f"starts with no account to sign in with. {guidance.ADMIN_WHY}",
+            fix=self.ADMIN_WAY_OUT,
+            manual="set ADMIN_PASS in the secrets file, or './start.sh run -m web createsuperuser'",
+        )
+
+    def _check_postgres_password(self) -> Optional[Dict[str, Any]]:
+        """Is the database password the published default ``admin_pass``? Reported only, never changed."""
+        referenced, value, supplied = self._compose_value("POSTGRES_PASSWORD")
+        if not referenced:
+            return None
+        if value != "admin_pass" and value:
+            return _result(OK, "postgres-password", "POSTGRES_PASSWORD is not the published default.")
+        why = (
+            "is the published default admin_pass" if supplied
+            else "is not set, so the Compose default admin_pass applies"
+        )
+        return _result(
+            WARN,
+            "postgres-password",
+            f"POSTGRES_PASSWORD {why}: anything that reaches the database on its network signs in with a password "
+            "anyone can look up.",
+            fix="Before the first start, set a long random POSTGRES_PASSWORD in the secrets file. A database already "
+            "in use keeps the password it was created with: change it inside PostgreSQL first (ALTER USER … "
+            "PASSWORD …), then set the same value in the secrets file and run './start.sh'. Composer does not "
+            "rotate it.",
+            manual="change the password inside PostgreSQL first, then set POSTGRES_PASSWORD in the secrets file",
+        )
+
+    def ask_first_admin(self, stdin=None, reader=None) -> None:
+        """Before the first ``up`` of a stack (no deploy record): ask for ``ADMIN_PASS`` at a terminal.
+
+        Without a terminal, with ``-y``, or when skipped, the deploy goes on and
+        ``no_admin_notice`` names the way out at the end. An answer is written to
+        the secrets file atomically (0600) and passed to this deploy.
+        """
+        from .confirmation import assume_yes_from_env
+        from .downgrade_guard import read_deployed_image
+
+        stream = sys.stdin if stdin is None else stdin
+        try:
+            terminal = bool(stream.isatty())
+        except (AttributeError, ValueError):
+            terminal = False
+        if not terminal or assume_yes_from_env() or getattr(self, "assume_yes", False) or read_deployed_image():
+            return
+        referenced, value, _supplied = self._compose_value(guidance.ADMIN_KEY)
+        if not referenced or not guidance.admin_pass_unset(value):
+            return
+        answer = guidance.ask_admin_pass(**({"reader": reader} if reader else {}))
+        if not answer:
+            return
+        try:
+            path = guidance.set_secret_atomically(Path("."), {guidance.ADMIN_KEY: answer})
+        except (OSError, ValueError) as exc:
+            print(f"⚠ ADMIN_PASS was not written: {exc}", file=sys.stderr)
+            return
+        os.environ[guidance.ADMIN_KEY] = answer
+        print(f"🔐 ADMIN_PASS written to {path.name if path.parent == Path('.').resolve() else path}; "
+              "this first start creates the admin account.")
+
+    def no_admin_notice(self) -> List[str]:
+        """After a start: say so when no admin account was created, from the migrator's own line where it can be read."""
+        referenced, value, _supplied = self._compose_value(guidance.ADMIN_KEY)
+        if not referenced or not guidance.admin_pass_unset(value):
+            return []
+        line = ""
+        for service in self.migration_applier_services() or ["worker", "web"]:
+            ok, out, err = self.run_docker_compose(["logs", "--no-color", "--tail", "400", service], timeout=20)
+            text = f"{out or ''}\n{err or ''}"
+            if "Superuser admin already exists" in text:
+                return []
+            found = [raw.split("|", 1)[-1].strip() for raw in text.splitlines() if "No superuser created" in raw]
+            if found:
+                line = found[-1]
+                break
+        what = line or "ADMIN_PASS is empty or 'admin', so the migrator creates no admin account on a stack that has none."
+        return [f"No admin account was created. {what}", f"Way out: {self.ADMIN_WAY_OUT}"]
+
     def _check_app_permissions(self, deep: bool = False) -> Optional[Dict[str, Any]]:
         """Can the uid the app image runs as use the data its services mount?
 
@@ -2209,6 +2329,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             if registry_check is not None:
                 results.append(registry_check)
             results.append(self._check_update_policy())
+            for credential in (self._check_admin_pass(), self._check_postgres_password()):
+                if credential is not None:
+                    results.append(credential)
             redis = self._check_redis_persistence()
             if redis is not None:
                 results.append(redis)
@@ -2304,6 +2427,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "topology": self._check_topology,
             "compose-config": self._check_compose_parses,
             "celery": self._check_celery,
+            "admin-pass": self._check_admin_pass,
         } if confirmed else {}
         wrappers_now = {entry["name"]: entry for entry in self._check_wrappers()} if confirmed else {}
         # The service whose removal leaves a check with nothing to report.
@@ -2349,7 +2473,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
 
         return 1 if any(r["level"] == FAIL for r in results + fixed) else 0
 
-    def _ask_operator_questions(self, results: List[Dict[str, Any]], *, reader=input, stream=None) -> None:
+    def _ask_operator_questions(
+        self, results: List[Dict[str, Any]], *, reader=input, stream=None, secret_reader=None,
+    ) -> None:
         """Ask the operator-choice findings as questions; record the answers and the skips.
 
         Only for a terminal run (``guidance.interactive``). Nothing is written
@@ -2389,15 +2515,28 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     skipped.append({"name": "update-policy", "command": guidance.ASK_AGAIN})
                 else:
                     choices[update_policy.ENV_KEY] = value
+        if values is not None and found.get("admin-pass") == WARN:
+            password = guidance.ask_admin_pass(**({"reader": secret_reader} if secret_reader else {}), stream=stream)
+            if password is None:
+                skipped.append({"name": "admin-pass", "command": guidance.ASK_AGAIN})
+            else:
+                choices[guidance.ADMIN_KEY] = password
         if found.get("redis-persistence") == WARN and found.get("redis-aof-corrupt") != FAIL:
             if not guidance.ask_redis(reader=reader, stream=stream):
                 choices["redis"] = "keep"
                 skipped.append({"name": "redis-persistence", "command": guidance.ASK_AGAIN})
 
     def _write_operator_choices(self, values: Dict[str, str]) -> Dict[str, Any]:
-        """Write the answers to the secrets file, in place; the recreate that follows reads them."""
+        """Write the answers to the secrets file, in place; the recreate that follows reads them.
+
+        ``ADMIN_PASS`` goes through a new 0600 file renamed over the old one, and
+        no message names its value.
+        """
         try:
-            path = guidance.set_secret_values(Path("."), values)
+            plain = {key: value for key, value in values.items() if key != guidance.ADMIN_KEY}
+            path = guidance.set_secret_values(Path("."), plain) if plain else None
+            if guidance.ADMIN_KEY in values:
+                path = guidance.set_secret_atomically(Path("."), {guidance.ADMIN_KEY: values[guidance.ADMIN_KEY]})
         except (OSError, ValueError) as exc:
             return _result(FAIL, "fix:secrets", f"Could not write {', '.join(values)} to the secrets file: {exc}")
         written = dict(getattr(self, "_written_secrets", None) or {})
@@ -2407,11 +2546,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             shown = path.relative_to(Path(".").resolve())
         except ValueError:
             shown = path
-        return _result(
-            OK, "fix:secrets",
-            f"Wrote {', '.join(values)} to {shown} in place (only {'that line' if len(values) == 1 else 'those lines'} "
-            "changed; the file is not copied).",
+        how = (
+            "through a new file renamed over it, mode 0600 (ADMIN_PASS's value is not shown)"
+            if guidance.ADMIN_KEY in values else
+            f"in place (only {'that line' if len(values) == 1 else 'those lines'} changed; the file is not copied)"
         )
+        return _result(OK, "fix:secrets", f"Wrote {', '.join(values)} to {shown} {how}.")
 
     def _fix_plan(self, args, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """What ``check --fix`` would do on this stack: each repair's flag, read-only.
@@ -2643,7 +2783,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         except (OSError, ValueError, StackCleanupError):
             update_policy_files = []
         choices = getattr(self, "_operator_choices", None) or {}
-        secret_writes = {key: choices[key] for key in ("DLUX_FRONT_PROXY", "DLUX_UPDATE_POLICY") if key in choices}
+        secret_writes = {
+            key: choices[key] for key in ("DLUX_FRONT_PROXY", "DLUX_UPDATE_POLICY", guidance.ADMIN_KEY) if key in choices
+        }
         redis_files: List[str] = []
         if redis_persistence.SERVICE in set(self.services) and choices.get("redis") != "keep":
             try:
@@ -2802,7 +2944,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         if secret_writes:
             one = len(secret_writes) == 1
             consequences.append(
-                "Write " + ", ".join(f"{key}={value}" for key, value in secret_writes.items())
+                "Write " + ", ".join(
+                    f"{key}=(the password you typed, not shown)" if key == guidance.ADMIN_KEY else f"{key}={value}"
+                    for key, value in secret_writes.items()
+                )
                 + f" to the secrets file in place: only {'that line changes' if one else 'those lines change'} "
                 "(added at the end when missing), and the file is not copied. The services that read "
                 f"{'it' if one else 'them'} are recreated."

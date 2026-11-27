@@ -178,6 +178,66 @@ def ask_redis(*, reader=input, stream=None) -> bool:
     return choice == "y"
 
 
+ADMIN_KEY = "ADMIN_PASS"
+ADMIN_DEFAULT = "admin"
+ADMIN_WHY = (
+    "It is used only to create the first admin account (user 'admin'); an admin that already exists is "
+    "never changed."
+)
+ADMIN_MIN_LENGTH = 8
+
+
+def admin_pass_unset(value: Optional[str]) -> bool:
+    """True for an ``ADMIN_PASS`` with which DjangoLux's migrator creates no admin: empty or ``admin``."""
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return not text or text == ADMIN_DEFAULT
+
+
+def _hidden(prompt: str) -> str:
+    import getpass
+
+    return getpass.getpass(prompt)
+
+
+def ask_admin_pass(*, reader: Callable[[str], str] = _hidden, stream=None) -> Optional[str]:
+    """A new ``ADMIN_PASS``, typed twice without echo; None on Enter, end of input or three failed tries.
+
+    The value is never printed: not in the question, an error or the summary.
+    """
+    out = stream or sys.stderr
+    print("\n".join([
+        "",
+        "? The admin account has no password yet (ADMIN_PASS is empty or 'admin'), so none will be created.",
+        f"  {ADMIN_WHY}",
+        "  Type one (it is not shown), or press Enter to skip.",
+    ]), file=out, flush=True)
+    for _attempt in range(3):
+        try:
+            first = str(reader("  Admin password: "))
+            if not first:
+                return None
+            problem = ""
+            if len(first) < ADMIN_MIN_LENGTH:
+                problem = f"Use at least {ADMIN_MIN_LENGTH} characters."
+            elif first.strip() != first or first == ADMIN_DEFAULT:
+                problem = "Use a password without leading or trailing spaces, other than 'admin'."
+            elif _UNSAFE_VALUE.search(first):
+                problem = "Use a password without quotes, '#', backslashes or line breaks (the secrets file keeps them)."
+            if problem:
+                print(f"  {problem}", file=out)
+                continue
+            second = str(reader("  The same again: "))
+        except (EOFError, KeyboardInterrupt):
+            print("", file=out)
+            return None
+        if second == first:
+            return first
+        print("  The two entries differ.", file=out)
+    return None
+
+
 def secret_values(root) -> Optional[Dict[str, str]]:
     """The secrets file's ``KEY=value`` lines as written (quotes kept), or None when there is none."""
     path = secrets_file(root)
@@ -207,11 +267,54 @@ def set_secret_values(root, values: Mapping[str, str]) -> Path:
     quote, ``#``, a backslash or a line break is refused: ``./start.sh`` hands
     the file to Docker's ``--env-file``, which keeps them as part of the value.
     """
-    from .stack_schema import line_ending
+    path = secrets_file(root)
+    if path is None:
+        raise OSError("There is no secrets file (.env, secrets/.env or .secrets/.env) to write to.")
+    text = _with_values(path, values)
+    write_updates(Path(root).resolve(), {path: text}, Path(root).resolve() / ".xclude" / "composer-check")
+    return path
+
+
+def set_secret_atomically(root, values: Mapping[str, str]) -> Path:
+    """Set ``KEY=value`` lines as ``set_secret_values`` does, through a new file renamed over the old one.
+
+    For a password: a crash leaves the old file or the new one, never half of
+    either. The new file is created 0600 (never readable by anyone else, even
+    for a moment), takes the old file's owner and group where this process may
+    give them, and stays 0600. Nothing is copied or logged.
+    """
+    import os
+    import tempfile
 
     path = secrets_file(root)
     if path is None:
         raise OSError("There is no secrets file (.env, secrets/.env or .secrets/.env) to write to.")
+    text = _with_values(path, values)
+    before = path.stat()
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.composer-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            try:
+                os.fchown(stream.fileno(), before.st_uid, before.st_gid)
+            except OSError:
+                pass
+            stream.write(text.encode("utf-8", "surrogateescape"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        # The half-written copy holds the secrets: it is not kept.
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+        raise
+    return path
+
+
+def _with_values(path: Path, values: Mapping[str, str]) -> str:
+    """The secrets file's text with ``values`` set; refuses a value ``--env-file`` would misread."""
+    from .stack_schema import line_ending
+
     for key, value in values.items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or _UNSAFE_VALUE.search(str(value)):
             raise ValueError(f"Composer does not write {key} with that value; set it by hand.")
@@ -229,8 +332,7 @@ def set_secret_values(root, values: Mapping[str, str]) -> Path:
         body = line.rstrip("\r\n")
         prefix = pattern.match(line).group(1)
         lines[index] = f"{prefix}{key}={value}{line[len(body):] or ''}"
-    write_updates(Path(root).resolve(), {path: "".join(lines)}, Path(root).resolve() / ".xclude" / "composer-check")
-    return path
+    return "".join(lines)
 
 
 # --- The end-of-run summary -------------------------------------------------------

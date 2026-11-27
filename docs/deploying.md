@@ -99,6 +99,23 @@ affected host UID and prints specific `sudo setfacl` commands for the Linux VM:
 Keep the file restricted; do not make it world-readable or give the network-facing
 agent access to silence a warning.
 
+### The first admin account
+
+DjangoLux's migrator creates the `admin` account on a start only when none exists
+and `ADMIN_PASS` is set and is not `admin`; an admin that already exists is never
+changed. On a stack that has never deployed (no `.xclude/composer-deploy/deployed.json`)
+and whose `ADMIN_PASS` is empty or `admin`, `./start.sh` at a terminal asks for one
+before `up`: typed twice and not shown, Enter skips. The answer is written to the
+secrets file through a new `0600` file renamed over it, and this first start uses it.
+It is never printed, logged or recorded.
+
+Without a terminal (`-y`, a script), or when skipped, the deploy goes on. When no
+admin account was created, the end of the run says so, quoting the migrator's
+"No superuser created" line when its log has it, with the way out: set `ADMIN_PASS`
+in the secrets file and run `./start.sh` again, run `./start.sh check --fix` at a
+terminal to be asked, or `./start.sh run -m web createsuperuser`. See
+[`admin-pass`](check.md#admin-pass).
+
 ### First deploy without importing `config.json`
 
 `./start.sh --skip-config` leaves DjangoLux's initial setup wizard available even
