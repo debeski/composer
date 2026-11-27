@@ -1858,6 +1858,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "the pin again.",
                 fix=PREDATES_PIN_RECOVERY,
             )
+        mismatch = self._lock_mismatch(lock) if lock is not None and not state["pinned"] else ""
+        if mismatch:
+            return _result(FAIL, "composer-channel", f"{note}, but {mismatch}", fix=self.LOCK_MISMATCH_FIX,
+                           manual=self.LOCK_MISMATCH_FIX)
         if lock is not None and lock.prerelease and state["channel"] == channel_config.STABLE:
             return _result(
                 WARN,
@@ -1907,6 +1911,42 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         return _result(OK, "composer-channel", f"{note}; resident pair pinned to Composer {lock.short}.")
 
+    LOCK_MISMATCH_FIX = (
+        "Write the lock again from a verified release ('./start.sh check --beta' or '--stable' pins the "
+        "channel's signed digest), or restore .composer-image from .xclude/; nothing trusts the tag text alone."
+    )
+
+    def _pin_image_version(self, image: str) -> str:
+        """The Composer release a local image carries (its manifest label, else /app/VERSION), or ""."""
+        from .version import RELEASE_MANIFEST_LABEL
+
+        try:
+            manifest = json.loads((self.image_labels(image) or {}).get(RELEASE_MANIFEST_LABEL) or "{}")
+        except (ValueError, TypeError):
+            manifest = {}
+        version = str(manifest.get("version") or "").strip() if isinstance(manifest, dict) else ""
+        if version:
+            return version
+        ok, out, _err = self.run_command(
+            ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "cat", image,
+             "/app/VERSION"],
+            timeout=30,
+        )
+        return out.strip().splitlines()[0] if ok and out.strip() else ""
+
+    def _lock_mismatch(self, lock) -> str:
+        """Why the lock cannot be trusted: its tag names one release and its digest is another. "" when they agree
+        or the image is not on this host (then nothing can be read)."""
+        from .versions import try_parse
+
+        actual = self._pin_image_version(lock.ref)
+        if not actual or try_parse(actual) == try_parse(lock.version):
+            return ""
+        return (
+            f".composer-image names Composer {lock.version} in its tag while its digest is Composer {actual} "
+            f"({lock.ref}): the tag and the digest disagree, so the pin is not what it says."
+        )
+
     def _running_pair_note(self) -> str:
         """What the resident pair's containers run now, which the block does not say."""
         running = self._resident_running_images()
@@ -1946,6 +1986,13 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 f"The resident pair was not pinned to {lock.ref}: Composer {lock.version} predates digest "
                 "pinning and could not manage the pin from there. The project is unchanged.",
                 fix=PREDATES_PIN_RECOVERY,
+            )]
+        mismatch = self._lock_mismatch(lock)
+        if mismatch:
+            return [_result(
+                FAIL, "fix:composer-pin",
+                f"The resident pair was not pinned: {mismatch} The project is unchanged.",
+                manual=self.LOCK_MISMATCH_FIX,
             )]
         try:
             preview = pin_composer_image(".", pin=lock, compose_file=args.file or "", apply=False)

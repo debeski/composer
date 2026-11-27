@@ -240,6 +240,21 @@ class DetachedRenderingTests(unittest.TestCase):
         self.assertEqual(launcher.last_render_line_count, 0)
         self.assertIn("Refused: nothing changed.", "\n".join(str(a[0]) for a, _ in calls if a))
 
+    def test_a_failed_deploy_ends_on_a_new_line(self):
+        # R2-086 (f): "…whenever web cannot answer." ran into the shell's next output.
+        import io
+        from contextlib import redirect_stdout
+
+        launcher = DockerComposeLauncher()
+        launcher.resolve_active_compose_files()
+        out = io.StringIO()
+        with redirect_stdout(out), patch.object(session, "terminal_detached", return_value=False), \
+                patch("composer.rendering.terminal_detached", return_value=False):
+            launcher.render()
+            launcher.render("Failed to start containers\n\n  The edge proxy (caddy) is running: visitors get the "
+                            "maintenance page whenever web cannot answer.")
+        self.assertTrue(out.getvalue().endswith("web cannot answer.\n"), repr(out.getvalue()[-80:]))
+
     def test_a_progress_frame_keeps_the_cursor_on_its_last_line(self):
         launcher = DockerComposeLauncher()
         launcher.resolve_active_compose_files()

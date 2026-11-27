@@ -312,7 +312,9 @@ FAIL, the fix, and what `--fix` does.
   container of the pair runs and its Composer version); the block names the pin but a running container of the pair was
   created from another image (not recreated since the pin moved); the pin is a beta
   while the channel is stable; or the pin names a release from before 1.11.0b1, which
-  cannot run a pinned stack.
+  cannot run a pinned stack. **FAIL** the lock's tag and digest disagree: the image
+  the digest names (when it is on this host) carries another Composer release than the
+  tag says, read from its release-manifest label, else `/app/VERSION`.
 - **Fix:** `composer check --fix` for a block that does not follow the pin;
   `./start.sh` for a pair still running the old image (it recreates both on the pin);
   `composer check --stable` for a beta pin on the stable channel; `--beta` or
@@ -325,7 +327,8 @@ FAIL, the fix, and what `--fix` does.
   `.xclude/dlux-agent-bootstrap/<UTC>/`), then [recreates the pair](#after-the-repairs).
   It never resolves a new pin, so `check` stays offline. It preserves the channel, and
   it never pins the block to a release from before 1.11.0b1 (`fix:composer-pin` warns
-  instead). See [channels](updates.md#channels).
+  instead) or to a lock whose tag and digest disagree (`fix:composer-pin` FAILs and
+  changes nothing). See [channels](updates.md#channels).
 
 ### Stack
 
