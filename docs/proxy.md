@@ -36,6 +36,39 @@ private file; the finding and the refusal both name the way to 1.15.3 on this st
 (product photos, for example) in DjangoLux's `DLUX_PUBLIC_MEDIA`, or move them
 under `media/public/`.
 
+### How stored files are served
+
+**Security.** Who may fetch a file is half of it; the other half is how it is
+served. A proxy that serves an uploaded HTML or SVG file inline runs its script as
+the site, with the rights of whoever opens it. DjangoLux's scaffold proxy sends, on
+every `/media/` route (public and private):
+
+- `X-Content-Type-Options: nosniff`;
+- `Content-Security-Policy: default-src 'none'; sandbox` on every file but PDF (a
+  sandbox stops the browser's PDF viewer);
+- `Content-Disposition: attachment` on every file except raster images (AVIF, BMP,
+  GIF, ICO, JPEG, PNG, WebP) and PDF.
+
+It also sends `Content-Security-Policy: default-src 'none'; script-src 'self';
+style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self';
+base-uri 'none'; form-action 'none'; frame-ancestors 'self'` with the maintenance
+page, both under
+`/_dlux/maintenance/` and on the 502/503/504 page, so a page there runs only its
+own files.
+
+Caddy carries the `/media/` headers in a top-level `(dlux_media_headers)` snippet
+that both `/media/` routes `import`. nginx carries them in the `$dlux_media_csp` and
+`$dlux_media_disposition` maps and three `add_header` lines in every `/media/`
+location. A private proxy file that lacks any of them is a `stored-files`
+**FAIL** that names each missing header and file. Only the maintenance page's CSP
+missing is a **WARN**. `composer check --fix` adds what is missing to the generated
+shape in place, with no particular DjangoLux needed: it inserts the snippet and the
+imports (Caddy), or the maps and `add_header` lines (nginx), and the maintenance
+CSP lines. It keeps the schema stamp, validates the new config, archives the
+originals under `.xclude/composer-check/` and recreates the proxy. A route that sets
+some of these headers itself is left for a human; the finding says what to copy
+from a fresh `python -m dlux startproject`.
+
 ## Cross-site requests (Fetch Metadata)
 
 DjangoLux's generated proxy refuses with 403 what another site's page makes a

@@ -183,6 +183,50 @@ class CheckTests(unittest.TestCase):
         self.write(media.harden(media.migrate_caddyfile(LEGACY_CADDY), "caddy"))
         self.assertEqual(DockerComposeLauncher()._check_media_privacy()["level"], OK)
 
+    def test_missing_serving_headers_are_a_security_failure_that_names_them(self):
+        self.write(SCHEMA_4_CADDY)
+        result = DockerComposeLauncher()._check_media_privacy()
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("SECURITY", result["message"])
+        for name in ("X-Content-Type-Options on /media/", "Content-Security-Policy on /media/",
+                     "Content-Disposition on /media/", "the maintenance page's Content-Security-Policy"):
+            self.assertIn(name, result["message"])
+        self.assertIn(".proxy/Caddyfile", result["message"])
+        self.assertIn("check --fix", result["fix"])
+
+    def test_headers_a_human_must_add_say_how(self):
+        self.write(SCHEMA_4_CADDY.replace(
+            '\t\t\t\theader Cache-Control "private, no-cache"\n',
+            '\t\t\t\theader Cache-Control "private, no-cache"\n\t\t\t\theader X-Content-Type-Options "nosniff"\n',
+        ))
+        result = DockerComposeLauncher()._check_media_privacy()
+        self.assertEqual(result["level"], FAIL)
+        self.assertNotIn("check --fix", result["fix"])
+        self.assertIn("dlux_media_headers", result["fix"])
+        self.assertIn("./start.sh restart caddy", result["fix"])
+
+    def test_only_the_maintenance_csp_missing_is_a_warning(self):
+        hardened = media.harden(SCHEMA_4_CADDY, "caddy")
+        self.write(hardened.replace(f'\t\t\theader Content-Security-Policy "{media.MAINTENANCE_CSP}"\n', "", 1))
+        result = DockerComposeLauncher()._check_media_privacy()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("maintenance page", result["message"])
+        self.write(hardened)
+        self.assertEqual(DockerComposeLauncher()._check_media_privacy()["level"], OK)
+
+    def test_fix_adds_the_headers_whatever_djangolux_runs(self):
+        self.write(SCHEMA_4_CADDY)
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "caddy"]
+        outcome = {"files": [".proxy/Caddyfile"], "recreated": ["caddy"], "backup_root": "/x"}
+        with patch.object(launcher, "_running_dlux_version", side_effect=AssertionError("not needed")), \
+                patch("composer.media_migration.migrate", return_value=outcome) as migrate:
+            fixes = self._fix(launcher)
+        migrate.assert_called_once()
+        stored = [entry for entry in fixes if entry["name"] == "fix:stored-files"]
+        self.assertEqual(stored[0]["level"], OK)
+        self.assertIn("serving headers", stored[0]["message"])
+
     def _fix(self, launcher):
         args = SimpleNamespace(fix=True, yes=True, file="", dry_run=False, json=False)
         return launcher._maybe_fix(args, [])

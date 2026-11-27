@@ -393,17 +393,25 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 #### `stored-files`
 
 - **Checks:** that the proxy does not serve private `/media/` files without
-  DjangoLux's check.
-- **OK** no `/media/` route, or private. **WARN** custom `/media/` rules. **FAIL**
-  (security) the legacy public `/media/` route.
+  DjangoLux's check, and serves every stored file so an upload never runs as the
+  site: `nosniff`, the sandboxing `Content-Security-Policy` and
+  `Content-Disposition: attachment` on the `/media/` routes, and the maintenance
+  page's `Content-Security-Policy`.
+- **OK** no `/media/` route, or private with every header. **WARN** custom `/media/`
+  rules, or only the maintenance page's CSP missing. **FAIL** (security) the legacy
+  public `/media/` route, or a private proxy file missing a `/media/` header; the
+  message names each missing header and file.
 - **Fix:** on DjangoLux 1.15.3+, `check --fix` (stack schema 4). On an older one, the
   way there, worked out from the release data: `./start.sh dlux update --version X`
   with X the newest release this stack still takes inline, or, when none reaches
   1.15.3, a project image on 1.15.3 or later; then `check --fix`
   ([the way out of an old stack](stack-migrations.md#the-way-out-of-an-old-stack)).
 - **`--fix`:** rewrites an unmodified generated proxy, then re-checks; refuses on
-  DjangoLux older than 1.15.3, naming the same way there. Details:
-  [stored files](proxy.md#stored-files).
+  DjangoLux older than 1.15.3, naming the same way there. Adds missing serving
+  headers to a generated schema 4 proxy in place on any DjangoLux, and leaves a
+  route with its own serving headers to a human. Details:
+  [stored files](proxy.md#stored-files) and
+  [how stored files are served](proxy.md#how-stored-files-are-served).
 
 #### `fetch-metadata`
 

@@ -789,7 +789,48 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         if not state["files"]:
             return _result(OK, "stored-files", "No /media/ route in the proxy config.")
-        return _result(OK, "stored-files", "Stored files go through DjangoLux's access check (since stack schema 4).")
+        if state["gaps"]:
+            return self._media_serving_gaps(state)
+        return _result(
+            OK,
+            "stored-files",
+            "Stored files go through DjangoLux's access check (since stack schema 4) and are served so an upload "
+            "never runs as this site (nosniff, sandbox, attachment).",
+        )
+
+    @staticmethod
+    def _media_serving_gaps(state: Dict[str, Any]) -> Dict[str, Any]:
+        """The ``stored-files`` finding for private proxy files that lack serving headers (R2-001, R2-022)."""
+        gaps = state["gaps"]
+        media = any(gap != media_migration.MAINTENANCE_GAP for missing in gaps.values() for gap in missing)
+        named = "; ".join(
+            f"{name} lacks "
+            + ", ".join(gap if gap == media_migration.MAINTENANCE_GAP else f"{gap} on /media/" for gap in missing)
+            for name, missing in sorted(gaps.items())
+        )
+        if media:
+            message = (
+                f"SECURITY: {named}. An uploaded HTML or SVG file is served inline, so its script runs as this site "
+                "with the rights of whoever opens it."
+            )
+        else:
+            message = f"{named}, so an inline script in a planted maintenance page would run as this site."
+        manual = sorted(set(gaps) - set(state["hardenable"]))
+        steps = []
+        if state["hardenable"]:
+            steps.append(f"Run './start.sh check --fix' to add them to {', '.join(state['hardenable'])} (the proxy is recreated).")
+        if manual:
+            restart = " or ".join(
+                service for service, name in (("caddy", "Caddyfile"), ("nginx", "default.conf.template"))
+                if any(entry.endswith(name) for entry in manual)
+            )
+            steps.append(
+                f"Add them to {', '.join(manual)} by hand from a fresh 'python -m dlux startproject': the "
+                "dlux_media_headers snippet and its import in both /media/ routes (Caddy), or the $dlux_media_csp and "
+                "$dlux_media_disposition maps and their add_header lines in every /media/ location (nginx), and the "
+                f"maintenance page's Content-Security-Policy; then './start.sh restart {restart}'."
+            )
+        return _result(FAIL if media else WARN, "stored-files", message, fix=" ".join(steps))
 
     def _check_fetch_metadata(self) -> Dict[str, Any]:
         """Does the proxy refuse what other sites' pages make a browser load in the background?"""
@@ -2133,7 +2174,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
             return {"fixes": fixes, "refused": True, "pending": False}
         proxy_routes = proxy_inspection["recognized"]
-        media_exposed = media_migration.inspect(Path("."))["exposed"]
+        media_state = media_migration.inspect(Path("."))
+        media_exposed = media_state["exposed"]
+        media_headers = media_state["hardenable"]
         try:
             front_proxy_files = front_proxy.inspect(
                 Path("."), self._maintenance_compose_files(), self.build_compose_env()
@@ -2203,6 +2246,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             obsolete=obsolete,
             proxy_routes=proxy_routes,
             media_exposed=media_exposed,
+            media_headers=media_headers,
             front_proxy_files=front_proxy_files,
             relay_env_files=relay_env_files,
             update_policy_files=update_policy_files,
@@ -2216,7 +2260,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             legacy or obsolete or proxy_routes or needs_hardening or needs_agent_block_migration
             or needs_updater_migration or needs_post_start_migration or stale_wrappers
             or maintenance_legacy or maintenance_unpublished or needs_install or needs_init_containers
-            or needs_restart_labels or needs_dev_override_migration or media_exposed or needs_worker
+            or needs_restart_labels or needs_dev_override_migration or media_exposed or media_headers or needs_worker
             or front_proxy_files or relay_env_files or grant_access or update_policy_files
             or stamp_repair["files"] or retire_celery or redis_files or redis_corrupt or secret_writes
         )
@@ -2247,6 +2291,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         obsolete = plan["obsolete"]
         proxy_routes = plan["proxy_routes"]
         media_exposed = plan["media_exposed"]
+        media_headers = plan.get("media_headers") or []
         front_proxy_files = plan["front_proxy_files"]
         relay_env_files = plan["relay_env_files"]
         update_policy_files = plan["update_policy_files"]
@@ -2279,6 +2324,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "serving any other /media/ file. Uploads your site shows to signed-out visitors (product "
                 "photos, for example) must first be listed in DLUX_PUBLIC_MEDIA or moved under media/public/. "
                 "The proxy config is validated, archived under .xclude/composer-check/ and the proxy recreated."
+            )
+        if media_headers and not media_exposed:
+            consequences.append(
+                "SECURITY: serve stored files so an upload never runs as this site: add nosniff, a sandboxing "
+                "Content-Security-Policy and Content-Disposition: attachment (raster images and PDF stay inline) to "
+                "the /media/ routes, and the maintenance page's Content-Security-Policy, in "
+                + ", ".join(media_headers)
+                + ". The proxy config is validated, archived under .xclude/composer-check/ and the proxy recreated."
             )
         if front_proxy_files:
             consequences.append(
@@ -2546,11 +2599,11 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             except StackCleanupError as exc:
                 fixes.append(_result(FAIL, "fix:maintenance-page", str(exc)))
 
-        if media_exposed:
+        if media_exposed or media_headers:
             from .stack_cleanup import StackCleanupError
 
-            running = self._running_dlux_version()
-            if running is None or tuple(running) < media_migration.MEDIA_ACCESS_FLOOR:
+            running = self._running_dlux_version() if media_exposed else None
+            if media_exposed and (running is None or tuple(running) < media_migration.MEDIA_ACCESS_FLOOR):
                 fixes.append(
                     _result(
                         FAIL,
@@ -2565,7 +2618,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     outcome = media_migration.migrate(
                         ".", self._maintenance_compose_files(), environment=self.build_compose_env()
                     )
-                    detail = f"Made stored files private: {', '.join(outcome['files'])}"
+                    detail = (
+                        f"Made stored files private: {', '.join(outcome['files'])}" if media_exposed
+                        else f"Added the stored-file serving headers: {', '.join(outcome['files'])}"
+                    )
                     if outcome["recreated"]:
                         detail += f"; recreated {', '.join(outcome['recreated'])}"
                         self._note_recreated(outcome["recreated"])
@@ -3480,6 +3536,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             shared = set()
         if get("maintenance_legacy") or get("media_exposed"):
             recreate |= set(self._EDGE_PROXIES) | shared
+        if get("media_headers"):
+            recreate |= set(self._EDGE_PROXIES)
         if get("front_proxy_files") or "DLUX_FRONT_PROXY" in choices:
             recreate.add("caddy")
         if get("relay_env_files") or (get("stamp_repair") or {}).get("files"):
