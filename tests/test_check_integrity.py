@@ -303,8 +303,57 @@ class ServiceStateTests(unittest.TestCase):
     def test_a_healthy_stack_passes(self):
         now = datetime.now(timezone.utc).isoformat()
         result = self._states(
-            _ps({"Service": "web", "Name": "p-web-1", "ID": "aaa", "State": "running", "Health": "healthy"}),
-            f"aaa111|/p-web-1|0|false|{now}",
+            _ps({"Service": "web", "Name": "p-web-1", "ID": "aaa", "State": "running", "Health": "healthy"},
+                {"Service": "worker", "Name": "p-worker-1", "ID": "ccc", "State": "running"}),
+            f"aaa111|/p-web-1|0|false|{now}\nccc333|/p-worker-1|0|false|{now}",
+        )
+        self.assertEqual(result["level"], OK)
+
+    def test_a_worker_that_never_started_fails_while_the_stack_runs(self):
+        # R2-065: its pre_start exited 78, so worker stayed Created and no task ever ran.
+        now = datetime.now(timezone.utc).isoformat()
+        result = self._states(
+            _ps({"Service": "web", "Name": "p-web-1", "ID": "aaa", "State": "running", "Health": "healthy"},
+                {"Service": "worker", "Name": "p-worker-1", "ID": "ccc", "State": "created"}),
+            f"aaa111|/p-web-1|0|false|{now}\nccc333|/p-worker-1|0|false|",
+        )
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("worker never started, so DjangoLux's queued tasks", result["message"])
+        from composer import guidance
+
+        self.assertEqual(guidance.next_command(result), "./start.sh logs worker")
+
+    def test_an_exited_worker_names_its_exit_code(self):
+        now = datetime.now(timezone.utc).isoformat()
+        result = self._states(
+            _ps({"Service": "web", "Name": "p-web-1", "ID": "aaa", "State": "running"},
+                {"Service": "worker", "Name": "p-worker-1", "ID": "ccc", "State": "exited", "ExitCode": 78}),
+            f"aaa111|/p-web-1|0|false|{now}\nccc333|/p-worker-1|0|false|",
+        )
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("worker has stopped (exit 78)", result["message"])
+
+    def test_a_stopped_executor_warns(self):
+        # R2-082: services said "7 running" and versions "executor version unavailable".
+        now = datetime.now(timezone.utc).isoformat()
+        self.launcher.services = ["web", "worker", "composer-agent", "composer-executor"]
+        result = self._states(
+            _ps({"Service": "web", "Name": "p-web-1", "ID": "aaa", "State": "running"},
+                {"Service": "worker", "Name": "p-worker-1", "ID": "ccc", "State": "running"},
+                {"Service": "composer-agent", "Name": "p-agent-1", "ID": "ddd", "State": "running"},
+                {"Service": "composer-executor", "Name": "p-ex-1", "ID": "eee", "State": "exited", "ExitCode": 137}),
+            f"aaa111|/p-web-1|0|false|{now}\nccc333|/p-worker-1|0|false|{now}\nddd|/p-agent-1|0|false|{now}"
+            f"\neee|/p-ex-1|0|false|",
+        )
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("composer-executor is not running (stopped, exit 137)", result["message"])
+        self.assertIn("'./start.sh'", result["fix"])
+
+    def test_a_stopped_stack_is_not_a_finding(self):
+        result = self._states(
+            _ps({"Service": "web", "Name": "p-web-1", "ID": "aaa", "State": "exited", "ExitCode": 0},
+                {"Service": "worker", "Name": "p-worker-1", "ID": "ccc", "State": "exited", "ExitCode": 0}),
+            "aaa111|/p-web-1|0|false|\nccc333|/p-worker-1|0|false|",
         )
         self.assertEqual(result["level"], OK)
 
