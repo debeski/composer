@@ -1406,6 +1406,9 @@ class DockerComposeLauncher(
             if guard_msg:
                 print(f"⚠ {guard_msg}")
 
+            # A stack's first start creates the admin account only with ADMIN_PASS.
+            self.ask_first_admin()
+
             # A DjangoLux image that runs as a non-root uid needs group access to
             # data a root image wrote. Granted here, before anything is recreated;
             # if it cannot be granted the running stack is left as it is.
@@ -1471,6 +1474,7 @@ class DockerComposeLauncher(
             self.render()
 
             print("\n🎉 Environment ready")
+            self.deploy_warnings = [*(getattr(self, "deploy_warnings", None) or []), *self.no_admin_notice()]
             for warning in getattr(self, "deploy_warnings", None) or []:
                 print(f"⚠ {warning}")
 

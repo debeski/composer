@@ -181,6 +181,7 @@ are never asked: they keep the WARN and its advice, as without the questions.
 | --- | --- | --- |
 | How do users reach this server? | [`front-proxy`](#front-proxy) is a WARN because `DLUX_FRONT_PROXY` is unset, and the stack is generated (or `--fix` makes it so) | `1` a front proxy: its addresses or CIDR ranges, space-separated, checked as Caddy would; `2` directly: empty (Caddy trusts no proxy); `3` (default) keep trusting every private network: `private_ranges` |
 | Which updates may the app request? | the secrets file does not set `DLUX_UPDATE_POLICY`, or sets an unknown value | `all`, `inline` or `none`; the default is the policy in force (`all` when unset) |
+| A password for the first admin account? | [`admin-pass`](#admin-pass) is a WARN (`ADMIN_PASS` empty or `admin`) | the password, typed twice and not shown, at least 8 characters; Enter skips. It is written to the secrets file through a new `0600` file renamed over it, and never shown in the plan, the fixes or the summary |
 | Switch Redis to snapshots? | [`redis-persistence`](#redis-persistence) is a WARN and Redis is not crash-looping on a damaged file | `y` (default) rewrites its command; `n` keeps the append-only file |
 
 An answer that sets a value adds it to the plan: the confirmation lists the line, and
@@ -581,6 +582,33 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   asks for the policy when the secrets file does not set one
   ([questions](#questions-at-a-terminal)). Details:
   [what the application may request](updates.md#what-the-application-may-request).
+
+#### `admin-pass`
+
+- **Checks:** the `ADMIN_PASS` the Compose files give the migrator, resolved as Compose
+  would (environment, secrets file, default). No finding when no Compose file reads it.
+- **OK** set. **WARN** empty or `admin`: DjangoLux's migrator then creates no `admin`
+  account, so a stack that has none starts with no account to sign in with. The
+  password is used only to create the first admin; an existing admin is never
+  changed, so a stack that already has one needs nothing.
+- **Fix:** set `ADMIN_PASS` in the secrets file and run `./start.sh`, or
+  `./start.sh run -m web createsuperuser`.
+- **`--fix`:** at a terminal it asks for the password ([questions](#questions-at-a-terminal)),
+  writes it and recreates the services that read it, so the migrator creates the
+  account. Elsewhere, nothing. The first `./start.sh` asks too
+  ([the first admin account](deploying.md#the-first-admin-account)).
+
+#### `postgres-password`
+
+- **Checks:** the `POSTGRES_PASSWORD` the Compose files use, resolved as Compose would.
+  No finding when no Compose file reads it.
+- **OK** another value. **WARN** the published default `admin_pass`, set in the secrets
+  file or applied as the Compose default because nothing sets it.
+- **Fix:** before the first start, a long random value in the secrets file. A database
+  already in use keeps the password it was created with: change it inside PostgreSQL
+  first (`ALTER USER … PASSWORD …`), then set the same value in the secrets file and
+  run `./start.sh`.
+- **`--fix`:** nothing; Composer does not rotate the database password.
 
 #### `redis-persistence`
 

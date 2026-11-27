@@ -581,3 +581,138 @@ class UpdatePolicyWordingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Tty:
+    def isatty(self):
+        return True
+
+
+class _Pipe:
+    def isatty(self):
+        return False
+
+
+def _answers(*values):
+    queue = list(values)
+    return lambda _prompt: queue.pop(0)
+
+
+class AdminPassTests(_Project):
+    """R2-039 (Composer side): a stack whose ADMIN_PASS is empty starts with no admin, and nothing says so."""
+
+    COMPOSE = ('x-environment: &de\n  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_pass}\n'
+               'services:\n  worker:\n    environment:\n      ADMIN_PASS: ${ADMIN_PASS:-}\n')
+    SECRET = "s3cret-Passw0rd"
+
+    def setUp(self):
+        super().setUp()
+        self.write("compose.yml", self.COMPOSE)
+        self.secrets = self.write(".secrets/.env", "DJANGO_SECRET_KEY=k\nPOSTGRES_PASSWORD=admin_pass\nADMIN_PASS=\nTIME_ZONE=UTC\n")
+        self.secrets.chmod(0o644)
+        env = patch.dict(os.environ, {}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+        for key in ("ADMIN_PASS", "POSTGRES_PASSWORD", "COMPOSER_ASSUME_YES"):
+            os.environ.pop(key, None)
+
+    def test_both_warnings(self):
+        with _in(self.root):
+            admin = self.launcher._check_admin_pass()
+            database = self.launcher._check_postgres_password()
+        self.assertEqual(admin["level"], WARN)
+        self.assertIn("ADMIN_PASS is empty", admin["message"])
+        self.assertIn("never changed", admin["message"])
+        self.assertIn("./start.sh run -m web createsuperuser", admin["fix"])
+        self.assertEqual(database["level"], WARN)
+        self.assertIn("published default admin_pass", database["message"])
+        self.assertIn("inside PostgreSQL first", database["fix"])
+
+    def test_a_missing_database_password_takes_the_compose_default(self):
+        self.secrets.write_text("DJANGO_SECRET_KEY=k\nADMIN_PASS=Long-enough-1\n", encoding="utf-8")
+        with _in(self.root):
+            database = self.launcher._check_postgres_password()
+            admin = self.launcher._check_admin_pass()
+        self.assertIn("not set, so the Compose default admin_pass applies", database["message"])
+        self.assertEqual(admin["level"], OK)
+        self.assertNotIn("Long-enough-1", json.dumps([database, admin]))
+
+    def test_the_question_asks_twice_hidden_and_skips_on_enter(self):
+        out = __import__("io").StringIO()
+        self.assertEqual(guidance.ask_admin_pass(reader=_answers(self.SECRET, self.SECRET), stream=out), self.SECRET)
+        self.assertEqual(guidance.ask_admin_pass(reader=_answers(self.SECRET, "other-pass", self.SECRET, self.SECRET),
+                                                 stream=out), self.SECRET)
+        self.assertIsNone(guidance.ask_admin_pass(reader=_answers(""), stream=out))
+        self.assertIsNone(guidance.ask_admin_pass(reader=_answers("short", "admin", 'with"quote'), stream=out))
+        self.assertNotIn(self.SECRET, out.getvalue())
+        self.assertIn("never changed", out.getvalue())
+
+    def test_check_fix_asks_at_a_terminal_and_writes_0600_without_showing_it(self):
+        results = [{"level": WARN, "name": "admin-pass", "message": ""}]
+        self.launcher.services = ["worker"]
+        out = __import__("io").StringIO()
+        with _in(self.root):
+            self.launcher._ask_operator_questions(results, reader=_answers("s"), stream=out,
+                                                  secret_reader=_answers(self.SECRET, self.SECRET))
+            self.assertEqual(self.launcher._operator_choices.get("ADMIN_PASS"), self.SECRET)
+            entry = self.launcher._write_operator_choices({"ADMIN_PASS": self.SECRET})
+        self.assertEqual(entry["level"], OK)
+        self.assertNotIn(self.SECRET, json.dumps(entry))
+        self.assertNotIn(self.SECRET, out.getvalue())
+        self.assertEqual(self.secrets.stat().st_mode & 0o777, 0o600)
+        text = self.secrets.read_text(encoding="utf-8")
+        self.assertIn(f"ADMIN_PASS={self.SECRET}\n", text)
+        self.assertIn("POSTGRES_PASSWORD=admin_pass\nADMIN_PASS=", text)
+        self.assertTrue(text.endswith("TIME_ZONE=UTC\n"))
+        self.assertEqual(list((self.root / ".secrets").iterdir()), [self.secrets])
+        with _in(self.root):
+            self.assertEqual(self.launcher._check_admin_pass()["level"], OK)
+
+    def test_without_a_terminal_nothing_is_asked(self):
+        args = SimpleNamespace(fix=True, yes=False, json=False)
+        self.assertFalse(guidance.interactive(args, stdin=_Pipe()))
+        with _in(self.root):
+            self.launcher.ask_first_admin(stdin=_Pipe(), reader=lambda _prompt: self.fail("asked"))
+        self.assertIn("ADMIN_PASS=\n", self.secrets.read_text(encoding="utf-8"))
+
+    def test_the_first_start_asks_and_passes_it_to_this_deploy(self):
+        with _in(self.root):
+            self.launcher.ask_first_admin(stdin=_Tty(), reader=_answers(self.SECRET, self.SECRET))
+        self.assertEqual(os.environ.get("ADMIN_PASS"), self.SECRET)
+        self.assertEqual(self.secrets.stat().st_mode & 0o777, 0o600)
+
+    def test_a_stack_deployed_before_is_not_asked(self):
+        self.write(".xclude/composer-deploy/deployed.json", json.dumps({"image": "shop/web:1"}))
+        with _in(self.root):
+            self.launcher.ask_first_admin(stdin=_Tty(), reader=lambda _prompt: self.fail("asked"))
+
+    def test_the_summary_line_quotes_the_migrator(self):
+        line = ("worker-pre_start-1  | No superuser created: ADMIN_PASS is empty. Set ADMIN_PASS in .secrets/.env and "
+                "restart the stack, or run 'python manage.py createsuperuser'.\n")
+        with _in(self.root), patch.object(self.launcher, "migration_applier_services", return_value=["worker"]), \
+                patch.object(self.launcher, "run_docker_compose", return_value=(True, line, "")):
+            notice = self.launcher.no_admin_notice()
+        self.assertTrue(notice[0].startswith("No admin account was created. No superuser created: ADMIN_PASS is empty."))
+        self.assertIn("./start.sh run -m web createsuperuser", notice[1])
+        exists = "worker-1 | Superuser admin already exists.\n"
+        with _in(self.root), patch.object(self.launcher, "migration_applier_services", return_value=["worker"]), \
+                patch.object(self.launcher, "run_docker_compose", return_value=(True, exists, "")):
+            self.assertEqual(self.launcher.no_admin_notice(), [])
+
+
+class AdminPassPlanTests(_FixRun):
+    """The confirmation and the fixes never show the typed password."""
+
+    def test_the_plan_lists_the_line_without_the_value(self):
+        self.write("compose.yml", "services:\n  worker:\n    environment:\n      ADMIN_PASS: ${ADMIN_PASS:-}\n")
+        self.write(".secrets/.env", "ADMIN_PASS=\n")
+        listed = []
+        plan = self.plan(secret_writes={"ADMIN_PASS": "s3cret-Passw0rd"})
+        args = SimpleNamespace(yes=True, file="", dev=False, no_recreate=False)
+        with _in(self.root), patch.object(self.launcher, "_fix_plan", return_value=plan), \
+                patch("composer.checkup.confirm", side_effect=lambda title, lines, **_k: listed.extend(lines) or True), \
+                patch.object(self.launcher, "_container_states", return_value=[]):
+            self.launcher._capture_lifecycle = False
+            fixes = self.launcher._maybe_fix(args, [])
+        self.assertTrue(any("ADMIN_PASS=(the password you typed, not shown)" in line for line in listed), listed)
+        self.assertNotIn("s3cret-Passw0rd", json.dumps([listed, fixes]))
