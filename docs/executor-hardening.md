@@ -120,7 +120,8 @@ request's ack and `deploy-status.json`.
 ### Socket operations
 
 Every request is a JSON object of at most 64 KiB with exactly `protocol_version`
-(which must be `1`), a UUID `operation_id`, `op` and an object `payload`; each
+(which must be the integer `1`: `true` and `1.0` are refused), a UUID
+`operation_id`, `op` and an object `payload`; each
 operation refuses payload fields it does not list
 ([`executor_protocol.py`](../composer/executor_protocol.py), handlers in
 [`executor_ops.py`](../composer/executor_ops.py)).
@@ -223,7 +224,10 @@ its children read Docker directly instead of asking themselves over the socket.
   each capped at 64 KiB. A result that would exceed the cap is replaced by a `failed`
   result for the same operation that gives its size, so the agent always gets an
   answer. One request per connection; the executor closes after the result. At most
-  four connections are handled at once.
+  four connections are handled at once, and a peer that sends no complete request
+  within 10 seconds is answered `rejected` and closed, so idle connections cannot
+  hold every slot. A frame that is not JSON, nested too deeply included, gets a
+  typed `rejected` answer.
 - **Versioning:** every request carries `protocol_version`; the executor rejects an
   unknown or mismatched version with a typed error instead of guessing. A transient
   agent/executor skew (mid-update, say) therefore fails safe: the agent reports the
@@ -268,8 +272,14 @@ The runtime volume is shared by the app services, the agent and the executor:
   and writing through it would clobber its target. The rename replaces the target
   itself, a planted symlink included, without following it;
 - documents another service writes (the bridge results, `snapshot.json`,
-  `enroll-request.json`) are read with `O_NOFOLLOW`, only when they are a regular
-  file, and only up to 64 KiB (256 KiB for the snapshot);
+  `enroll-request.json`, every trigger, request and ack under `state/`, relay
+  requests) are opened with `O_NOFOLLOW | O_NONBLOCK`, read only when `fstat` says
+  they are a regular file, and only up to 64 KiB (256 KiB for the snapshot). A FIFO,
+  link, directory or larger file at a request name is renamed aside
+  (`<name>.refused`; relay requests to `processed/`), logged and never read, so it
+  cannot stall the agent loop or the executor's update loop
+  (`composer/request_files.py`). The deploy log is appended to the same way, and
+  the executor's update loop logs a failed cycle instead of dropping it;
 - the package-operation lock opens with `O_NOFOLLOW`, refusing a planted symlink;
 - inputs the agent consumes are bounded where it parses them: control-plane commands
   (64 KiB), relay requests (64 KiB each, at most 64 pending,

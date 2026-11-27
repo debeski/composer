@@ -45,6 +45,9 @@ _MAX_INFLIGHT_CONNS = 4
 # Reads run beside the write lease, so the Operations card and the update check
 # keep working during a deploy, but never more than this many at once.
 _MAX_INFLIGHT_READS = 2
+# Seconds a connected peer may take to send its request frame. Without it, a
+# few peers that connect and say nothing hold every connection slot.
+_REQUEST_IDLE_TIMEOUT = 10.0
 
 Handler = Callable[[Dict], Dict]
 
@@ -189,11 +192,16 @@ class Executor:
                 if not self._authorized(conn):
                     self._send(conn, proto.build_result("", "rejected", exit_code=2, detail="Executor: unauthorized peer."))
                     return
+                conn.settimeout(_REQUEST_IDLE_TIMEOUT)
                 try:
                     raw = proto.read_frame(_recv_exactly(conn))
                     request = proto.validate_executor_request(raw)
                 except proto.ProtocolError as exc:
                     self._send(conn, proto.build_result("", "rejected", exit_code=2, detail=f"Executor: {exc}"))
+                    return
+                except (socket.timeout, TimeoutError):
+                    self._send(conn, proto.build_result("", "rejected", exit_code=2,
+                                                        detail="Executor: no request arrived in time."))
                     return
                 operation_id = request["operation_id"]
                 reading = request["op"] in proto.READ_OPS
@@ -260,15 +268,22 @@ def _run_watch_loop(watch, op_lease, stop_event) -> None:
     socket op, which lands on the same lease through the ops handler. A single
     bad cycle must never take the executor down.
     """
+    from .agent_protocol import redact_text
+
     interval = max(2.0, float(getattr(watch, "interval", 2) or 2))
+    last_error = ""
     while not stop_event.is_set():
         try:
             request = watch.pending_request()
             if request:
                 with op_lease:
                     watch.process(request)
-        except Exception:
-            pass
+            last_error = ""
+        except Exception as exc:  # noqa: BLE001 - logged, and the loop goes on
+            error = f"{type(exc).__name__}: {redact_text(exc)}"
+            if error != last_error:
+                print(f"⚠ executor update loop: {error}", file=sys.stderr, flush=True)
+            last_error = error
         stop_event.wait(interval)
 
 

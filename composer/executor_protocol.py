@@ -94,14 +94,16 @@ def validate_executor_request(value: Any) -> Dict[str, Any]:
         raise ProtocolError("Executor request must be a JSON object.")
     try:
         encoded = json.dumps(value, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise ProtocolError("Executor request is not valid JSON.") from exc
     if len(encoded) > MAX_EXECUTOR_MESSAGE_BYTES:
         raise ProtocolError("Executor request exceeds the 64 KiB limit.")
 
     # Version handshake first: refuse anything we do not exactly speak, so a
     # skewed agent can never coax an older executor into guessing.
-    if value.get("protocol_version") != EXECUTOR_PROTOCOL_VERSION:
+    version = value.get("protocol_version")
+    # Exactly the integer: `True` and `1.0` compare equal to 1 but are not it.
+    if type(version) is not int or version != EXECUTOR_PROTOCOL_VERSION:
         raise ProtocolError("Unsupported executor protocol version.")
 
     unexpected = set(value) - REQUEST_FIELDS
@@ -269,7 +271,8 @@ def read_frame(recv_exactly: Callable[[int], bytes]) -> Dict[str, Any]:
     body = recv_exactly(length)
     try:
         value = json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        # RecursionError: a deeply nested frame must get a typed answer too.
         raise ProtocolError("Executor frame is not valid JSON.") from exc
     if not isinstance(value, dict):
         raise ProtocolError("Executor frame must be a JSON object.")

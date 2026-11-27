@@ -172,12 +172,40 @@ def inherited_secret_values() -> list[str]:
     return sorted(set(values), key=len, reverse=True)
 
 
-def redact_text(value: Any) -> str:
-    text = _bounded_text(value, MAX_EVENT_TEXT)
-    for secret in inherited_secret_values():
+def _tail_window(text: str, limit: int, pad: int) -> str:
+    """The end of ``text``: at most ``limit + pad`` characters, starting on a whole line.
+
+    Cutting mid-line could leave the tail of a secret, or a ``password=`` whose
+    key was cut off, that the redaction below no longer recognises; a window
+    with no line break drops ``pad`` characters instead (longer than any secret).
+    """
+    if len(text) <= limit:
+        return text
+    window = text[-(limit + pad):]
+    newline = window.find("\n")
+    return window[newline + 1:] if newline != -1 else window[pad:]
+
+
+def redact_text(value: Any, limit: int = MAX_EVENT_TEXT, *, keep: str = "head") -> str:
+    """``value`` as text with secrets masked, at most ``limit`` characters.
+
+    ``keep="head"`` keeps the start; ``keep="tail"`` keeps the end (logs, where
+    the newest lines matter) and cuts on a line boundary.
+    """
+    secrets = inherited_secret_values()
+    if keep == "tail":
+        text = str(value or "").replace("\x00", "").strip()
+        pad = max([256] + [len(secret) + 1 for secret in secrets])
+        text = _tail_window(text, limit, pad)
+    else:
+        text = _bounded_text(value, limit)
+    for secret in secrets:
         text = text.replace(secret, "[REDACTED]")
     text = _AUTHORIZATION_RE.sub(
         lambda match: f"{match.group(1)}[REDACTED]",
         text,
     )
-    return _SENSITIVE_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
+    text = _SENSITIVE_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
+    if keep == "tail" and len(text) > limit:
+        text = _tail_window(text, limit, 0)
+    return text

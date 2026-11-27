@@ -12,3 +12,4 @@ p { color: #cbd5e1; line-height: 1.6; margin: 0.35rem 0 1rem; }
 .status { margin-top: 0.75rem; color: #e2e8f0; font-weight: 650; }
 pre { max-height: 18rem; overflow: auto; padding: 1rem; border: 1px solid #334155; border-radius: 0.75rem; background: #0f172a; color: #dbeafe; white-space: pre-wrap; word-break: break-word; }
 .muted { color: #94a3b8; }
+[hidden] { display: none !important; }

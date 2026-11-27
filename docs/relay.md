@@ -66,7 +66,10 @@ link-local including the cloud metadata address, shared, multicast, or their IPv
 IPv4-mapped forms) and the connection goes to that address, so DNS cannot swap it
 afterwards; no redirects; `Accept-Encoding: identity`; a content-type allowlist; a
 response size cap; a timeout; a per-operation rate limit; request expiry (at most
-120 s ahead, time-zone aware); at most 64 pending requests; 64 KiB per request.
+120 s ahead of the agent's own clock, time-zone aware, with `created_at` no more
+than 30 s ahead of it); at most 64 pending requests; 64 KiB per request, read only
+from a regular file (a link, dangling or not, or a FIFO in `requests/` is moved to
+`processed/` unread).
 Results carry stable error codes (`credentials`, `network`, `provider`,
 `response`, `blocked`, `limit`, `unsupported`, `expired`, `invalid`) and never raw
 exception text. Logs name the exception class only.
