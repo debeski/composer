@@ -354,7 +354,13 @@ missing command, a port already in use, an unreachable database or Redis, a sche
 that does not match the code, incomplete settings, a permission problem, or exit 137
 (out of memory). It ends with the next steps: `./start.sh logs SERVICE`, and adding
 `COMPOSER_EXCLUDE_SERVICES=SERVICE` to the secrets file to deploy without it while it
-is fixed. A failed `up` and a failed `restart` carry the same diagnosis.
+is fixed. The service that failed comes first and is the one the next steps name:
+one whose `pre_start` hook failed, then one that crashes (restarting, or exited
+non-zero), before a service that is only unhealthy because it waits for it (`web`
+waiting for the migrations a crashing `worker` never applies). Quoted log lines and
+a failed hook's message carry the exception line, never a traceback's caret line
+(`~~~^^`) or a blank one. A failed `up` and a failed `restart` carry the same
+diagnosis.
 
 `restart` and inline DjangoLux updates (`dlux update`, `dlux rollback`) use the same check.
 

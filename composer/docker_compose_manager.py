@@ -22,7 +22,7 @@ from .constants import (
     SUPERVISOR_MODULE,
 )
 from . import registry_login
-from .failure_hints import likely_cause, next_steps
+from .failure_hints import likely_cause, next_steps, uninformative
 from .output_utils import OutputUtilsMixin
 from .service_selection import scoped_service_list
 from .subprocess_runner import SubprocessRunnerMixin
@@ -218,9 +218,17 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         return True, self.parse_compose_json_output(out), ""
 
     def collect_service_diagnostics(
-        self, include_logs: bool = True, log_services: Optional[List[str]] = None
+        self, include_logs: bool = True, log_services: Optional[List[str]] = None,
+        culprits: Optional[List[str]] = None,
     ) -> str:
-        """Failing services' state, and the last log lines of those and ``log_services``."""
+        """Failing services' state, and the last log lines of those and ``log_services``.
+
+        ``culprits`` (a service whose start hook failed) come first, then
+        services that crash (restarting, or exited non-zero), then the merely
+        unhealthy: a `web` waiting for the migrations a crashing `worker` never
+        applies is downstream, and the next steps name the service that failed
+        (R2-002). Logs are quoted without traceback caret lines.
+        """
         ok, services, detail = self.get_compose_ps_entries(include_all=True)
         if not ok:
             return detail
@@ -228,6 +236,7 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
         excluded = set(getattr(self, "exclude_services", []) or [])
         issues: List[str] = []
         failed_services: List[str] = []
+        crashing: List[str] = []
         exit_codes: Dict[str, str] = {}
 
         for service in services:
@@ -247,29 +256,36 @@ class DockerComposeMixin(OutputUtilsMixin, SubprocessRunnerMixin):
                     message += f", exit_code={exit_code}"
                 issues.append(message)
                 failed_services.append(name)
+                if state in {"exited", "dead"} and exit_code not in {"", "0"}:
+                    crashing.append(name)
             elif state == "restarting":
                 issues.append(f"{name}: state=restarting")
                 failed_services.append(name)
+                crashing.append(name)
 
         sections: List[str] = []
         if issues:
             sections.append("Service state:\n" + "\n".join(f"- {issue}" for issue in issues))
 
         if include_logs:
-            wanted = list(log_services or [])
+            first = [name for name in list(culprits or []) + crashing if name not in excluded]
+            wanted = list(dict.fromkeys(first + list(log_services or [])))
             wanted += [name for name in failed_services if name not in wanted]
             for service_name in wanted[:3]:
                 ok, out, err = self.run_docker_compose(
                     ["logs", "--no-color", "--tail", "25", service_name],
                     timeout=15,
                 )
-                summary = self.summarize_output(out, err, max_lines=12)
+                summary = "\n".join(
+                    line for line in self.summarize_output(out, err, max_lines=12).splitlines()
+                    if not uninformative(line)
+                )
                 if summary:
                     sections.append(f"{service_name} logs:\n{summary}")
                 cause = likely_cause(service_name, f"{out}\n{err}", exit_codes.get(service_name))
                 if cause:
                     sections.append(f"{service_name}: {cause}")
-            sections.append(next_steps(wanted[:3]))
+            sections.append(next_steps(list(dict.fromkeys(first)) or wanted[:3]))
 
         return "\n\n".join(section for section in sections if section.strip())
 

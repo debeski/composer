@@ -36,6 +36,7 @@ from .constants import (
     RUNNING,
 )
 from .docker_compose_manager import DockerComposeMixin
+from .failure_hints import clarify_hook_lines, hook_failures
 from .downgrade_guard import DowngradeGuardMixin
 from .health_monitor import HealthMonitorMixin
 from .post_start_hooks import PostStartHooksMixin
@@ -1289,8 +1290,8 @@ class DockerComposeLauncher(
                 ok, out, err = self.restart_containers()
                 if not ok:
                     self.sections["compose"] = ERROR
-                    diagnostics = self.collect_service_diagnostics()
-                    detail = self.build_failure_detail(out, err, diagnostics)
+                    diagnostics = self.collect_service_diagnostics(culprits=hook_failures(f"{out}\n{err}"))
+                    detail = clarify_hook_lines(self.build_failure_detail(out, err, diagnostics))
                     self.write_status("failed", error=detail)
                     self.render(f"Failed to restart containers\n\n{detail}")
                     sys.exit(1)
@@ -1425,8 +1426,8 @@ class DockerComposeLauncher(
             self.record_deployed_release()
             if not ok:
                 self.sections["compose"] = ERROR
-                diagnostics = self.collect_service_diagnostics()
-                detail = self.build_failure_detail(out, err, diagnostics)
+                diagnostics = self.collect_service_diagnostics(culprits=hook_failures(f"{out}\n{err}"))
+                detail = clarify_hook_lines(self.build_failure_detail(out, err, diagnostics))
                 detail = self.keep_site_reachable(detail)
                 self.write_status("failed", error=detail)
                 self.render(f"Failed to start containers\n\n{detail}")

@@ -22,6 +22,7 @@
 - **A Future-Dated Status Record Is Not This Request's (R2-074)**: `watcher._describes_request` merged an old `deploy-status.json` with a future mtime (another operation's `operation_id` included) into the next refusal. A record naming another operation, or dated more than 5 s ahead, no longer counts.
 - **OCR Without Its Engine Is Left Out (R2-057)**: a project without the `django-lux[ocr]` extra failed `./start.sh` health on the `ocr` service. `leave_out_ocr_without_engine` asks the image and, without the engine, leaves the service out, stops it and says so.
 - **Messages (R2-086 a, d)**: a failed `update self --pin` in the wrapper points to `./start.sh agent update`; a registry refusal on pull names `COMPOSER_REGISTRY_HOST`/`USERNAME`/`PASSWORD` (`launcher.registry_hint`).
+- **A Failed Deploy Names The Failing Service (R2-002, R2-126)**: a `worker` whose `pre_start` hook crashed left `web` unhealthy, and the failure quoted only `~~~~^^` and advised `COMPOSER_EXCLUDE_SERVICES=web`. `failure_hints.hook_failures` and `clarify_hook_lines` give a failed hook's line its exception line, and `collect_service_diagnostics(culprits=…)` puts hook failures and crashing services before merely unhealthy ones, in the logs and the next steps, dropping caret and blank lines from quoted logs.
 - **Agent Status Heartbeat (R2-102, Composer half)**: `agent-status.json` was rewritten only when its content changed, so its age said nothing. It carries `heartbeat_seconds: 60` and is rewritten at least that often.
 
 ## v1.11.0b2
