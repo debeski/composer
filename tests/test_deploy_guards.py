@@ -248,7 +248,7 @@ class RollbackRuleTests(GuardHarness, unittest.TestCase):
     def test_a_compatible_release_being_left_allows_it_with_the_warning(self):
         ok, message = self.launcher.downgrade_guard()
         self.assertTrue(ok, message)
-        self.assertIn("DjangoLux 1.16.3 now runs on the schema DjangoLux 1.17.0b2 migrated", self.output())
+        self.assertIn("DjangoLux 1.16.3 now runs on a schema with DjangoLux 1.17.0b2's migrations", self.output())
         self.assertIn("migrations are never reversed", self.output())
         self.assertIn("Ignore version mismatch", self.output())
 
