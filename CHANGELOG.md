@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **`check` Creates Nothing On A Stack That Never Started (b2 acceptance F1)**: `_dlux_runtime_version` read an image's DjangoLux with `docker compose run --rm --no-deps <service>`, which gives the throwaway container the service's mounts, so `check --beta -y --no-recreate` on a fresh project created `dlux_runtime`, `static`, `postgres_data`, `redis_data` and the `imports/`, `logs/`, `media/` folders. The probe now runs `docker run --rm --network none --cap-drop ALL --entrypoint python <image> -m dlux --version` with no mounts, and reads a build-only service with `--pull never`, so a check never builds it. `relay-version`, `dlux-updater-executor` and the updater migration use it.
+- **Error Frames End Their Line, Logs Keep Their Order (b2 acceptance F2)**: `RenderingMixin.render(error)` ends the final error frame with a newline, so a refused `agent update` no longer runs into the next output or the prompt; `composer.main.line_buffer_stdout()` line-buffers stdout, so in a captured log "Current Composer version" no longer lands after a refusal written to stderr.
+
 ## v1.11.0b2
 
 - **`update self` Takes Wrapper 7's `--pin` (F1, blocker)**: the launcher routed `update … self` through `_update_self_help_args`, which accepted only `-h`/`--help` and the global `-f`/`-d`, so wrapper 7's own `update self --pin` (and `--allow-downgrade`, `--allow-unverified-composer`) got the usage line and exit 2, and every `./start.sh update self` failed. `launcher._update_self_args` now passes every option `cli.update_self_options()` reads from the `update self` parser through to `handle_update_self`, and still refuses service names and update options. `tests/test_wrapper_pin.py` runs the real `start.sh` against the real launcher; `scripts/smoke-test.sh` runs `./start.sh update self` through the wrapper without `COMPOSER_SELF_IMAGE`. A stack pinned at 1.11.0b1 moves on with `./start.sh agent update`.

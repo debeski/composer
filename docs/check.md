@@ -32,6 +32,13 @@ counts `results`; repairs `--fix` applied are listed separately under `fixes`.
 `check` exits `1` when any result or applied fix is a `fail`, and `0` otherwise: a
 WARN never makes it fail.
 
+Without `--fix`, `--beta` or `--stable`, `check` changes nothing, in the project or in
+Docker. The findings that need an image's DjangoLux version run `python -m dlux
+--version` in a throwaway container that mounts nothing and has no network. So a
+stack that has never started gets no volumes and no bind folders from a check, and
+an image that would have to be built is not built (the version then reads as
+unknown).
+
 The Operations card runs the same checks in `composer-executor`, and previews the
 repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#operations-requests-from-djangolux)).
 

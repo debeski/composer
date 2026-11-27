@@ -228,6 +228,46 @@ class DetachedRenderingTests(unittest.TestCase):
         self.assertIn("COMPOSER", joined)
         self.assertNotIn("\033[", joined)
 
+    def test_an_error_frame_ends_its_line(self):
+        launcher = DockerComposeLauncher()
+        launcher.resolve_active_compose_files()
+        calls = []
+        with patch("builtins.print", side_effect=lambda *a, **k: calls.append((a, k))):
+            launcher.render("Refused: nothing changed.")
+
+        last_args, last_kwargs = calls[-1]
+        self.assertEqual(last_kwargs.get("end", "\n"), "\n")
+        self.assertEqual(launcher.last_render_line_count, 0)
+        self.assertIn("Refused: nothing changed.", "\n".join(str(a[0]) for a, _ in calls if a))
+
+    def test_a_progress_frame_keeps_the_cursor_on_its_last_line(self):
+        launcher = DockerComposeLauncher()
+        launcher.resolve_active_compose_files()
+        calls = []
+        with patch("builtins.print", side_effect=lambda *a, **k: calls.append((a, k))):
+            launcher.render()
+
+        self.assertEqual(calls[-1][1].get("end"), "")
+        self.assertGreater(launcher.last_render_line_count, 0)
+
+
+class StdoutOrderTests(unittest.TestCase):
+    def test_stdout_is_line_buffered_so_it_keeps_order_with_stderr(self):
+        import io
+
+        from composer.main import line_buffer_stdout
+
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        with patch("sys.stdout", stream):
+            line_buffer_stdout()
+        self.assertTrue(stream.line_buffering)
+
+    def test_a_stdout_without_reconfigure_is_left_alone(self):
+        from composer.main import line_buffer_stdout
+
+        with patch("sys.stdout", object()):
+            line_buffer_stdout()
+
 
 if __name__ == "__main__":
     unittest.main()

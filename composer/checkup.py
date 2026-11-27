@@ -568,18 +568,29 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         return _result(OK, "proxy-routes", "No legacy pgAdmin proxy routes detected.")
 
     def _dlux_runtime_version(self, service: Optional[str] = None):
-        """(major, minor, patch) of the dlux baked into the project image, read
-        from the image via `dlux --version`. Uses `run --no-deps` (a fresh
-        container) so it works even when dlux-updater is crash-looping, and never
-        starts db/redis. Returns None when it can't be determined."""
+        """(major, minor, patch) of the dlux baked into the service's image, read
+        with `dlux --version` in a throwaway container that mounts nothing and has
+        no network. It works while the service is crash-looping and starts
+        nothing else. `compose run` gave the probe the service's mounts, so a
+        plain `check` on a stack that never started created its named volumes
+        and bind folders. An image that would have to be built is not built.
+        Returns None when it can't be determined."""
         from .agent_installer import parse_dlux_version
+        from .app_permissions import service_image
 
         service = service or (
             "dlux-updater" if "dlux-updater" in set(self.services) else "web"
         )
-        ok, out, _err = self.run_docker_compose(
-            ["run", "--rm", "--no-deps", "--entrypoint", "python", "-T",
-             service, "-m", "dlux", "--version"],
+        config = self.compose_config_json() or {}
+        image = service_image(config, service)
+        if not image:
+            return None
+        spec = (config.get("services") or {}).get(service) or {}
+        pull = "missing" if spec.get("image") else "never"
+        ok, out, _err = self.run_command(
+            ["docker", "run", "--rm", "--pull", pull, "--network", "none",
+             "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+             "--entrypoint", "python", image, "-m", "dlux", "--version"],
             timeout=60,
         )
         return parse_dlux_version(out) if ok else None
