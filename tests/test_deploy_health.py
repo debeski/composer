@@ -170,6 +170,30 @@ class SigtermTests(unittest.TestCase):
         self.assertTrue(state["signalled"])
 
 
+class StatusRecordTests(unittest.TestCase):
+    """R2-074: a deploy-status.json with a future mtime was merged into the next refusal."""
+
+    def test_a_future_mtime_is_not_this_request(self):
+        import time
+
+        from composer.watcher import _describes_request
+
+        old = {"action": "rollback", "operation_id": "", "run_token": "old"}
+        now = time.time()
+        self.assertFalse(_describes_request(old, "new", "", now + 3600 * 24 * 365, now - 1))
+        self.assertTrue(_describes_request({"status": "failed"}, "new", "", now, now - 1))
+
+    def test_another_operations_record_is_not_this_request(self):
+        import time
+
+        from composer.watcher import _describes_request
+
+        now = time.time()
+        self.assertFalse(_describes_request({"operation_id": "op-old"}, "t", "op-new", now, now - 1))
+        self.assertTrue(_describes_request({"operation_id": "op-new"}, "t", "op-new", now - 100, now))
+        self.assertTrue(_describes_request({"run_token": "t"}, "t", "op-new", now + 9999, now))
+
+
 class RegistryHintTests(unittest.TestCase):
     def test_a_refused_pull_names_the_registry_login(self):
         hint = launcher_module.registry_hint("Error response from daemon: pull access denied for x, repository does not exist")

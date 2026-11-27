@@ -440,19 +440,30 @@ def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = ""):
         pass
 
 
+#: How far ahead of this clock a status file's mtime may be and still count as "written since".
+FUTURE_MTIME_SLACK = 5.0
+
+
 def _describes_request(record: dict, token: str, operation_id: str, written, since) -> bool:
     """Is ``record`` about this request rather than an earlier run?
 
     It is when it names the request (the child's ``request_token``, or the
-    ``run_token`` of the DjangoLux run that wrote the request), its operation, or
-    when it was written after the request began: a package child publishes its
-    result without a token.
+    ``run_token`` of the DjangoLux run that wrote the request) or its operation.
+    A record naming none of them counts when it was written after the request
+    began, since a package child publishes its result without a token; one that
+    names another operation, or whose mtime is in the future (clock skew, a
+    restored file: R2-074), never does.
     """
+    recorded_operation = str(record.get("operation_id") or "")
     if token and token in {str(record.get("request_token") or ""), str(record.get("run_token") or "")}:
         return True
-    if operation_id and str(record.get("operation_id") or "") == operation_id:
+    if operation_id and recorded_operation == operation_id:
         return True
-    return since is not None and written is not None and written >= since
+    if operation_id and recorded_operation:
+        return False
+    if since is None or written is None or written > time.time() + FUTURE_MTIME_SLACK:
+        return False
+    return written >= since
 
 
 def _publish_terminal_failure(
