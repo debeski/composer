@@ -148,6 +148,33 @@ class LastErrorAddressTests(unittest.TestCase):
         self.assertIn("upstream <address>", line)
 
 
+class BannerUrlTests(_Project):
+    """R2-126 (4): the start banner printed ${BASE_URL:-http://localhost} as written."""
+
+    def _url(self, compose, secrets=None, env=None):
+        self.write("compose.yml", compose)
+        if secrets is not None:
+            self.write(".secrets/.env", secrets)
+        self.launcher.app_url = "http://localhost"
+        with _in(self.root), patch.dict(os.environ, env or {}, clear=False):
+            for key in ("BASE_URL", "SITE_HOST"):
+                if key not in (env or {}):
+                    os.environ.pop(key, None)
+            self.launcher.extract_config()
+        return self.launcher.app_url
+
+    def test_the_value_compose_would_use(self):
+        compose = 'x-environment: &de\n  BASE_URL: "${BASE_URL:-http://localhost}"\n'
+        self.assertEqual(self._url(compose), "http://localhost")
+        self.assertEqual(self._url(compose, secrets="BASE_URL=https://shop.example\n"), "https://shop.example")
+        self.assertEqual(self._url(compose, secrets="BASE_URL=https://shop.example\n",
+                                   env={"BASE_URL": "https://env.example"}), "https://env.example")
+
+    def test_a_default_inside_a_longer_value_and_an_unset_reference(self):
+        self.assertEqual(self._url('  BASE_URL: "https://${SITE_HOST:-a.example}/app"\n'), "https://a.example/app")
+        self.assertNotIn("${", self._url('  BASE_URL: "${BASE_URL}"\n'))
+
+
 class StrictStampTests(_Project):
     """R2-068: "99" and "0" only warned, "5x" read as 5, "-1" as no stamp."""
 
@@ -317,6 +344,17 @@ class ScaffoldDriftTests(_Project):
         self.assertIn("does not prepare /app/exports", result["message"])
         self.assertNotIn("/app/media", result["message"])
         self.assertNotIn("/app/imports", result["message"])
+
+    def test_a_manage_py_without_the_inline_release_is_named(self):
+        # R2-051, consumer side: 4 of 5 consumers' manage.py import the image's DjangoLux.
+        self.write("Dockerfile", "RUN chmod g+rwX /app/media /app/staticfiles /app/exports\n")
+        self.write("entrypoint.sh", "umask 0002\npython -m dlux.mount_access gate\n")
+        self.write("compose.yml", "services:\n  db:\n    image: postgres:17\n")
+        self.write("manage.py", "from django.core.management import execute_from_command_line\n")
+        self.assertIn("manage.py does not resolve the active inline release", self._check()["message"])
+        self.write("manage.py", "from dlux.updater.supervisor import resolve_release\n"
+                                "from django.core.management import execute_from_command_line\n")
+        self.assertEqual(self._check()["level"], OK)
 
     def test_a_deploy_folder_without_the_source_is_not_judged(self):
         self.write("compose.yml", "services: {}\n")

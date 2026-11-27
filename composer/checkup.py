@@ -1217,14 +1217,21 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         DjangoLux project tree (no Dockerfile or entrypoint.sh here).
         """
         gaps: List[str] = []
-        dockerfile, entrypoint = Path("Dockerfile"), Path("entrypoint.sh")
+        dockerfile, entrypoint, manage = Path("Dockerfile"), Path("entrypoint.sh"), Path("manage.py")
         try:
             docker_text = dockerfile.read_text(encoding="utf-8", errors="replace") if dockerfile.is_file() else ""
             entry_text = entrypoint.read_text(encoding="utf-8", errors="replace") if entrypoint.is_file() else ""
+            manage_text = manage.read_text(encoding="utf-8", errors="replace") if manage.is_file() else ""
         except OSError:
             return None
         if not docker_text and not entry_text:
             return None
+        if "execute_from_command_line" in manage_text and "resolve_release" not in manage_text:
+            gaps.append(
+                "manage.py does not resolve the active inline release (dlux.updater.supervisor.resolve_release), so "
+                "a command run outside the runtime supervisor (an operator's collectstatic, for example) uses the "
+                "image's DjangoLux instead of the one the site runs"
+            )
         if docker_text:
             config = self.compose_config_json() or {}
             mounts = sorted({

@@ -642,9 +642,11 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 - **Checks:** what a stack walked forward by `check --fix` still lacks from the current
   DjangoLux scaffold in the files `check --fix` does not write: the Dockerfile's
   preparation of each writable app mount point (`chmod g+rwX`), `umask 0002` and
-  `python -m dlux.mount_access gate` in `entrypoint.sh`, and a `db` service that
-  merges the shared `x-environment` block (the database container then receives the
-  app's secrets). No finding without a Dockerfile or `entrypoint.sh` in the project
+  `python -m dlux.mount_access gate` in `entrypoint.sh`, a `manage.py` that resolves
+  the active inline release (`dlux.updater.supervisor.resolve_release`, so a command
+  run outside the runtime supervisor uses the DjangoLux the site runs), and a `db`
+  service that merges the shared `x-environment` block (the database container then
+  receives the app's secrets). No finding without a Dockerfile or `entrypoint.sh` in the project
   folder (a deploy folder of a pulled image).
 - **OK** none missing. **WARN** names each gap, an operator mount point the
   Dockerfile does not prepare included (`/app/exports`).
