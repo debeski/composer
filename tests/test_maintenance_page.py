@@ -117,7 +117,7 @@ class FakeDocker:
         out = ""
         if "config" in args:
             out = (
-                '{"services": {"caddy": {"volumes": [{"type": "bind", "source": "%s",'
+                '{"services": {"caddy": {"image": "caddy:2", "volumes": [{"type": "bind", "source": "%s",'
                 ' "target": "/etc/caddy/Caddyfile"}]}, "composer-agent": {}}}' % self.caddyfile
             )
         elif "ps" in args:

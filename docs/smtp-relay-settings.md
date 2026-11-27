@@ -84,8 +84,9 @@ provider without checking its certificate and ignores `SMTP_RELAY_TLS_VERIFY` an
 step.
 
 So when web runs 1.16.2 or later, the `relay-version` finding reads the relay's
-version from its image in a fresh container (`docker compose run --rm --no-deps`,
-`python -m dlux --version`): OK at 1.16.2 or later, WARN when older. There is no
+version from its image in a throwaway container that mounts nothing and has no
+network (`docker run --rm --network none`, `python -m dlux --version`): OK at 1.16.2
+or later, WARN when older. There is no
 finding on an older web, without a relay, or when the version cannot be read.
 
 `check --fix` cannot change an image: move the stack to a project image built on

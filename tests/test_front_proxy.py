@@ -283,7 +283,7 @@ class FakeDocker:
         self.calls = []
         self.validated = []
 
-    def __call__(self, args, **_kwargs):
+    def __call__(self, args, **kwargs):
         self.calls.append(list(args))
         files = [args[index + 1] for index, arg in enumerate(args) if arg == "-f"]
         code, out = 0, ""
@@ -302,7 +302,9 @@ class FakeDocker:
             out = json.dumps({"services": services})
         elif "run" in args:
             candidate = next(arg for arg in args if arg.endswith(":/etc/caddy/Caddyfile:ro")).split(":")[0]
-            self.validated.append((Path(candidate).read_text(encoding="utf-8"), list(files)))
+            passed = {args[index + 1] for index, arg in enumerate(args) if arg == "-e"}
+            environment = {key: (kwargs.get("env") or {}).get(key) for key in passed}
+            self.validated.append((Path(candidate).read_text(encoding="utf-8"), environment))
             code = self.validate
         elif "ps" in args:
             out = "\n".join(self.running)
@@ -331,10 +333,12 @@ class MigrateTests(unittest.TestCase):
         self.assertIn(LEGACY_LINE.strip(), (backup / ".proxy" / "Caddyfile").read_text(encoding="utf-8"))
         self.assertNotIn("DLUX_FRONT_PROXY", (backup / "compose.yml").read_text(encoding="utf-8"))
 
-        validated_text, validated_files = docker.validated[0]
+        validated_text, validated_environment = docker.validated[0]
         self.assertIn(MANAGED_LINE.strip(), validated_text)
-        self.assertTrue(any(".composer-check-" in name for name in validated_files),
-                        "caddy is validated with the new environment")
+        self.assertIn("DLUX_FRONT_PROXY", validated_environment, "caddy is validated with the new environment")
+        validation = next(call for call in docker.calls if call[:2] == ["docker", "run"])
+        self.assertEqual(validation[validation.index("--network") + 1], "none")
+        self.assertNotIn("compose", validation)
         up = [call for call in docker.calls if "up" in call]
         self.assertEqual(up[0][-4:], ["-d", "--no-deps", "--force-recreate", "caddy"])
         self.assertEqual(sorted(p.name for p in (self.root / ".proxy").iterdir()), ["Caddyfile"],

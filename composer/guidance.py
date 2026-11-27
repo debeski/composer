@@ -30,7 +30,11 @@ ASK_AGAIN = "./start.sh check --fix asks again"
 # Lifecycle fixes are what was done to the stack, not a finding made healthy.
 _LIFECYCLE = {"fix:recreate", "fix:recreate-resident", "fix:remove-services", "fix:secrets"}
 _START_SH = re.compile(r"'(\./start\.sh[^']*)'")
-_SERVICE_PROBLEM = re.compile(r"(?:^|; )([A-Za-z0-9_.-]+) (?:keeps restarting|is unhealthy)")
+_SERVICE_PROBLEM = re.compile(
+    r"(?:^|; )([A-Za-z0-9_.-]+) (?:keeps restarting|is unhealthy|never started|has stopped|has no container)"
+)
+_REPAIR = "./start.sh check --fix"
+_DOCS = "docs/check.md"
 _UNSAFE_VALUE = re.compile(r"[\r\n\"'#\\]")
 
 
@@ -251,15 +255,46 @@ def next_command(entry: Mapping[str, Any]) -> str:
     return "./start.sh check"
 
 
+def next_step(entry: Mapping[str, Any], *, ran: bool, manual: str = "") -> str:
+    """The operator's next step for ``entry`` once a ``--fix`` run is over.
+
+    After a run that was not declined, sending the operator back to ``check
+    --fix`` for a finding it left goes in a circle: the repair ran and did not
+    clear it, or there is none for this form of it. The step by hand is named
+    instead: the finding's own ``manual``, or its repair's, or the doc section.
+    A finding whose only advice is ``check`` gets its step by hand too.
+    """
+    command = next_command(entry)
+    manual = str(entry.get("manual") or manual or "")
+    if command == "./start.sh check" and manual:
+        return manual
+    if not ran or command != _REPAIR:
+        return command
+    if manual:
+        return manual
+    name = str(entry.get("name") or "")
+    name = name[len("fix:"):] if name.startswith("fix:") else name
+    return f"by hand, as {_DOCS} describes for {name}: check --fix cannot repair it"
+
+
 def summary(
     results: Sequence[Mapping[str, Any]],
     fixes: Sequence[Mapping[str, Any]],
     skipped: Sequence[Mapping[str, str]],
     *,
     before: Optional[Mapping[str, str]] = None,
+    declined: bool = False,
 ) -> Dict[str, List]:
-    """``{"healthy": [name], "still": [(name, command)], "skipped": [(name, command)]}`` for a ``--fix`` run."""
+    """``{"healthy": [name], "still": [(name, command)], "skipped": [(name, command)]}`` for a ``--fix`` run.
+
+    ``declined``: the operator answered no, so ``check --fix`` is still the way forward.
+    """
     before = before or {}
+    ran = not declined
+    manuals = {
+        str(entry.get("name") or ""): str(entry.get("manual") or "")
+        for entry in fixes if entry.get("manual")
+    }
     now = {entry.get("name"): entry.get("level") for entry in results}
     # A repair counts once its finding reads OK (or has gone); one that still warns still needs you.
     healthy = [
@@ -277,11 +312,12 @@ def summary(
     for entry in results:
         name = str(entry.get("name") or "")
         if entry.get("level") != "ok" and name not in healthy and name not in skipped_names:
-            still.setdefault(name, next_command(entry))
+            manual = manuals.get(f"fix:{name}") or manuals.get(name, "")
+            still.setdefault(name, next_step(entry, ran=ran, manual=manual))
     for entry in fixes:
         name = str(entry.get("name") or "")
         if entry.get("level") != "ok" and name[len("fix:"):] not in skipped_names:
-            still.setdefault(name, next_command(entry))
+            still.setdefault(name, next_step(entry, ran=ran))
     return {
         "healthy": healthy,
         "still": list(still.items()),

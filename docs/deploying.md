@@ -60,8 +60,8 @@ Publishing a new wrapper version is a release step: see
 ## Secrets
 
 Composer resolves secrets automatically. It looks for a plaintext env file
-(`.env`, `secrets/.env`, then `.secrets/.env`) and uses the first one that supplies
-every variable the compose file requires.
+(`.env`, `secrets/.env`, then `.secrets/.env`) and uses the first one that exists.
+[`check`](check.md#secrets) warns when that file shadows another of them.
 
 `check --fix` writes to that file only when an operator at a terminal answers one
 of its questions (`DLUX_FRONT_PROXY`, `DLUX_UPDATE_POLICY`): the one line is set in

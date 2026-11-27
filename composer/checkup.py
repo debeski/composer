@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,7 +25,7 @@ from . import (
     stack_lifecycle,
     worker_migration,
 )
-from .stack_schema import collect_all_stamps, has_env_stamp
+from .stack_schema import collect_all_stamps, has_env_stamp, invalid_env_stamps, mixed_line_endings
 from .stack_cleanup import OBSOLETE_SERVICES
 
 # First DjangoLux whose inline updates Composer can drive end to end.
@@ -43,11 +44,25 @@ DEFAULT_DEEP_SERVICE = "web"
 DEFAULT_DEEP_COMMAND = "python manage.py dlux_doctor"
 
 
-def _result(level: str, name: str, message: str, fix: str = "") -> Dict[str, Any]:
+def _result(level: str, name: str, message: str, fix: str = "", manual: str = "") -> Dict[str, Any]:
+    """One finding. ``manual`` is the step by hand the end-of-run summary names
+    when ``check --fix`` has run and cannot repair it (``guidance.summary``)."""
     entry = {"level": level, "name": name, "message": message}
     if fix:
         entry["fix"] = fix
+    if manual:
+        entry["manual"] = manual
     return entry
+
+
+def policy_readers(services) -> str:
+    """The services among ``services`` that read DLUX_UPDATE_POLICY, as a phrase."""
+    from .update_policy_env import READERS
+
+    present = set(services or ())
+    found = [name for name in ("web", "worker", "composer-agent", "composer-executor")
+             if name in present and name in READERS]
+    return stack_lifecycle.join(found) if found else "the services that read it"
 
 
 #: How a stack whose lock names a Composer from before digest pinning gets out.
@@ -115,13 +130,53 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 "compose-config",
                 f"Compose config resolves ({len(self.services)} service(s)).",
             )
-        detail = (self.last_runtime_diagnostic or "docker compose config failed.").strip().splitlines()
         return _result(
             FAIL,
             "compose-config",
-            "Compose config does not resolve: " + (detail[0] if detail else "unknown error"),
+            "Compose config does not resolve: " + self._compose_config_error(),
             fix="Fix the reported YAML/interpolation/network error; missing env vars are reported separately.",
         )
+
+    _PROJECT_NAME = re.compile(r"""^name:[ \t]*["']?([^"'#\s]+)""", re.MULTILINE)
+
+    def _check_project_name(self) -> Optional[Dict[str, Any]]:
+        """Do the active Compose files agree on the project's ``name:``? Compose takes the last one.
+
+        With ``-d``, a ``compose.dev.yml`` that keeps the scaffold's name starts a
+        second project beside the deployed one: its own containers, fresh volumes
+        and a second Docker-authority pair. None when they agree or name nothing.
+        """
+        names: Dict[str, str] = {}
+        for name in self.active_compose_files:
+            try:
+                match = self._PROJECT_NAME.search(Path(name).read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            if match:
+                names[name] = match.group(1)
+        if len(set(names.values())) <= 1:
+            return None
+        listed = "; ".join(f"{name} names it {value}" for name, value in names.items())
+        last = list(names.values())[-1]
+        return _result(
+            FAIL,
+            "project-name",
+            f"The active Compose files disagree on the project name ({listed}). Compose takes the last one, so "
+            f"this would run project {last}: a second stack with its own containers and fresh volumes beside "
+            "the deployed one.",
+            fix="Give every Compose file the same top-level name: (the deployed project's), or remove name: from "
+            "the override.",
+            manual="give every Compose file the same top-level name: by hand",
+        )
+
+    def _compose_config_error(self) -> str:
+        """Compose's own words for why the configuration does not resolve (its last lines)."""
+        ok, out, err = self.run_docker_compose(["config", "--quiet"], timeout=30)
+        lines = [line.strip() for line in str(err or out or "").splitlines() if line.strip()]
+        if not ok and lines:
+            return " ".join(lines[-3:])[:600]
+        detail = (self.last_runtime_diagnostic or "").strip().splitlines()
+        return detail[0] if detail else "docker compose config failed."
 
     def _check_secrets(self) -> Dict[str, Any]:
         candidates = self.plaintext_env_candidates()
@@ -165,11 +220,47 @@ class CheckupMixin(ConfigMixin, SecretsMixin):
                 f"Secrets file {path} contains no environment values.",
                 fix="Populate the env file; an empty file silently falls through to compose defaults.",
             )
+        resident = None
         if not getattr(self, "resident_check", False) and "composer-executor" in self.services:
             resident = self._check_executor_secret_access(Path(path))
-            if resident is not None:
+            if resident is not None and resident["level"] != OK:
                 return resident
-        return _result(OK, "secrets", f"Secrets source {path} readable ({len(values)} value(s)).")
+        if len(candidates) > 1:
+            shadowed = ", ".join(str(other) for other in candidates[1:])
+            return _result(
+                WARN,
+                "secrets",
+                f"{path} shadows {shadowed}: './start.sh' and Composer read only {path}, the first of .env, "
+                f"secrets/.env and .secrets/.env that exists, so {shadowed} is not used. A deploy then runs on "
+                "whatever it lacks from the Compose file's defaults.",
+                fix=f"Move {path} out of the project folder (into .xclude/, for example), or merge its keys into "
+                f"{candidates[-1]} first.",
+                manual=f"move {path} aside so {candidates[-1]} is read",
+            )
+        loose = self._loose_secrets_mode(Path(path))
+        if loose is not None:
+            return loose
+        return resident or _result(OK, "secrets", f"Secrets source {path} readable ({len(values)} value(s)).")
+
+    @staticmethod
+    def _loose_secrets_mode(path: Path) -> Optional[Dict[str, Any]]:
+        """WARN when the secrets file's group or others may read or write it (DjangoLux writes it 0600)."""
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except OSError:
+            return None
+        if not mode & 0o077:
+            return None
+        who = " and ".join(name for name, bits in (("its group", 0o070), ("other users", 0o007)) if mode & bits)
+        return _result(
+            WARN,
+            "secrets",
+            f"{path} is mode {mode:04o}: {who} on this host can read the deployment's secrets (the database "
+            "password, SECRET_KEY).",
+            fix=f"Run 'chmod 600 {path}'. The user that runs ./start.sh keeps reading it, and composer-executor "
+            "reads it through its DAC_OVERRIDE capability.",
+            manual=f"chmod 600 {path}",
+        )
 
     def _check_executor_secret_access(self, path: Path) -> Dict[str, Any]:
         # Open without reading or returning values, under the executor's own identity.
@@ -381,6 +472,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
     # The switches that make docker-socket-proxy a Docker write path. Any one of
     # them lets a client that reaches the proxy start a privileged container.
     PROXY_WRITE_SWITCHES = ("POST", "EXEC")
+    PROXY_BY_HAND = (
+        "remove the docker-socket-proxy service (and composer-agent's DOCKER_HOST pointing at it) from the "
+        "Compose file by hand: it is outside the generated Composer block, which is all check --fix rewrites"
+    )
 
     def _check_docker_proxy(self) -> Optional[Dict[str, Any]]:
         """FAIL when docker-socket-proxy accepts writes; WARN when it is only a leftover
@@ -416,6 +511,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     "from the generated Composer block. A proxy outside that block must be removed "
                     "by hand."
                 ),
+                manual=self.PROXY_BY_HAND,
             )
         return _result(OK, "docker-proxy", "docker-socket-proxy is read-only (POST and EXEC off).")
 
@@ -431,6 +527,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "Docker authority and removes the proxy. A proxy outside the generated "
                 "Composer block must be edited by hand."
             ),
+            manual=self.PROXY_BY_HAND,
         )
 
     def _check_removed_services(self) -> Dict[str, Any]:
@@ -568,18 +665,29 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         return _result(OK, "proxy-routes", "No legacy pgAdmin proxy routes detected.")
 
     def _dlux_runtime_version(self, service: Optional[str] = None):
-        """(major, minor, patch) of the dlux baked into the project image, read
-        from the image via `dlux --version`. Uses `run --no-deps` (a fresh
-        container) so it works even when dlux-updater is crash-looping, and never
-        starts db/redis. Returns None when it can't be determined."""
+        """(major, minor, patch) of the dlux baked into the service's image, read
+        with `dlux --version` in a throwaway container that mounts nothing and has
+        no network. It works while the service is crash-looping and starts
+        nothing else. `compose run` gave the probe the service's mounts, so a
+        plain `check` on a stack that never started created its named volumes
+        and bind folders. An image that would have to be built is not built.
+        Returns None when it can't be determined."""
         from .agent_installer import parse_dlux_version
+        from .app_permissions import service_image
 
         service = service or (
             "dlux-updater" if "dlux-updater" in set(self.services) else "web"
         )
-        ok, out, _err = self.run_docker_compose(
-            ["run", "--rm", "--no-deps", "--entrypoint", "python", "-T",
-             service, "-m", "dlux", "--version"],
+        config = self.compose_config_json() or {}
+        image = service_image(config, service)
+        if not image:
+            return None
+        spec = (config.get("services") or {}).get(service) or {}
+        pull = "missing" if spec.get("image") else "never"
+        ok, out, _err = self.run_command(
+            ["docker", "run", "--rm", "--pull", pull, "--network", "none",
+             "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+             "--entrypoint", "python", image, "-m", "dlux", "--version"],
             timeout=60,
         )
         return parse_dlux_version(out) if ok else None
@@ -626,6 +734,29 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "compose.yml",
         )
         secrets = [str(c) for c in self.plaintext_env_candidates()[:1]]
+        self._invalid_compose_stamp = []
+        try:
+            compose_text = Path(compose).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            compose_text = ""
+        invalid = invalid_env_stamps(compose_text, stack_layout.NEWEST_KNOWN)
+        if invalid:
+            self._invalid_compose_stamp = invalid
+            schema, why = stack_layout.layout_schema(Path("."), self._maintenance_compose_files())
+            values = ", ".join(f'"{value}"' for value in dict.fromkeys(invalid))
+            target = (
+                f'DLUX_STACK_SCHEMA: "{schema}", the schema its files follow' if schema is not None
+                else f"the schema the stack follows ({why})"
+            )
+            return _result(
+                FAIL,
+                "stack-schema",
+                f"{compose} sets DLUX_STACK_SCHEMA to {values}, which is not a stack schema (1 to "
+                f"{stack_layout.NEWEST_KNOWN}). DjangoLux reads that value at runtime, and Composer's own "
+                "schema gates cannot judge it.",
+                fix=f"Set it by hand to {target}; 'check --fix' does not guess it.",
+                manual=f"set DLUX_STACK_SCHEMA in {compose} by hand to {target}",
+            )
         stamps = collect_all_stamps(".", compose, secrets)
         stamped = {path: found for path, found in stamps.items() if found}
         if not stamped:
@@ -715,6 +846,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             timeout=10,
         )
         return ok
+
+    def _agent_running(self) -> bool:
+        """Is composer-agent running? Always, where this process runs inside the resident pair."""
+        if getattr(self, "resident_check", False) or Path(maintenance_migration.RUNTIME_PAGE_DIR).parents[1].is_dir():
+            return True
+        return any(
+            row["service"] == "composer-agent" and row["state"] == "running" for row in self._container_states()
+        )
 
     def _maintenance_page_published(self) -> bool:
         return self._published_page_has("index.html")
@@ -943,6 +1082,227 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             f"(DLUX_FRONT_PROXY in {where})."
         )
 
+    def _check_image_floor(self) -> Optional[Dict[str, Any]]:
+        """Is the stack's DjangoLux new enough for the layout its files declare?
+
+        Files newer than the image (an image rolled back under files ``check
+        --fix`` moved on) look right to every layout check: a ``worker`` running
+        ``dlux_worker`` on a DjangoLux without it crash-loops, and a proxy that
+        asks DjangoLux about private files refuses every one when it cannot
+        answer. None when the layout or the version cannot be read.
+        """
+        schema, _why = stack_layout.layout_schema(Path("."), self._maintenance_compose_files())
+        if schema is None or schema < 4:
+            return None
+        needs = [(media_migration.MEDIA_ACCESS_FLOOR, "the private /media/ route, which asks DjangoLux before "
+                  "serving a stored file (stack schema 4)")]
+        if schema >= 5:
+            needs.append((worker_migration.WORKER_FLOOR, "the worker service, which runs 'manage.py dlux_worker' "
+                          "(stack schema 5)"))
+        running = self._running_dlux_version()
+        if running is None:
+            return None
+        version = ".".join(map(str, running))
+        unmet = [(floor, what) for floor, what in needs if tuple(running) < floor]
+        if not unmet:
+            return _result(OK, "image-floor", f"DjangoLux {version} has what the stack files need (stack schema {schema}).")
+        floor = ".".join(map(str, max(item[0] for item in unmet)))
+        return _result(
+            FAIL,
+            "image-floor",
+            f"The stack files need DjangoLux {floor} or later for " + " and ".join(what for _, what in unmet)
+            + f", but the stack runs DjangoLux {version}. They are newer than the image (an image rolled back "
+            "under files 'check --fix' moved on, for example).",
+            fix=f"Deploy a project image on DjangoLux {floor} or later, or put back the stack files that match this "
+            "image (the originals Composer replaced are under .xclude/composer-check/).",
+            manual=f"deploy an image on DjangoLux {floor} or later, or restore the stack files that match this image",
+        )
+
+    _PROXY_SERVICES = ("caddy", "nginx")
+
+    def _check_proxy_config(self) -> Optional[Dict[str, Any]]:
+        """Does every proxy file the proxy mounts exist, and does the proxy accept it?
+
+        Docker turns a missing bind source into an empty directory, so the proxy
+        does not start on the next deploy. The proxy files ``check --fix`` reads
+        are also validated in the proxy's own image, the way a repair validates
+        what it writes: no network, nothing pulled (an image that is not here is
+        not validated) and nothing created but the throwaway container.
+        """
+        from .proxy_cleanup import PROXY_ROUTE_FILES
+        from .stack_cleanup import DOCKER_RUN_ERRORS, StackCleanupError, proxy_validation_command
+
+        name = "proxy-config"
+        with self._deployment_environment():
+            config = self.compose_config_json() or {}
+            environment = dict(os.environ)
+        services = config.get("services") if isinstance(config.get("services"), dict) else {}
+        proxies = [proxy for proxy in self._PROXY_SERVICES if isinstance(services.get(proxy), dict)]
+        if not proxies:
+            return None
+        root = Path(".").resolve()
+        kinds = {(root / relative).resolve(): kind for relative, kind in PROXY_ROUTE_FILES.items()}
+        missing, checks = [], []
+        for proxy in proxies:
+            for volume in services[proxy].get("volumes") or []:
+                if not isinstance(volume, dict) or volume.get("type") != "bind":
+                    continue
+                source = Path(str(volume.get("source") or ""))
+                target = str(volume.get("target") or "")
+                if not str(source) or not target:
+                    continue
+                try:
+                    label = "./" + str(source.resolve().relative_to(root))
+                except ValueError:
+                    label = str(source)
+                own = source.resolve() in kinds or any(
+                    label.startswith(f"./{folder}/") for folder in (".proxy", ".nginx")
+                )
+                if own and not source.exists():
+                    missing.append(f"{proxy} mounts {label} at {target}")
+                elif source.is_file() and source.resolve() in kinds:
+                    checks.append((proxy, source, target, kinds[source.resolve()], label))
+        if missing:
+            return _result(
+                FAIL, name,
+                "A proxy file the stack mounts does not exist: " + "; ".join(missing) + ". Docker would create an "
+                "empty directory in its place, and the proxy would not start on the next deploy.",
+                fix="Put the file back: Composer keeps every original it replaced under .xclude/composer-check/, and "
+                "a fresh 'python -m dlux startproject' has the generated one. Then run './start.sh'.",
+            )
+        if getattr(self, "resident_check", False) or not checks:
+            return _result(OK, name, f"Every proxy file {', '.join(proxies)} mounts is present.")
+        validated, skipped = [], []
+        for proxy, source, target, kind, label in checks:
+            try:
+                argv, keys = proxy_validation_command(config, proxy, source, target, kind, pull="never")
+            except StackCleanupError:
+                skipped.append(label)
+                continue
+            values = (services[proxy].get("environment") or {})
+            run_env = dict(environment)
+            run_env.update({key: str(values[key]) for key in keys})
+            ok, out, err = self.run_command(argv, timeout=60, env=run_env)
+            if ok:
+                validated.append(label)
+                continue
+            text = str(err or out or "").strip()
+            if any(marker in text for marker in ("No such image", "Unable to find image")) or not text:
+                skipped.append(label)
+                continue
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            return _result(
+                FAIL, name,
+                f"{proxy} rejects {label}: " + " ".join(lines[-2:])[:500] + " The next deploy would bring "
+                f"{proxy} down, and the site with it.",
+                fix=f"Fix {label} (the originals Composer replaced are under .xclude/composer-check/), then run "
+                f"'./start.sh restart {proxy}'.",
+            )
+        message = f"Every proxy file {', '.join(proxies)} mounts is present"
+        if validated:
+            message += f"; {', '.join(validated)} passed the proxy's own validation"
+        if skipped:
+            message += f"; {', '.join(skipped)} not validated ({'its' if len(skipped) == 1 else 'their'} image is not on this host)"
+        return _result(OK, name, message + ".")
+
+    _DB_MERGE = re.compile(r"^  db:[ \t]*(?:#.*)?$((?:\n(?:    .*|[ \t]*(?:#.*)?))*)", re.MULTILINE)
+
+    def _check_scaffold_drift(self) -> Optional[Dict[str, Any]]:
+        """What a stack walked forward by ``check --fix`` still lacks from the current scaffold.
+
+        ``check --fix`` repairs the Compose and proxy files; the project's
+        Dockerfile and entrypoint are the operator's. These are the gaps that
+        matter once the app image runs as a non-root uid, plus the database
+        receiving the app's shared environment. None when this is not a
+        DjangoLux project tree (no Dockerfile or entrypoint.sh here).
+        """
+        gaps: List[str] = []
+        dockerfile, entrypoint, manage = Path("Dockerfile"), Path("entrypoint.sh"), Path("manage.py")
+        try:
+            docker_text = dockerfile.read_text(encoding="utf-8", errors="replace") if dockerfile.is_file() else ""
+            entry_text = entrypoint.read_text(encoding="utf-8", errors="replace") if entrypoint.is_file() else ""
+            manage_text = manage.read_text(encoding="utf-8", errors="replace") if manage.is_file() else ""
+        except OSError:
+            return None
+        if not docker_text and not entry_text:
+            return None
+        if "execute_from_command_line" in manage_text and "resolve_release" not in manage_text:
+            gaps.append(
+                "manage.py does not resolve the active inline release (dlux.updater.supervisor.resolve_release), so "
+                "a command run outside the runtime supervisor (an operator's collectstatic, for example) uses the "
+                "image's DjangoLux instead of the one the site runs"
+            )
+        if docker_text:
+            config = self.compose_config_json() or {}
+            mounts = sorted({
+                str(volume.get("target"))
+                for service in app_permissions.app_services(config)
+                for volume in ((config.get("services") or {}).get(service) or {}).get("volumes") or []
+                if isinstance(volume, dict) and volume.get("target") and not volume.get("read_only")
+                and str(volume.get("target")).startswith(("/app/", "/opt/dlux-runtime"))
+            })
+            prepared = " ".join(
+                line for line in docker_text.replace("\\\n", " ").splitlines() if re.search(r"chmod\b.*g\+\S*w", line)
+            )
+            unprepared = [target for target in mounts if not re.search(rf"(?<![\w/.-]){re.escape(target)}(?![\w/.-])", prepared)]
+            if mounts and not prepared:
+                gaps.append(
+                    "the Dockerfile does not prepare the app's mount points (mkdir, group 0, chmod g+rwX), so a "
+                    "non-root image's fresh volumes start root 0755"
+                )
+            elif unprepared:
+                gaps.append(f"the Dockerfile does not prepare {', '.join(unprepared)} (chmod g+rwX)")
+        if entry_text:
+            if not re.search(r"^\s*umask\s+0?002\b", entry_text, re.MULTILINE):
+                gaps.append("entrypoint.sh does not set 'umask 0002', so files the app writes are not group-writable")
+            if "dlux.mount_access gate" not in entry_text:
+                gaps.append(
+                    "entrypoint.sh does not run 'python -m dlux.mount_access gate', so a non-root app that cannot use "
+                    "its data fails later, on uploads, instead of at start"
+                )
+        compose = next((c for c in self._maintenance_compose_files() if Path(c).is_file()), "")
+        if compose:
+            try:
+                block = self._DB_MERGE.search(Path(compose).read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                block = None
+            if block and re.search(r"^\s*<<:\s*\*", block.group(1), re.MULTILINE):
+                gaps.append(f"db in {compose} merges the shared x-environment block, so the database container "
+                            "receives the app's secrets (SECRET_KEY, mail and registry logins)")
+        if not gaps:
+            return _result(OK, "scaffold-drift", "The Dockerfile, entrypoint and db service match the current scaffold's "
+                           "non-root preparation.")
+        return _result(
+            WARN,
+            "scaffold-drift",
+            "This stack lacks parts of the current DjangoLux scaffold that 'check --fix' does not write: "
+            + "; ".join(gaps) + ".",
+            fix="Compare with a fresh 'python -m dlux startproject' (DjangoLux's docs/stack-schema.md) and copy the "
+            "missing lines by hand, then rebuild the project image. 'check --fix' leaves these files to you.",
+            manual="copy the missing lines from a fresh 'python -m dlux startproject' by hand, then rebuild the image",
+        )
+
+    def _check_line_endings(self) -> Optional[Dict[str, Any]]:
+        """WARN on a stack file that mixes line endings; ``check --fix`` then leaves the files alone."""
+        files = list(dict.fromkeys([
+            *self._maintenance_compose_files(), "compose.dev.yml", ".proxy/Caddyfile", ".proxy/default.conf.template",
+        ]))
+        mixed = [name for name in files if Path(name).is_file() and mixed_line_endings(Path(name))]
+        self._mixed_endings = mixed
+        if not mixed:
+            return None
+        one = len(mixed) == 1
+        return _result(
+            WARN,
+            "line-endings",
+            f"{', '.join(mixed)} mix{'es' if one else ''} LF, CRLF or CR line endings. 'check --fix' changes no stack "
+            "file while one does: a rewrite writes one ending for the whole file, so every line of the other kind "
+            "would show as changed.",
+            fix="Convert " + ("it" if one else "them") + " to one style by hand (for example 'dos2unix "
+            + " ".join(mixed) + "', or your editor's line-ending setting), then run './start.sh check --fix'.",
+            manual=f"convert {' '.join(mixed)} to one line-ending style by hand, then ./start.sh check --fix",
+        )
+
     def _check_app_permissions(self, deep: bool = False) -> Optional[Dict[str, Any]]:
         """Can the uid the app image runs as use the data its services mount?
 
@@ -965,7 +1325,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 f"{image} runs as a named user, so Composer cannot tell which uid needs access to its data.",
                 fix="Use a numeric USER uid:gid in the Dockerfile (DjangoLux images use 10001:0).",
             )
-        as_root = kind in {"root", "unknown"}
+        unknown = kind == "unknown"
+        as_root = kind == "root" or unknown
         if as_root:
             uid, gid = app_permissions.APP_UID, app_permissions.APP_GID
         try:
@@ -989,6 +1350,17 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "./start.sh check --fix adds the group bits the app needs (only modes change; nothing is moved "
             "or rewritten; the previous root image keeps working)."
         )
+        if unknown:
+            subject = f"Composer cannot read which user {image} runs as (the image is not on this host)."
+            if not count:
+                return _result(OK, name, f"{subject} The data is ready for {who}{scope}.")
+            return _result(
+                WARN, name,
+                f"{subject} Before an image running as {who} can use its data, {entries} need group "
+                f"access{scope}{detail}. './start.sh' grants it before the first start when the image runs as "
+                "a non-root uid.",
+                fix=fix,
+            )
         if as_root:
             if not count:
                 return _result(OK, name, f"The app image runs as root; its data is also ready for {who}{scope}.")
@@ -1008,21 +1380,48 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         )
 
     def _fix_app_permissions(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Grant the app its data; then start again what stopped on the refusal.
+
+        An empty named volume gets ``app_permissions.KEEP_NAME`` only once every
+        app container exists, so Docker has filled it from the image first.
+        """
+        config = self.compose_config_json() or {}
+        keep = bool(config) and not app_permissions.missing_app_containers(self, config)
         try:
-            summary = app_permissions.run(self, "apply", uid=state["uid"], gid=state["gid"])
+            summary = app_permissions.run(self, "apply", uid=state["uid"], gid=state["gid"], keep_empty=keep)
         except app_permissions.PermissionsError as exc:
             return _result(FAIL, "fix:app-permissions", str(exc))
         counts = app_permissions.totals(summary)
+        if counts["errors"]:
+            text = app_permissions.refusal(
+                summary, state["uid"], state["gid"], "run ./start.sh check --fix again",
+            )
+            if counts["changed"]:
+                text += f" The other {counts['changed']} entries were granted"
+                text += f" (manifest {summary['manifest']})." if summary.get("manifest") else "."
+            commands = app_permissions.host_commands(summary, state["gid"])
+            entry = _result(FAIL, "fix:app-permissions", text)
+            if commands:
+                entry["manual"] = "on the host: " + "; ".join(commands)
+            return entry
         detail = (
             f"Granted uid {state['uid']} (gid {state['gid']}) group access to {counts['changed']} "
             f"entr{'y' if counts['changed'] == 1 else 'ies'}"
         )
         if summary.get("manifest"):
             detail += f". Manifest (for 'composer app-permissions revert'): {summary['manifest']}"
+        if counts["kept"]:
+            detail += (
+                f". Added {app_permissions.KEEP_NAME} to {counts['kept']} empty volume(s), so Docker does not "
+                "reset their root when it creates a container"
+            )
         if counts["hardlinks"]:
             detail += f". {counts['hardlinks']} multiply-linked file(s) were left unchanged"
-        if counts["errors"]:
-            return _result(FAIL, "fix:app-permissions", f"{detail}. {counts['errors']} entries could not be changed.")
+        if counts["changed"] and state["uid"]:
+            restarted = app_permissions.restart_refused(self, config, exited=True)
+            if restarted:
+                detail += f". Restarted {', '.join(restarted)}, which had stopped on the refusal"
+                self._note_recreated(restarted)
         return _result(OK, "fix:app-permissions", detail + ".")
 
     def _check_update_policy(self) -> Dict[str, Any]:
@@ -1039,15 +1438,17 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             update_policy.NONE: "updates are refused unless run from this shell; checks and rollbacks still run",
         }[policy]
         detail = f"Update policy {policy}: {allowed}."
-        missing = update_policy_env.missing_services(self.compose_config_json() or {})
+        model = self.compose_config_json() or {}
+        missing = update_policy_env.missing_services(model)
         if missing:
             return _result(
                 WARN, name,
                 f"{detail} The stack does not pass {update_policy.ENV_KEY} to {', '.join(missing)}, so "
                 + ("the resident pair cannot enforce it." if set(missing) & set(update_policy_env.RESIDENTS)
                    else "DjangoLux cannot show or apply it."),
-                fix=f"Run 'composer check --fix': it passes {update_policy.ENV_KEY} to web, worker, composer-agent "
-                "and composer-executor. Then run './start.sh' to recreate them.",
+                fix=f"Run 'composer check --fix': it passes {update_policy.ENV_KEY} to "
+                f"{policy_readers((model.get('services') or {}).keys())}. "
+                "Then run './start.sh' to recreate them.",
             )
         if not valid:
             return _result(
@@ -1056,6 +1457,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 fix=f"Set {update_policy.ENV_KEY} to all, inline or none in the secrets file, then run './start.sh'.",
             )
         return _result(OK, name, detail)
+
+    def _policy_readers(self, services=None) -> str:
+        return policy_readers(self.services if services is None else services)
 
     def _check_relay_env(self) -> Dict[str, Any]:
         """Can DjangoLux's Email step see the SMTP relay's settings (all but the password)?"""
@@ -1316,6 +1720,11 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         if "composer-agent" not in set(self.services):
             return _result(OK, "maintenance-page", "No composer-agent in this stack; nothing publishes a page.")
+        if not self._agent_running():
+            return _result(
+                OK, "maintenance-page",
+                "composer-agent is not running; it publishes the maintenance page when it starts ('./start.sh').",
+            )
         if not self._maintenance_page_published():
             return _result(
                 WARN,
@@ -1456,6 +1865,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "the pin again.",
                 fix=PREDATES_PIN_RECOVERY,
             )
+        mismatch = self._lock_mismatch(lock) if lock is not None and not state["pinned"] else ""
+        if mismatch:
+            return _result(FAIL, "composer-channel", f"{note}, but {mismatch}", fix=self.LOCK_MISMATCH_FIX,
+                           manual=self.LOCK_MISMATCH_FIX)
         if lock is not None and lock.prerelease and state["channel"] == channel_config.STABLE:
             return _result(
                 WARN,
@@ -1472,7 +1885,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 return _result(
                     WARN,
                     "composer-channel",
-                    f"{note}, but the resident pair runs {', '.join(drifted)}.",
+                    f"{note}, but the generated block names {', '.join(drifted)}.{self._running_pair_note()}",
                     fix=f"Run 'composer check --{state['channel']}' to move both together.",
                 )
             return _result(
@@ -1485,7 +1898,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             return _result(
                 WARN,
                 "composer-channel",
-                f"{note}, but the resident pair runs {', '.join(drifted)}.",
+                f"{note}, but the generated block names {', '.join(drifted)}.{self._running_pair_note()}",
                 fix="Run 'composer check --fix' to pin the resident pair to .composer-image.",
             )
         # The block names the pin; the containers keep the image they were created from.
@@ -1504,6 +1917,51 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "on the pinned image.",
             )
         return _result(OK, "composer-channel", f"{note}; resident pair pinned to Composer {lock.short}.")
+
+    LOCK_MISMATCH_FIX = (
+        "Write the lock again from a verified release ('./start.sh check --beta' or '--stable' pins the "
+        "channel's signed digest), or restore .composer-image from .xclude/; nothing trusts the tag text alone."
+    )
+
+    def _pin_image_version(self, image: str) -> str:
+        """The Composer release a local image carries (its manifest label, else /app/VERSION), or ""."""
+        from .version import RELEASE_MANIFEST_LABEL
+
+        try:
+            manifest = json.loads((self.image_labels(image) or {}).get(RELEASE_MANIFEST_LABEL) or "{}")
+        except (ValueError, TypeError):
+            manifest = {}
+        version = str(manifest.get("version") or "").strip() if isinstance(manifest, dict) else ""
+        if version:
+            return version
+        ok, out, _err = self.run_command(
+            ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "cat", image,
+             "/app/VERSION"],
+            timeout=30,
+        )
+        return out.strip().splitlines()[0] if ok and out.strip() else ""
+
+    def _lock_mismatch(self, lock) -> str:
+        """Why the lock cannot be trusted: its tag names one release and its digest is another. "" when they agree
+        or the image is not on this host (then nothing can be read)."""
+        from .versions import try_parse
+
+        actual = self._pin_image_version(lock.ref)
+        if not actual or try_parse(actual) == try_parse(lock.version):
+            return ""
+        return (
+            f".composer-image names Composer {lock.version} in its tag while its digest is Composer {actual} "
+            f"({lock.ref}): the tag and the digest disagree, so the pin is not what it says."
+        )
+
+    def _running_pair_note(self) -> str:
+        """What the resident pair's containers run now, which the block does not say."""
+        running = self._resident_running_images()
+        if not running:
+            return " The resident pair is not running."
+        version = self._resident_agent_version()
+        shown = "; ".join(f"{service} runs {image}" for service, image in sorted(running.items()))
+        return f" Running now: {shown}" + (f" (Composer {version})." if version else ".")
 
     def _resident_running_images(self) -> Dict[str, str]:
         """``{service: image}``: the reference each running resident container was created from.
@@ -1535,6 +1993,13 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 f"The resident pair was not pinned to {lock.ref}: Composer {lock.version} predates digest "
                 "pinning and could not manage the pin from there. The project is unchanged.",
                 fix=PREDATES_PIN_RECOVERY,
+            )]
+        mismatch = self._lock_mismatch(lock)
+        if mismatch:
+            return [_result(
+                FAIL, "fix:composer-pin",
+                f"The resident pair was not pinned: {mismatch} The project is unchanged.",
+                manual=self.LOCK_MISMATCH_FIX,
             )]
         try:
             preview = pin_composer_image(".", pin=lock, compose_file=args.file or "", apply=False)
@@ -1707,6 +2172,9 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         results.extend(self._check_docker())
         results.append(self._check_compose_files())
         results.append(self._check_compose_parses())
+        project_name = self._check_project_name()
+        if project_name is not None:
+            results.append(project_name)
         results.append(self._check_secrets())
         results.extend(self._check_wrappers())
         results.append(self._check_composer_channel())
@@ -1723,6 +2191,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             results.append(self._check_dlux_updater_executor())
             results.append(self._check_proxy_routes())
             results.append(self._check_stack_schema())
+            endings = self._check_line_endings()
+            if endings is not None:
+                results.append(endings)
+            proxy_files = self._check_proxy_config()
+            if proxy_files is not None:
+                results.append(proxy_files)
             results.append(self._check_maintenance_page())
             results.append(self._check_media_privacy())
             results.append(self._check_fetch_metadata())
@@ -1744,6 +2218,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             worker = self._check_task_worker()
             if worker is not None:
                 results.append(worker)
+            floor = self._check_image_floor()
+            if floor is not None:
+                results.append(floor)
+            drift = self._check_scaffold_drift()
+            if drift is not None:
+                results.append(drift)
             celery = self._check_celery()
             if celery is not None:
                 results.append(celery)
@@ -1779,7 +2259,12 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             self.discover_services(silent=True)
         if args.fix:
             self._recheck_after_fix(results)
-            self._fix_summary = guidance.summary(results, fixed, self._skipped_questions, before=before)
+            declined = any(
+                entry.get("level") == WARN and str(entry.get("message", "")).endswith("declined.") for entry in fixed
+            )
+            self._fix_summary = guidance.summary(
+                results, fixed, self._skipped_questions, before=before, declined=declined,
+            )
 
         return results, fixed
 
@@ -1802,6 +2287,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             "app-permissions": lambda: self._check_app_permissions(deep=True),
             "stack-schema": self._check_stack_schema,
             "task-worker": self._check_task_worker,
+            "image-floor": self._check_image_floor,
+            "proxy-config": self._check_proxy_config,
             "services": self._check_service_states,
             "redis-aof-corrupt": lambda: self._check_redis_aof(report_ok=True),
             "redis-persistence": self._check_redis_persistence,
@@ -2166,6 +2653,17 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             redis_files = redis_plan["files"]
             if not redis_files and redis_plan["note"]:
                 fixes.append(_result(WARN, "redis-persistence", redis_plan["note"]))
+            elif not redis_files and any(
+                result.get("name") == "redis-persistence" and result.get("level") == WARN for result in results
+            ):
+                fixes.append(_result(
+                    WARN, "redis-persistence",
+                    "Composer cannot rewrite this redis service's command: it edits a block-style service whose "
+                    "command is a list or a plain string, and this one is written another way (a flow mapping "
+                    "such as 'redis: {...}', for example). Nothing was changed.",
+                    manual="edit redis's command in the Compose file by hand: replace --appendonly yes with "
+                    "--appendonly no --save 60 1 and keep its other flags, then run './start.sh'",
+                ))
         redis_corrupt = any(
             result.get("name") == "redis-aof-corrupt" and result.get("level") == FAIL for result in results
         )
@@ -2180,6 +2678,13 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             stamp_repair = {"files": [], "notes": [f"Cannot plan the stack schema stamp repair: {exc}"], "schema": None}
         if stamp_repair["notes"] and not stamp_repair["files"]:
             fixes.append(_result(WARN, "stack-schema", " ".join(stamp_repair["notes"])))
+        if getattr(self, "_invalid_compose_stamp", None) and (needs_worker or stamp_repair["files"]):
+            fixes.append(_result(
+                WARN, "task-worker",
+                "The schema 5 step and the restamp wait until DLUX_STACK_SCHEMA in the Compose file is a stack "
+                "schema number (see stack-schema); nothing was added or restamped.",
+            ))
+            needs_worker, stamp_repair = "", dict(stamp_repair, files=[])
         plan: Dict[str, Any] = dict(
             fixes=fixes,
             refused=False,
@@ -2212,6 +2717,22 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             redis_corrupt=redis_corrupt,
             secret_writes=secret_writes,
         )
+        mixed = getattr(self, "_mixed_endings", None) or []
+        if mixed:
+            # Only the repairs that change no stack file still run.
+            held = [key for key in self._FILE_REPAIRS if plan.get(key)]
+            for key in held:
+                plan[key] = type(plan[key])()
+            if stamp_repair["files"]:
+                held.append("stamp_repair")
+                plan["stamp_repair"] = dict(stamp_repair, files=[])
+            if held:
+                fixes.append(_result(
+                    WARN, "line-endings",
+                    f"No stack file was changed: {', '.join(mixed)} mix{'es' if len(mixed) == 1 else ''} line "
+                    "endings (see line-endings).",
+                    manual=f"convert {' '.join(mixed)} to one line-ending style by hand, then ./start.sh check --fix",
+                ))
         plan["pending"] = bool(
             legacy or obsolete or proxy_routes or needs_hardening or needs_agent_block_migration
             or needs_updater_migration or needs_post_start_migration or stale_wrappers
@@ -2221,6 +2742,28 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             or stamp_repair["files"] or retire_celery or redis_files or redis_corrupt or secret_writes
         )
         return plan
+
+    #: Plan keys whose repair writes a stack file (everything but the grant, the
+    #: page publish, the redis recovery and the secrets answers).
+    _FILE_REPAIRS = (
+        "legacy", "needs_hardening", "needs_agent_block_migration", "needs_updater_migration", "needs_install",
+        "needs_init_containers", "needs_dev_override_migration", "needs_post_start_migration", "needs_restart_labels",
+        "needs_worker", "retire_celery", "stale_wrappers", "maintenance_legacy", "obsolete", "proxy_routes",
+        "media_exposed", "front_proxy_files", "relay_env_files", "update_policy_files", "redis_files",
+    )
+
+    def _read_only_stack_files(self, extra=()) -> List[Path]:
+        """The Compose files (and ``extra``) this process cannot write; a repair that writes them is held."""
+        from .stack_schema import read_only_files
+
+        files = [Path(name) for name in dict.fromkeys([*self._maintenance_compose_files(), *extra]) if Path(name).is_file()]
+        return read_only_files(files)
+
+    @staticmethod
+    def _read_only_stack_files_only(names) -> List[Path]:
+        from .stack_schema import read_only_files
+
+        return read_only_files([Path(name) for name in names if Path(name).is_file()])
 
     def _maybe_fix(self, args, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         plan = self._fix_plan(args, results)
@@ -2313,8 +2856,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         if update_policy_files:
             consequences.append(
-                "Pass DLUX_UPDATE_POLICY from the secrets file to web, worker, composer-agent and "
-                "composer-executor (" + ", ".join(update_policy_files) + "), so the resident pair enforces "
+                f"Pass DLUX_UPDATE_POLICY from the secrets file to {self._policy_readers()} ("
+                + ", ".join(update_policy_files) + "), so the resident pair enforces "
                 "the deployment update policy. The original is archived under .xclude/composer-check/; "
                 "run './start.sh' afterwards to recreate the services."
             )
@@ -2475,6 +3018,38 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             # First: the front-proxy repair validates Caddy with the value chosen.
             fixes.append(self._write_operator_choices(secret_writes))
 
+        # These repairs replace the file by rename, which a read-only file does
+        # not stop (its mode was then lost): hold them, as the other repairs refuse.
+        compose_repairs = [name for name, wanted in (
+            ("obsolete-stack", obsolete), ("dlux-init-containers", needs_init_containers),
+            ("dev-compose", needs_dev_override_migration), ("install-composer", needs_install),
+            ("agent-enable", legacy), ("executor-enable", needs_hardening),
+            ("resident-block", needs_agent_block_migration), ("dlux-updater-runtime", needs_updater_migration),
+            ("post-start-label", needs_post_start_migration), ("restart-labels", needs_restart_labels),
+            ("maintenance-page", maintenance_legacy),
+        ) if wanted]
+        proxy_repairs = [name for name, wanted in (
+            ("proxy-routes", proxy_routes), ("maintenance-page", maintenance_legacy),
+        ) if wanted]
+        read_only = self._read_only_stack_files() if compose_repairs else []
+        proxy_read_only = self._read_only_stack_files_only(
+            [".proxy/Caddyfile", ".proxy/default.conf.template", ".nginx/nginx.conf"]
+        ) if proxy_repairs else []
+        if read_only or proxy_read_only:
+            from .stack_schema import read_only_message
+
+            held = list(dict.fromkeys((compose_repairs if read_only else []) + (proxy_repairs if proxy_read_only else [])))
+            fixes.append(_result(
+                FAIL, "fix:read-only-files",
+                read_only_message(".", [*read_only, *proxy_read_only]) + f" Held: {', '.join(held)}.",
+            ))
+            if read_only:
+                obsolete, needs_init_containers, needs_dev_override_migration, needs_install = [], False, False, False
+                legacy = needs_hardening = needs_agent_block_migration = needs_updater_migration = False
+                needs_post_start_migration = needs_restart_labels = maintenance_legacy = False
+            if proxy_read_only:
+                proxy_routes, maintenance_legacy = [], False
+
         if stale_wrappers:
             from .stack_cleanup import _archive_root
 
@@ -2495,7 +3070,16 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             except OSError as exc:
                 fixes.append(_result(FAIL, "fix:wrappers", f"Could not update the wrappers: {exc}"))
 
-        if maintenance_legacy:
+        if (maintenance_legacy or maintenance_unpublished) and not self._agent_running():
+            fixes.append(_result(
+                WARN, "fix:maintenance-page",
+                "composer-agent is not running, so it cannot publish the maintenance page now"
+                + (" and the proxy was not moved over to it" if maintenance_legacy else "")
+                + ". Run './start.sh'"
+                + (", then './start.sh check --fix' to move the proxy to the published page." if maintenance_legacy
+                   else ": composer-agent publishes the page when it starts."),
+            ))
+        elif maintenance_legacy:
             from .stack_cleanup import StackCleanupError
             from .versions import at_least
 
@@ -2599,7 +3183,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 if outcome["applied"]:
                     fixes.append(_result(
                         OK, "fix:update-policy",
-                        "web, worker, composer-agent and composer-executor read DLUX_UPDATE_POLICY: "
+                        f"{self._policy_readers()} read DLUX_UPDATE_POLICY: "
                         + ", ".join(outcome["files"])
                         + ". Backup: " + outcome["backup_root"],
                     ))
@@ -2614,8 +3198,11 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                     ".", self._maintenance_compose_files(), environment=self._compose_env_with_secrets()
                 )
                 if outcome["applied"]:
+                    sharing = stack_lifecycle.join(
+                        name for name in ("web", "worker", "smtp-relay") if name in set(self.services)
+                    ) or "The services"
                     detail = (
-                        "web, worker and smtp-relay share the SMTP relay's settings (password excepted): "
+                        f"{sharing} share the SMTP relay's settings (password excepted): "
                         + ", ".join(outcome["files"])
                     )
                     if outcome["recreated"]:
@@ -2889,6 +3476,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                         worker_entry["message"] = worker_entry["message"].replace(
                             f" {worker_migration.DEV_WAITS_NOTE}", ""
                         )
+                    fixes.extend(self._finish_schema_after_celery())
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:celery", str(exc)))
         # After every step that restamps: it re-reads the files they left.
@@ -2909,6 +3497,28 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             except (OSError, StackCleanupError) as exc:
                 fixes.append(_result(FAIL, "fix:stack-schema", str(exc)))
         return fixes
+
+    def _finish_schema_after_celery(self) -> List[Dict[str, Any]]:
+        """Restamp what the celery removal made ready for schema 5 (``compose.dev.yml``), in the same run.
+
+        The schema step stamps a development override only once it overrides
+        worker; removing celery moves that override to worker after the step ran,
+        so without this the next ``check --fix`` did the restamp.
+        """
+        from .stack_cleanup import StackCleanupError
+
+        if not worker_migration.pending(".", self._maintenance_compose_files())["stamp"]:
+            return []
+        try:
+            outcome = worker_migration.migrate(".", self._maintenance_compose_files(), environment=self.build_compose_env())
+        except (OSError, StackCleanupError) as exc:
+            return [_result(FAIL, "fix:stack-schema", str(exc))]
+        if not outcome.get("files"):
+            return []
+        return [_result(
+            OK, "fix:stack-schema",
+            f"Brought the stack to schema 5: {', '.join(outcome['files'])}. Backup: {outcome['backup_root'] or 'n/a'}",
+        )]
 
     # --- Redis persistence -------------------------------------------------------
 
@@ -2937,6 +3547,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "its other flags kept), archives the Compose file and recreates redis. A snapshot is renamed into "
                 "place only when complete; after a crash up to about a minute of cache and sessions is lost, so a "
                 "few users sign in again. At a terminal it asks first: answer no to keep the append-only file.",
+                manual="edit redis's command in the Compose file by hand: replace --appendonly yes with "
+                "--appendonly no --save 60 1 and keep its other flags, then run './start.sh'",
             )
         if state == redis_persistence.CUSTOM:
             return _result(
@@ -3005,15 +3617,14 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             try:
                 argv = redis_persistence.move_aside_argv(volume, image, stamp, target, redis.get("command"))
             except redis_persistence.RedisPersistenceError as exc:
-                return _result(FAIL, name, f"{exc} redis is recreated on snapshots, which ignore them.")
+                return self._redis_still_down(name, str(exc), volume, image, target, redis.get("command"), stamp)
             ok, out, err = self.run_command(argv, timeout=120)
         archive = f"{redis_persistence.ARCHIVE_DIR}/{stamp}/"
         if not ok:
             detail = (str(err or out or "").strip().splitlines() or ["no reason given"])[-1][:300]
-            return _result(
-                FAIL, name,
-                f"Could not move the append-only files on {volume} aside ({detail}). redis is recreated on "
-                "snapshots, which ignore them.",
+            return self._redis_still_down(
+                name, f"Could not move the append-only files on {volume} aside ({detail}).",
+                volume, image, target, redis.get("command"), stamp,
             )
         moved = redis_persistence.moved_names(out)
         if not moved:
@@ -3026,6 +3637,30 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             f"Moved {', '.join(moved)} aside into {archive} on the {volume} volume (kept, not deleted). Redis "
             "starts from its last snapshot, or empty, so users sign in once more.",
         )
+
+    @staticmethod
+    def _redis_still_down(name, why, volume, image, target, command, stamp) -> Dict[str, Any]:
+        """The append-only files stay where Redis reads them: say Redis stays down, and how to move them."""
+        tokens = command if isinstance(command, list) else str(command or "").split()
+        tokens = [str(token) for token in tokens]
+        directory = "appendonlydir"
+        for index, token in enumerate(tokens):
+            if token == "--appenddirname" and index + 1 < len(tokens):
+                directory = tokens[index + 1]
+        data = target or "/data"
+        archive = f"{data}/{redis_persistence.ARCHIVE_DIR}/{stamp}"
+        move = (
+            f"docker run --rm --network none -v {volume}:{data} --entrypoint sh {image} -c "
+            f"'mkdir -p {archive} && mv \"{data}/{directory}\" {archive}/'"
+        )
+        entry = _result(
+            FAIL, name,
+            f"{why} Redis 7 reads the append-only manifest at start even with --appendonly no, so switching to "
+            f"snapshots does not end the loop: redis stays down until the files are moved aside. With redis "
+            f"stopped, run: {move}; then run './start.sh'.",
+        )
+        entry["manual"] = f"move the append-only directory aside by hand ({move}), then ./start.sh"
+        return entry
 
     # --- After the repairs: the running stack follows the files ------------------
 
@@ -3226,7 +3861,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         message = f"Recreated {join(services)} with their start-up steps" if services else ""
         if already:
-            by_repair = f"{join(already)} recreated by {'its' if len(already) == 1 else 'their'} own repair"
+            by_repair = f"{join(already)} recreated or restarted by {'its' if len(already) == 1 else 'their'} own repair"
             message = f"{message} ({by_repair})" if message else by_repair[0].upper() + by_repair[1:]
         return True, _result(OK, name, f"{message}; healthy and up {settle_seconds():g} s.")
 
@@ -3679,6 +4314,10 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         """Does DjangoLux have its ``worker`` service (stack schema 5)?"""
         services = set(self.services)
         if "worker" in services:
+            running = self._running_dlux_version()
+            if running is not None and tuple(running) < worker_migration.WORKER_FLOOR:
+                # image-floor reports it: this DjangoLux has no dlux_worker.
+                return None
             return _result(OK, "task-worker", "DjangoLux's tasks run in the worker service (stack schema 5).")
         if "celery" not in services:
             return None
@@ -3740,6 +4379,7 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 "id": str(row.get("ID") or ""),
                 "state": str(row.get("State") or "").lower(),
                 "health": str(row.get("Health") or "").lower(),
+                "exit_code": row.get("ExitCode"),
                 "restarts": 0,
                 "started_at": "",
             }
@@ -3791,9 +4431,15 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
         now = now or datetime.now(timezone.utc)
         return (now - started).total_seconds() < cls.CRASH_LOOP_WINDOW_SECONDS
 
+    _ADDRESS = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?![\w.])")
+
     def _last_error_line(self, service: str) -> str:
+        """The last error line of the service's log, container addresses replaced by "<address>"."""
         ok, out, err = self.run_docker_compose(["logs", "--no-color", "--tail", "30", service], timeout=20)
-        lines = [line.split("|", 1)[-1].strip() for line in (out or err or "").splitlines() if line.strip()]
+        lines = [
+            self._ADDRESS.sub("<address>", line.split("|", 1)[-1].strip())
+            for line in (out or err or "").splitlines() if line.strip()
+        ]
         for line in reversed(lines):
             if "error" in line.lower() or "exception" in line.lower():
                 return line[:200]
@@ -3809,7 +4455,8 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             entry["service"] for entry in containers
             if entry["health"] == "unhealthy" and entry["service"] not in looping
         })
-        if not looping and not unhealthy:
+        stopped, residents = self._stopped_services(containers, looping)
+        if not looping and not unhealthy and not stopped and not residents:
             running = sum(1 for entry in containers if entry["state"] == "running")
             return _result(OK, "services", f"No service is crash-looping or unhealthy ({running} running).")
         parts = []
@@ -3821,12 +4468,59 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
                 + (f"; last error: {error}" if error else "")
             )
         parts += [f"{service} is unhealthy" for service in unhealthy]
+        parts += stopped + residents
         celery = self._celery_unusable() if "celery" in looping else ""
         if celery:
             fix = f"{celery} Run 'composer check --fix' to remove celery (worker runs DjangoLux's tasks)."
-        else:
+        elif looping or unhealthy or stopped:
             fix = "Read the service's log ('./start.sh logs <service>'), fix the cause, then redeploy."
-        return _result(FAIL if looping else WARN, "services", "; ".join(parts) + ".", fix=fix)
+        else:
+            fix = "Run './start.sh' to start them again."
+        return _result(FAIL if looping or stopped else WARN, "services", "; ".join(parts) + ".", fix=fix)
+
+    #: App services the site and DjangoLux's tasks need while the stack runs.
+    _REQUIRED_RUNNING = {
+        "web": "the site does not answer",
+        "worker": "DjangoLux's queued tasks and schedules (backups) never run",
+    }
+    _RESIDENT_ROLES = {
+        "composer-executor": "updates, rollbacks and the Operations panel's apply cannot run",
+        "composer-agent": "no update checks, maintenance page or Operations panel",
+    }
+
+    def _stopped_services(self, containers: List[Dict[str, Any]], looping) -> Tuple[List[str], List[str]]:
+        """``(app, resident)`` findings for services that do not run while the rest of the stack does."""
+        if not any(entry["state"] == "running" for entry in containers):
+            return [], []
+        by_service: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in containers:
+            by_service.setdefault(entry["service"], []).append(entry)
+
+        def describe(service: str, short: bool = False) -> str:
+            rows = by_service.get(service) or []
+            if not rows:
+                return "no container" if short else "has no container"
+            if all(row["state"] == "created" for row in rows):
+                return "created, never started" if short else "never started"
+            code = next((row.get("exit_code") for row in rows if row.get("exit_code") not in (None, "")), None)
+            if short:
+                return "stopped" + (f", exit {code}" if code is not None else "")
+            return "has stopped" + (f" (exit {code})" if code is not None else "")
+
+        def down(service: str) -> bool:
+            rows = by_service.get(service) or []
+            return service not in looping and not any(row["state"] in ("running", "restarting") for row in rows)
+
+        services = set(self.services)
+        app = [
+            f"{service} {describe(service)}, so {why}"
+            for service, why in self._REQUIRED_RUNNING.items() if service in services and down(service)
+        ]
+        resident = [
+            f"{service} is not running ({describe(service, short=True)}): {why}"
+            for service, why in self._RESIDENT_ROLES.items() if service in services and down(service)
+        ]
+        return app, resident
 
     # Does the image celery runs have Celery and the app celery's command names?
     # Only module lookups: nothing of the project is imported but the package the

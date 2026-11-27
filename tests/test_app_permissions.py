@@ -195,7 +195,7 @@ class RuleTests(unittest.TestCase):
         self.assertIsNone(ap.planned(directory, 10001, 0, ap.needs(directory, "data", True)))
 
 
-class WalkTests(unittest.TestCase):
+class _TreeCase(unittest.TestCase):
     """A tree owned by the test runner, granted to a uid that shares only its group."""
 
     def setUp(self):
@@ -221,6 +221,8 @@ class WalkTests(unittest.TestCase):
     def _spec(self, path, role="data", read_only=False):
         return {"path": str(path), "label": "./media", "role": role, "read_only": read_only}
 
+
+class WalkTests(_TreeCase):
     def test_scan_changes_nothing(self):
         media = self._tree()
         before = {p: os.lstat(p).st_mode for p in (media, media / "decree", media / "decree" / "a.pdf")}
@@ -320,6 +322,87 @@ class WalkTests(unittest.TestCase):
         self.assertEqual((quick["wrong"], full["wrong"]), (0, 1))
 
 
+class EmptyVolumeTests(_TreeCase):
+    """Docker refills an empty volume, and resets its root's mode, on every container create (R2-003)."""
+
+    def _volume(self):
+        volume = self.root / "exports"
+        volume.mkdir()
+        os.chmod(volume, 0o755)
+        return volume
+
+    def _vspec(self, path, keep=True, read_only=False):
+        spec = {"path": str(path), "label": "volume exports", "role": "data", "read_only": read_only,
+                "kind": "volume"}
+        if keep:
+            spec["keep"] = True
+        return spec
+
+    def test_a_scan_reports_an_empty_volume_and_changes_nothing(self):
+        volume = self._volume()
+        summary = ap.process_target(self._vspec(volume), apply=False, uid=self.uid, gid=self.gid, depth=2)
+        self.assertTrue(summary["empty"])
+        self.assertEqual(os.listdir(volume), [])
+
+    def test_a_grant_keeps_an_empty_volume_from_being_refilled(self):
+        volume = self._volume()
+        summary = ap.process_target(self._vspec(volume), apply=True, uid=self.uid, gid=self.gid, depth=None)
+        keep = volume / ap.KEEP_NAME
+        self.assertEqual((summary["changed"], summary["kept"], summary["errors"]), (1, 1, 0))
+        self.assertEqual(stat.S_IMODE(os.lstat(volume).st_mode), 0o775)
+        self.assertEqual(stat.S_IMODE(os.lstat(keep).st_mode), ap.SHARED_FILE_MODE)
+        self.assertIn("docs/app-permissions.md", keep.read_text(encoding="utf-8"))
+        again = ap.process_target(self._vspec(volume), apply=True, uid=self.uid, gid=self.gid, depth=None)
+        self.assertEqual((again["changed"], again["kept"], again.get("empty")), (0, 0, None))
+
+    def test_without_keep_or_on_a_bind_or_a_full_volume_nothing_is_added(self):
+        volume = self._volume()
+        ap.process_target(self._vspec(volume, keep=False), apply=True, uid=self.uid, gid=self.gid, depth=None)
+        self.assertEqual(os.listdir(volume), [])
+        bind = dict(self._vspec(volume), kind="bind")
+        ap.process_target(bind, apply=True, uid=self.uid, gid=self.gid, depth=None)
+        self.assertEqual(os.listdir(volume), [])
+        (volume / "report.csv").write_text("x", encoding="utf-8")
+        os.chmod(volume / "report.csv", 0o644)
+        ap.process_target(self._vspec(volume), apply=True, uid=self.uid, gid=self.gid, depth=None)
+        self.assertEqual(os.listdir(volume), ["report.csv"])
+
+    def test_a_read_only_volume_gets_no_file(self):
+        volume = self._volume()
+        ap.process_target(self._vspec(volume, read_only=True), apply=True, uid=self.uid, gid=self.gid, depth=None)
+        self.assertEqual(os.listdir(volume), [])
+
+
+class FailedEntryTests(_TreeCase):
+    """A refused chmod names the entry, its owner and mode, and the OS error (R2-030)."""
+
+    def test_the_failed_entry_and_its_reason_are_reported(self):
+        media = self._tree()
+        spec = dict(self._spec(media), host=str(media), kind="bind")
+        with patch("composer.app_permissions.os.chmod", side_effect=PermissionError(1, "Operation not permitted")):
+            summary = ap.process_target(spec, apply=True, uid=self.uid, gid=self.gid, depth=None)
+        self.assertEqual(summary["errors"], 2)
+        first = summary["failed"][0]
+        self.assertEqual((first["path"], first["kind"], first["mode"], first["needs"]), (".", "dir", "0755", "rwx"))
+        self.assertEqual(first["error"], "Operation not permitted")
+        text = ap.refusal({"targets": [summary]}, self.uid, self.gid, "run ./start.sh again")
+        self.assertIn("./media (dir", text)
+        self.assertIn("Operation not permitted", text)
+        self.assertIn(f"sudo chmod g+rwX {media}", text)
+        self.assertIn("then run ./start.sh again", text)
+
+    def test_a_foreign_group_gets_a_chgrp_and_a_volume_names_its_driver(self):
+        summary = {"targets": [
+            {"label": "./media", "host": "/srv/a/media", "errors": 1, "failed": [
+                {"path": "x", "kind": "file", "owner": "0:50", "mode": "0600", "needs": "r", "error": "Read-only file system"}]},
+            {"label": "volume static", "errors": 1, "failed": [
+                {"path": ".", "kind": "dir", "owner": "0:0", "mode": "0755", "needs": "rwx", "error": "Read-only file system"}]},
+        ]}
+        commands = ap.host_commands(summary, gid=0)
+        self.assertEqual(commands[:2], ["sudo chgrp 0 /srv/a/media/x", "sudo chmod g+r /srv/a/media/x"])
+        self.assertIn("volume driver of volume static", commands[2])
+
+
 class SiblingCommandTests(unittest.TestCase):
     def _targets(self):
         return [
@@ -370,6 +453,9 @@ class FakeLauncher:
         self.volumes_exist = True
         self.create_ok = True
         self.last_runtime_diagnostic = ""
+        # {service: (status, restarting, exit code)} of the app's containers; None: none exist yet.
+        self.containers = {name: ("running", "false", "0") for name in ("ocr", "web", "worker")}
+        self.leftover_walks = []
 
     def compose_config_json(self):
         return self.config
@@ -379,6 +465,10 @@ class FakeLauncher:
         self.events.append(["compose", *args])
         if args[:2] == ["up", "--no-start"]:
             self.volumes_exist = self.volumes_exist or self.create_ok
+            if self.create_ok:
+                self.containers = self.containers or {}
+                for name in args[4:]:
+                    self.containers.setdefault(name, ("created", "false", "0"))
             return (True, "", "") if self.create_ok else (False, "", "volume driver refused")
         if args[0] == "pull" and self.pull_ok:
             self.local, self.user = True, self.pulled_user
@@ -397,6 +487,17 @@ class FakeLauncher:
             return True, self.user + "\n", ""
         if argv[:3] == ["docker", "volume", "inspect"]:
             return (True, "[]", "") if self.volumes_exist else (False, "", "no such volume")
+        if argv[:3] == ["docker", "ps", "-aq"]:
+            status = next(arg.split("=", 1)[1] for arg in argv if arg.startswith("status="))
+            return True, "\n".join(cid for cid, state in self.leftover_walks if state == status), ""
+        if argv[:3] == ["docker", "ps", "-a"]:
+            rows = [f"id-{name} {name} testbed-archive-{name}-1" for name in sorted(self.containers or {})]
+            return True, "\n".join(rows), ""
+        if argv[:2] == ["docker", "inspect"] and "{{.State.Status}}" in " ".join(argv):
+            rows = [f"{cid} {' '.join(self.containers[cid[3:]])}" for cid in argv[4:]]
+            return True, "\n".join(rows), ""
+        if argv[:2] in (["docker", "restart"], ["docker", "rm"]):
+            return True, "", ""
         if argv[:2] == ["docker", "inspect"]:
             return True, "sha256:self\n", ""
         if argv[:2] == ["docker", "run"]:
@@ -560,6 +661,114 @@ class RunTests(unittest.TestCase):
         ready, note = ap.ensure_for_image(launcher, "img")
         self.assertFalse(ready)
         self.assertIn("numeric USER", note)
+
+
+class ContainerFirstTests(unittest.TestCase):
+    """Every grant reaches what the containers ``up`` starts will mount (R2-003, R2-032, R2-085)."""
+
+    def setUp(self):
+        self.project = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.project, ignore_errors=True))
+        for name in ("media", "logs", "imports", "scanlink_releases"):
+            os.mkdir(os.path.join(self.project, name))
+
+    def _ensure(self, launcher):
+        with patch("os.getcwd", return_value=self.project):
+            return ap.ensure_for_image(launcher, "debeski/archive:latest")
+
+    def test_volumes_left_by_an_earlier_check_still_get_the_containers_created_first(self):
+        # C3-01: a plain check (or check --fix) made the volumes, empty; nothing was missing, so
+        # the grant ran and `up` then created web and worker, and Docker reset each volume's root.
+        launcher = FakeLauncher(self.project, lambda action: [{"label": "volume static", "wrong": 1,
+                                                              "changed": int(action == "apply")}])
+        launcher.containers = None
+        ready, note = self._ensure(launcher)
+        self.assertTrue(ready, note)
+        create = launcher.events.index(["compose", "up", "--no-start", "--no-deps", "--no-recreate",
+                                        "ocr", "web", "worker"])
+        walks = [i for i, event in enumerate(launcher.events) if event[:2] == ["docker", "run"]]
+        self.assertTrue(walks and create < walks[0], launcher.events)
+
+    def test_one_missing_container_is_enough(self):
+        launcher = FakeLauncher(self.project, lambda action: [{"label": "./media", "wrong": 0}])
+        del launcher.containers["worker"]
+        self._ensure(launcher)
+        self.assertIn(["up", "--no-start", "--no-deps", "--no-recreate", "ocr", "web", "worker"], launcher.compose)
+
+    def test_an_empty_volume_is_kept_even_when_nothing_needs_a_grant(self):
+        launcher = FakeLauncher(self.project, lambda action: [
+            {"label": "volume static", "wrong": 0, "empty": action == "scan", "kept": int(action == "apply")}])
+        ready, note = self._ensure(launcher)
+        self.assertTrue(ready)
+        self.assertIn(ap.KEEP_NAME, note)
+        # What `up` would recreate is recreated, unstarted, before the file goes in.
+        converge = launcher.events.index(["compose", "up", "--no-start", "--no-deps", "ocr", "web", "worker"])
+        apply = next(i for i, e in enumerate(launcher.events) if e[:2] == ["docker", "run"] and "apply" in e)
+        self.assertLess(converge, apply)
+        apply = next(c for c in launcher.commands if c[:2] == ["docker", "run"] and "apply" in c)
+        spec = json.loads(apply[-1])
+        static = next(t for t in spec["targets"] if t["label"] == "volume static")
+        self.assertTrue(static["keep"])
+        runtime = next(t for t in spec["targets"] if t["label"] == "volume dlux_runtime")
+        self.assertTrue(runtime["keep"])
+        self.assertFalse(any(t.get("keep") for t in spec["targets"] if t["kind"] == "bind"))
+
+    def test_an_empty_volume_with_a_stale_container_grants_twice(self):
+        # C3-01 scenario D: web and worker exist on another definition, so `up` would
+        # recreate them onto the empty volumes and Docker would reset the granted roots.
+        launcher = FakeLauncher(self.project, lambda action: [
+            {"label": "volume static", "wrong": 1, "empty": True, "changed": int(action == "apply"),
+             "kept": int(action == "apply" and "keep" in launcher.commands[-1][-1])}])
+        ready, note = self._ensure(launcher)
+        self.assertTrue(ready, note)
+        applies = [i for i, e in enumerate(launcher.events) if e[:2] == ["docker", "run"] and "apply" in e]
+        converge = launcher.events.index(["compose", "up", "--no-start", "--no-deps", "ocr", "web", "worker"])
+        self.assertEqual(len(applies), 2)
+        self.assertLess(applies[0], converge)
+        self.assertLess(converge, applies[1])
+        first, second = (json.loads(launcher.events[i][-1]) for i in applies)
+        self.assertFalse(any(t.get("keep") for t in first["targets"]))
+        self.assertTrue(any(t.get("keep") for t in second["targets"]))
+        self.assertIn("granted group access to 2 entries", note)
+
+    def test_a_container_looping_on_the_refusal_is_restarted_after_the_grant(self):
+        launcher = FakeLauncher(self.project, lambda action: [{"label": "volume static", "wrong": 1,
+                                                              "changed": int(action == "apply")}])
+        launcher.containers["web"] = ("restarting", "true", "78")
+        launcher.containers["worker"] = ("exited", "false", "78")
+        ready, note = self._ensure(launcher)
+        self.assertTrue(ready)
+        self.assertIn(["docker", "restart", "id-web"], launcher.commands)
+        self.assertIn("restarted web", note)
+
+    def test_check_fix_also_starts_what_stopped_on_the_gate(self):
+        launcher = FakeLauncher(self.project, lambda action: [])
+        launcher.containers["worker"] = ("exited", "false", "78")
+        launcher.containers["ocr"] = ("exited", "false", "1")
+        self.assertEqual(ap.restart_refused(launcher, launcher.config, exited=True), ["worker"])
+        self.assertEqual(ap.restart_refused(launcher, launcher.config), [])
+
+    def test_a_refused_grant_names_the_entry_and_the_host_command(self):
+        launcher = FakeLauncher(self.project, lambda action: [
+            {"label": "./media", "wrong": 1, "host": f"{self.project}/media", "errors": int(action == "apply"),
+             "failed": [{"path": ".", "kind": "dir", "owner": "0:0", "mode": "0555", "needs": "rwx",
+                         "error": "Operation not permitted"}] if action == "apply" else []}])
+        ready, note = self._ensure(launcher)
+        self.assertFalse(ready)
+        self.assertIn("./media (dir 0:0 0555, needs rwx: Operation not permitted)", note)
+        self.assertIn(f"sudo chmod g+rwX {self.project}/media", note)
+        self.assertIn("nothing was recreated", note)
+        self.assertFalse(any(c[:2] == ["docker", "restart"] for c in launcher.commands))
+
+    def test_walk_containers_carry_the_project_and_leftovers_are_removed(self):
+        launcher = FakeLauncher(self.project, lambda action: [])
+        launcher.leftover_walks = [("dead1", "created")]
+        with patch("os.getcwd", return_value=self.project):
+            ap.run(launcher, "scan", project_dir=self.project)
+        walk = next(c for c in launcher.commands if c[:2] == ["docker", "run"])
+        self.assertEqual(walk[walk.index("--label") + 1], f"{ap.WALK_LABEL}=testbed-archive")
+        self.assertIn(["docker", "rm", "-f", "dead1"], launcher.commands)
+        self.assertLess(launcher.commands.index(["docker", "rm", "-f", "dead1"]), launcher.commands.index(walk))
 
 
 class DevModeGrantTests(unittest.TestCase):

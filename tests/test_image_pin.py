@@ -387,7 +387,8 @@ class CheckupPinTests(unittest.TestCase):
         self.launcher.compose_file = None
         self.running = {}
         # No Docker: what runs is given per test.
-        for name, value in (("_resident_running_images", None), ("compose_config_json", {}), ("_container_states", [])):
+        for name, value in (("_resident_running_images", None), ("compose_config_json", {}), ("_container_states", []),
+                            ("_pin_image_version", "")):
             stub = (patch.object(self.launcher, name, side_effect=lambda: dict(self.running), create=True)
                     if value is None else patch.object(self.launcher, name, return_value=value))
             stub.start()
@@ -450,6 +451,19 @@ class CheckupPinTests(unittest.TestCase):
         self.assertEqual([f["level"] for f in fixed], ["ok"])
         self.assertEqual(self._finding()["level"], "ok")
         self.assertIn("pinned to Composer 1.11.0", self._finding()["message"])
+
+    def test_a_lock_whose_tag_and_digest_disagree_is_not_adopted(self):
+        # R2-025: v1.11.0b2@<b1 digest> was adopted, and both halves then ran 1.11.0b1.
+        image_pin.write_lock(image_pin.Pin("1.11.0b2", DIGEST_A), self.project)
+        with patch.object(self.launcher, "_pin_image_version", return_value="1.11.0b1"), \
+                patch("composer.agent_installer.pin_composer_image", side_effect=AssertionError("pinned")):
+            fixed = self.launcher._fix_composer_pin(SimpleNamespace(file=None, yes=True))
+            self.running = {"composer-agent": image_pin.read_lock(self.project).ref}
+            finding = self._finding()
+        self.assertEqual([f["level"] for f in fixed], ["fail"], fixed)
+        self.assertIn("names Composer 1.11.0b2 in its tag while its digest is Composer 1.11.0b1", fixed[0]["message"])
+        self.assertEqual((self.project / "compose.yml").read_text(encoding="utf-8"), BLOCK)
+        self.assertEqual(finding["level"], "fail", finding)
 
     def test_fix_without_a_lock_changes_nothing(self):
         self.assertEqual(self.launcher._fix_composer_pin(SimpleNamespace(file=None, yes=True)), [])

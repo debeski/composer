@@ -11,6 +11,8 @@ Composer grants what the app needs through group 0 and changes nothing else:
 - Only modes change. The group changes only on an entry whose group is neither
   0 nor the app's, such as a file copied in from a workstation.
 - Nothing is moved, renamed, deleted or rewritten; contents and mtimes stay.
+  The one file Composer adds is ``.composer-keep`` in a named volume that is
+  still empty after its containers were created (see ``KEEP_NAME``).
 - Symlinks are never followed, other filesystems are not entered, and a regular
   file with more than one hard link is reported, never changed.
 - Every change is recorded in a manifest under
@@ -58,7 +60,26 @@ SAMPLE_LIMIT = 20
 WALK_TIMEOUT = 6 * 3600
 
 READ, WRITE, SEARCH = 4, 2, 1
+#: DjangoLux's ``mount_access`` gate exits with this when the app cannot use its data.
+GATE_EXIT = 78
 DOCKER_SOCKET = "/var/run/docker.sock"
+
+#: Docker fills a named volume from the image's mount point whenever it creates a
+#: container that mounts the volume while the volume is empty, and gives the
+#: volume's root that mount point's owner and mode again. On an image whose mount
+#: point is root 0755 that undoes the grant at the next ``up`` that creates or
+#: recreates a container, ``compose run`` or force-recreate. A volume that holds
+#: one entry is never filled again, so a grant on a still-empty volume adds this
+#: file.
+KEEP_NAME = ".composer-keep"
+KEEP_TEXT = (
+    "Composer keeps this volume from being empty. Docker resets an empty volume's root to the\n"
+    "image's mount point (owner and mode) each time it creates a container that mounts it, which\n"
+    "would take back the app's group access. Leave this file; see Composer's docs/app-permissions.md.\n"
+)
+#: Every walk container carries this label (value: the Compose project), so one
+#: whose deployer was killed before Docker removed it is cleared on the next run.
+WALK_LABEL = "io.dlux.composer.app-permissions"
 
 # The runtime contract's 0775 directories and 0664 files: composer-agent (uid 0,
 # no capabilities) and a non-root app reach each other's entries through group 0.
@@ -324,11 +345,16 @@ def process_target(spec: dict, *, apply: bool, uid: int, gid: int, depth: Option
     root = spec["path"]
     summary = {
         "label": spec["label"], "entries": 0, "wrong": 0, "changed": 0,
-        "hardlinks": 0, "errors": 0, "sample": [],
+        "hardlinks": 0, "errors": 0, "kept": 0, "sample": [], "failed": [],
     }
+    if spec.get("host"):
+        summary["host"] = spec["host"]
     if not os.path.lexists(root):
         summary["missing"] = True
         return summary
+    empty = spec.get("kind") == "volume" and _is_empty_dir(root)
+    if empty:
+        summary["empty"] = True
     for path, st in walk(root, depth):
         summary["entries"] += 1
         if stat.S_ISLNK(st.st_mode):
@@ -358,8 +384,18 @@ def process_target(spec: dict, *, apply: bool, uid: int, gid: int, depth: Option
             if new_gid is not None:
                 os.lchown(path, -1, new_gid)
             os.chmod(path, new_mode)
-        except OSError:
+        except OSError as exc:
             summary["errors"] += 1
+            if len(summary["failed"]) < SAMPLE_LIMIT:
+                summary["failed"].append({
+                    "path": relative,
+                    "kind": "dir" if stat.S_ISDIR(st.st_mode) else "file",
+                    "owner": f"{st.st_uid}:{st.st_gid}",
+                    "mode": f"{stat.S_IMODE(st.st_mode):04o}",
+                    "needs": _describe(want),
+                    "error": exc.strerror or str(exc),
+                    "errno": exc.errno or 0,
+                })
             continue
         summary["changed"] += 1
         if manifest is not None:
@@ -369,7 +405,46 @@ def process_target(spec: dict, *, apply: bool, uid: int, gid: int, depth: Option
                     str(gid if new_gid is not None else st.st_gid), f"{new_mode:04o}",
                 ]) + "\n"
             )
+    if apply and empty and spec.get("keep") and not spec.get("read_only") and _is_empty_dir(root):
+        if _write_keep(root):
+            summary["kept"] = 1
+        else:
+            summary["errors"] += 1
+            summary["failed"].append({
+                "path": KEEP_NAME, "kind": "file", "owner": "-", "mode": "-", "needs": "r",
+                "error": "could not be created", "errno": 0,
+            })
     return summary
+
+
+def _is_empty_dir(path: str) -> bool:
+    try:
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            return False
+        with os.scandir(path) as entries:
+            return next(entries, None) is None
+    except OSError:
+        return False
+
+
+def _write_keep(root: str) -> bool:
+    """``KEEP_NAME`` in ``root``: root-owned, 0664 (group 0 reads it, as the gate wants)."""
+    try:
+        descriptor = os.open(
+            os.path.join(root, KEEP_NAME),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            SHARED_FILE_MODE,
+        )
+    except FileExistsError:
+        return True
+    except OSError:
+        return False
+    try:
+        os.fchmod(descriptor, SHARED_FILE_MODE)
+        os.write(descriptor, KEEP_TEXT.encode("utf-8"))
+    finally:
+        os.close(descriptor)
+    return True
 
 
 def revert_target(spec: dict, rows: List[List[str]]) -> dict:
@@ -480,11 +555,18 @@ def sibling_command(
     depth: Optional[int],
     manifest_dir: Optional[str] = None,
     manifest_name: Optional[str] = None,
+    keep_empty: bool = False,
+    owner: str = "",
 ) -> List[str]:
-    """``docker run`` for the walk. ``targets`` pairs each target with whether it may be created."""
+    """``docker run`` for the walk. ``targets`` pairs each target with whether it may be created.
+
+    ``keep_empty`` has a grant put ``KEEP_NAME`` in each writable named volume
+    that is still empty; ``owner`` is the value of ``WALK_LABEL``.
+    """
     writes = action in {"apply", "revert"}
     command = [
-        "docker", "run", "--rm", "--network", "none", "--user", "0:0",
+        "docker", "run", "--rm", "--label", f"{WALK_LABEL}={owner or 'composer'}",
+        "--network", "none", "--user", "0:0",
         "--cap-drop", "ALL", "--cap-add", "DAC_READ_SEARCH",
         "--security-opt", "no-new-privileges:true",
     ]
@@ -500,7 +582,15 @@ def sibling_command(
         else:
             mount = f"type={target.kind},source={target.source},target={path}"
             command += ["--mount", mount if writes else mount + ",readonly"]
-        specs.append({"path": path, "label": target.label, "role": target.role, "read_only": target.read_only})
+        entry = {
+            "path": path, "label": target.label, "role": target.role, "read_only": target.read_only,
+            "kind": target.kind,
+        }
+        if target.kind == "bind":
+            entry["host"] = target.source
+        if keep_empty and action == "apply" and target.kind == "volume" and not target.read_only:
+            entry["keep"] = True
+        specs.append(entry)
     if manifest_dir:
         command += ["-v", f"{manifest_dir}:{SIBLING_MANIFEST}:rw"]
     spec = {"uid": uid, "gid": gid, "depth": depth, "targets": specs}
@@ -519,8 +609,13 @@ def run(
     depth: Optional[int] = None,
     project_dir: Optional[str] = None,
     revert_manifest: Optional[str] = None,
+    keep_empty: bool = False,
 ) -> dict:
     """Scan, grant or revert app-data access for this stack; returns the summary.
+
+    ``keep_empty`` (a grant only) adds ``KEEP_NAME`` to each writable named
+    volume that is still empty. Pass it only once the app's containers exist,
+    so Docker has already filled each volume from the image.
 
     Missing named volumes are left alone here: ``ensure_for_image`` has Compose
     create them before a start, and a ``docker run`` mount would create one
@@ -566,9 +661,12 @@ def run(
         manifest_path = os.path.abspath(str(revert_manifest or ""))
         manifest_dir, manifest_name = os.path.dirname(manifest_path), os.path.basename(manifest_path)
 
+    owner = str(config.get("name") or project)
+    clear_leftover_walks(launcher.run_command, owner)
     command = sibling_command(
         chosen, image=self_image(launcher.run_command), action=action, uid=uid, gid=gid,
         depth=depth, manifest_dir=manifest_dir, manifest_name=manifest_name,
+        keep_empty=keep_empty, owner=owner,
     )
     ok, out, err = launcher.run_command(command, timeout=WALK_TIMEOUT)
     lines = [line for line in out.splitlines() if line.strip().startswith("{")]
@@ -584,8 +682,28 @@ def run(
     return summary
 
 
+def clear_leftover_walks(runner, owner: str) -> List[str]:
+    """Remove this project's walk containers that never started or already exited.
+
+    ``docker run --rm`` removes its container when the walk ends; a deployer
+    killed between Docker's create and start leaves it ``created``, with no
+    Compose label for anything else to find it by. A running walk is left alone.
+    """
+    removed: List[str] = []
+    for status in ("created", "exited", "dead"):
+        ok, out, _err = runner(
+            ["docker", "ps", "-aq", "--filter", f"label={WALK_LABEL}={owner}", "--filter", f"status={status}"],
+            timeout=20,
+        )
+        if ok and out.split():
+            gone, _out, _err = runner(["docker", "rm", "-f", *out.split()], timeout=60)
+            if gone:
+                removed += out.split()
+    return removed
+
+
 def totals(summary: dict) -> Dict[str, int]:
-    keys = ("entries", "wrong", "changed", "hardlinks", "errors", "reverted", "skipped")
+    keys = ("entries", "wrong", "changed", "hardlinks", "errors", "reverted", "skipped", "kept")
     return {key: sum(int(item.get(key) or 0) for item in summary.get("targets", [])) for key in keys}
 
 
@@ -598,6 +716,165 @@ def examples(summary: dict, limit: int = 3) -> str:
             if len(shown) >= limit:
                 return "; ".join(shown)
     return "; ".join(shown)
+
+
+def _quote(path: str) -> str:
+    import shlex
+
+    return shlex.quote(path)
+
+
+def failures(summary: dict, limit: int = 3) -> str:
+    """The entries a grant could not change: path, owner and mode, what it needs, and why."""
+    shown = []
+    for item in summary.get("targets", []):
+        for entry in item.get("failed", []):
+            path = item["label"] if entry["path"] == "." else f"{item['label'].rstrip('/')}/{entry['path']}"
+            shown.append(
+                f"{path} ({entry['kind']} {entry['owner']} {entry['mode']}, needs {entry['needs']}: {entry['error']})"
+            )
+            if len(shown) >= limit:
+                return "; ".join(shown)
+    return "; ".join(shown)
+
+
+def host_commands(summary: dict, gid: int = APP_GID, limit: int = 3) -> List[str]:
+    """What to run on the host for the entries a grant could not change.
+
+    A bind mount's folder is the host's own: on Docker Desktop, or a filesystem
+    that refuses a container's chmod, only the host can change it. A named
+    volume lives on Docker's disk, where the walk runs as root; a refusal there
+    is the volume driver's.
+    """
+    commands: List[str] = []
+    for item in summary.get("targets", []):
+        host = item.get("host")
+        for entry in item.get("failed", []):
+            if host:
+                path = host if entry["path"] == "." else os.path.join(host, entry["path"])
+                group = entry["owner"].partition(":")[2]
+                if group not in {"0", str(gid), "-"}:
+                    commands.append(f"sudo chgrp {gid} {_quote(path)}")
+                bits = entry["needs"].replace("x", "X") if entry["kind"] == "dir" else entry["needs"]
+                commands.append(f"sudo chmod g+{bits} {_quote(path)}")
+            else:
+                commands.append(
+                    f"check the volume driver of {item['label']}: it refused root's chmod ({entry['error']})"
+                )
+            if len(commands) >= limit:
+                return list(dict.fromkeys(commands))
+    return list(dict.fromkeys(commands))
+
+
+def refusal(summary: dict, uid: int, gid: int, then: str, outcome: str = "") -> str:
+    """Why a grant failed, entry by entry, and what to run on the host instead."""
+    counts = totals(summary)
+    errors = counts["errors"] or 1
+    text = (
+        f"Could not give uid {uid} (gid {gid}) access to {errors} entr{'y' if errors == 1 else 'ies'} "
+        f"of the app's data{outcome}"
+    )
+    detail = failures(summary)
+    if detail:
+        text += f": {detail}"
+    commands = host_commands(summary, gid)
+    if commands:
+        text += ". On the host, run: " + "; ".join(commands) + f"; then {then}"
+    return text + "."
+
+
+def _project_containers(runner, project: str) -> List[Tuple[str, str]]:
+    """``[(id, service)]`` of the project's service containers (one-off ``run`` containers excluded)."""
+    ok, out, _err = runner(
+        ["docker", "ps", "-a", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}",
+         "--filter", "label=com.docker.compose.oneoff=False",
+         "--format", '{{.ID}} {{.Label "com.docker.compose.service"}} {{.Names}}'],
+        timeout=20,
+    )
+    if not ok:
+        raise PermissionsError("docker ps failed")
+    rows = []
+    for line in out.splitlines():
+        parts = line.split()
+        # Compose names init containers <project>-<service>-pre_start-<n>.
+        if len(parts) == 3 and "-pre_start-" not in parts[2] and "-post_start-" not in parts[2]:
+            rows.append((parts[0], parts[1]))
+    return rows
+
+
+def converge_app_containers(launcher, config: dict) -> Tuple[bool, str]:
+    """Create or recreate, without starting, the app containers ``up`` would create or recreate.
+
+    No ``--no-recreate`` and no ``--force-recreate``: Compose decides as ``up``
+    does (a changed definition or image), so a container that is current, and
+    running, is left as it is. ``(ok, detail)``.
+    """
+    services = app_services(config)
+    if not services:
+        return True, ""
+    ok, out, err = launcher.run_docker_compose(
+        ["up", "--no-start", "--no-deps", *services], timeout=CREATE_TIMEOUT,
+    )
+    return ok, "" if ok else (err or out or "").strip()[-1500:]
+
+
+def missing_app_containers(launcher, config: dict) -> List[str]:
+    """The app services that have no container yet (all of them when Docker cannot say)."""
+    services = app_services(config)
+    project = str(config.get("name") or "")
+    if not services:
+        return []
+    if not project:
+        return services
+    try:
+        present = {service for _id, service in _project_containers(launcher.run_command, project)}
+    except PermissionsError:
+        return services
+    return [service for service in services if service not in present]
+
+
+def restart_refused(launcher, config: dict, *, exited: bool = False) -> List[str]:
+    """Restart the app containers a refused start left looping, after a grant.
+
+    A container in Docker's restart backoff keeps its definition, so ``up``
+    leaves it alone and the health check reads the old loop. ``docker restart``
+    starts it again at once on the data the grant fixed; restarting creates no
+    container, so Docker does not refill a volume. ``exited`` also starts the
+    app containers that stopped on the gate's exit 78 (for ``check --fix``,
+    where no ``up`` follows). Returns the services restarted.
+    """
+    services = set(app_services(config))
+    project = str(config.get("name") or "")
+    if not services or not project:
+        return []
+    try:
+        rows = [(cid, service) for cid, service in _project_containers(launcher.run_command, project)
+                if service in services]
+    except PermissionsError:
+        return []
+    if not rows:
+        return []
+    ok, out, _err = launcher.run_command(
+        ["docker", "inspect", "--format", "{{.Id}} {{.State.Status}} {{.State.Restarting}} {{.State.ExitCode}}",
+         *[cid for cid, _service in rows]],
+        timeout=20,
+    )
+    if not ok:
+        return []
+    states = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 4:
+            states[parts[0]] = parts[1:]
+    chosen = []
+    for cid, service in rows:
+        status, restarting, code = states.get(cid, ("", "", ""))
+        if restarting == "true" or status == "restarting" or (exited and status == "exited" and code == str(GATE_EXIT)):
+            chosen.append((cid, service))
+    if not chosen:
+        return []
+    ok, _out, _err = launcher.run_command(["docker", "restart", *[cid for cid, _service in chosen]], timeout=180)
+    return sorted({service for _cid, service in chosen}) if ok else []
 
 
 def _compose(launcher, args: List[str]) -> Tuple[bool, str, str]:
@@ -657,7 +934,7 @@ def missing_app_volumes(launcher, config: dict, project_dir: Optional[str] = Non
 
 
 def create_app_volumes(launcher, config: dict) -> Tuple[bool, str]:
-    """Have Compose create the app services' containers, and with them their missing volumes.
+    """Have Compose create the app services' missing containers, and with them their missing volumes.
 
     Docker fills a new named volume from the image's mount point when the first
     container that mounts it is created, and gives the volume's root that mount
@@ -684,9 +961,20 @@ def ensure_for_image(launcher, image: str, config: Optional[dict] = None) -> Tup
 
     A root image needs nothing. An image that is not on the host yet is pulled
     (or built) first, so the uid is read from the image ``up`` will run; when it
-    still cannot be read, nothing is recreated. On a fresh install the app's
-    named volumes do not exist yet: Compose creates them (``create_app_volumes``)
-    before the grant, so the grant reaches what the app will mount.
+    still cannot be read, nothing is recreated.
+
+    Docker refills an empty named volume from the image, and resets its root to
+    the image's mount point, each time it creates a container that mounts it.
+    So the app's containers are created first whenever one of them, or one of
+    its volumes, does not exist yet (``create_app_volumes``). When a writable
+    volume is still empty after the grant, the containers ``up`` would recreate
+    (a changed definition or image) are recreated now, unstarted
+    (``converge_app_containers``), so Docker fills or resets the volume before
+    the grant runs again; that grant writes ``KEEP_NAME`` into each volume still
+    empty, so no later create (a force-recreate, ``compose run``) undoes it, and
+    no image content is held out of a volume Docker had not filled yet. ``up``
+    then only starts them. App containers already looping on the refusal are
+    restarted.
     """
     if config is None:
         config = launcher.compose_config_json() or {}
@@ -705,32 +993,64 @@ def ensure_for_image(launcher, image: str, config: Optional[dict] = None) -> Tup
             "the app's data. Use a numeric USER uid:gid in the Dockerfile (DjangoLux images use 10001:0)."
         )
     missing = missing_app_volumes(launcher, config)
-    if missing:
+    absent = missing_app_containers(launcher, config)
+    if missing or absent:
         created, detail = create_app_volumes(launcher, config)
         if not created:
+            what = ", ".join(missing) if missing else "the containers of " + ", ".join(absent)
             return False, (
-                f"Could not create {', '.join(missing)} for uid {uid} (gid {gid}) to be granted access "
+                f"Could not create {what} for uid {uid} (gid {gid}) to be granted access "
                 "before the first start, so nothing was started."
                 + (f"\n{detail}" if detail else "")
             )
     try:
         scan = run(launcher, "scan", uid=uid, gid=gid)
-        if not totals(scan)["wrong"] and not scan["missing"]:
+        empty = any(item.get("empty") for item in scan["targets"])
+        if not totals(scan)["wrong"] and not scan["missing"] and not empty:
             return True, ""
-        summary = run(launcher, "apply", uid=uid, gid=gid)
+        summary = run(launcher, "apply", uid=uid, gid=gid) if totals(scan)["wrong"] or scan["missing"] else None
     except PermissionsError as exc:
         return False, f"Could not prepare the app's data for uid {uid} (gid {gid}): {exc}"
-    counts = totals(summary)
-    if counts["errors"] or not summary.get("ok", True):
-        return False, (
-            f"Could not give uid {uid} (gid {gid}) access to {counts['errors']} entr"
-            f"{'y' if counts['errors'] == 1 else 'ies'} of the app's data; nothing was recreated."
-        )
+    if summary is not None and (totals(summary)["errors"] or not summary.get("ok", True)):
+        return False, refusal(summary, uid, gid, "run ./start.sh again", outcome=", so nothing was recreated")
+    changed = totals(summary)["changed"] if summary is not None else 0
+    manifests = [summary["manifest"]] if summary is not None and summary.get("manifest") else []
+    if empty:
+        converged, detail = converge_app_containers(launcher, config)
+        if not converged:
+            return False, (
+                f"Could not create the app's containers for uid {uid} (gid {gid}) before the grant, so nothing "
+                "was started." + (f"\n{detail}" if detail else "")
+            )
+        try:
+            summary = run(launcher, "apply", uid=uid, gid=gid, keep_empty=True)
+        except PermissionsError as exc:
+            return False, f"Could not prepare the app's data for uid {uid} (gid {gid}): {exc}"
+        if totals(summary)["errors"] or not summary.get("ok", True):
+            return False, refusal(
+                summary, uid, gid, "run ./start.sh again",
+                outcome=" (its containers were created but not started)",
+            )
+        changed += totals(summary)["changed"]
+        if summary.get("manifest"):
+            manifests.append(summary["manifest"])
+    counts = dict(totals(summary), changed=changed)
+    summary = dict(summary, manifest=", ".join(manifests))
+    restarted = restart_refused(launcher, config) if counts["changed"] else []
+    if not counts["changed"] and not counts["kept"] and not counts["hardlinks"]:
+        return True, ""
     note = f"App data ready for uid {uid} (gid {gid})"
     if counts["changed"]:
         note += f": granted group access to {counts['changed']} entries (manifest {summary['manifest']})"
+    if counts["kept"]:
+        note += (
+            f"; added {KEEP_NAME} to {counts['kept']} empty volume(s), so Docker does not reset their root "
+            "when it creates a container"
+        )
     if counts["hardlinks"]:
         note += f"; {counts['hardlinks']} multiply-linked file(s) left unchanged"
+    if restarted:
+        note += f"; restarted {', '.join(restarted)}, which had stopped on the refusal"
     return True, note + "."
 
 
