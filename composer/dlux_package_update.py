@@ -24,11 +24,13 @@ import functools
 import json
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from . import dlux_channel
 from . import dlux_release_source as release_source
-from .dlux_runtime import DluxRuntime, DluxRuntimeError, version_sort_key
+from .dlux_runtime import DluxRuntime, DluxRuntimeError, UnusablePointer, version_sort_key
+from .versions import try_parse
 
 # Releases kept on the volume besides the active one, so a rollback target is
 # always present without the volume growing without bound.
@@ -77,6 +79,54 @@ def _published_availability(runtime, channel) -> str:
 
 def _noop(_message: str) -> None:
     return None
+
+
+def _discard(unpacked) -> None:
+    """Drop an unpacked copy that will not be staged, so it never fills the volume."""
+    if unpacked:
+        shutil.rmtree(unpacked, ignore_errors=True)
+
+
+def release_floor(unpacked) -> str:
+    """``requires.baked_image`` of an unpacked release, or ''."""
+    try:
+        manifest = json.loads((Path(unpacked) / "dlux" / "release-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, RecursionError):
+        return ""
+    if not isinstance(manifest, dict):
+        return ""
+    requires = manifest.get("requires")
+    floor = requires.get("baked_image") if isinstance(requires, dict) else None
+    return str(floor or manifest.get("image_baseline") or "").strip()
+
+
+def image_floor_problem(version, floor, baked) -> str:
+    """Why an image baking ``baked`` cannot run release ``version``, or ''.
+
+    The same reading as DjangoLux's supervisor (``image_floor_problem``): a bare
+    version means ``>=`` it, and a compound PEP 440 specifier is kept whole. An
+    unknown baked version or an empty floor is not a problem; a floor that cannot
+    be read is, because the supervisor holds such a release too.
+    """
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
+    floor, baked = str(floor or "").strip(), str(baked or "").strip()
+    parsed = try_parse(baked)
+    if not floor or parsed is None:
+        return ""
+    text = f">={floor}" if floor[0].isdigit() else floor
+    try:
+        specifier = SpecifierSet(text, prereleases=True)
+    except InvalidSpecifier:
+        return f"DjangoLux {version} declares an image floor Composer cannot read ({floor[:80]})."
+    if parsed in specifier:
+        return ""
+    wanted = text[2:] + " or later" if text.startswith(">=") and "," not in text else text
+    return (
+        f"DjangoLux {version} needs a project image with DjangoLux {wanted}, but this image "
+        f"bakes {baked}: the supervisor would keep serving {baked}. Deploy an image that "
+        "meets the floor first. Nothing was changed."
+    )
 
 
 QUARANTINE_REASON_LIMIT = 300
@@ -156,6 +206,7 @@ def apply_package_update(
     channel: Optional[str] = None,
     before_swap: Optional[Callable[[], tuple]] = None,
     retry_quarantined: bool = False,
+    baked_version: Optional[Callable[[], str]] = None,
 ) -> PackageUpdateResult:
     """Fetch, stage, activate, restart, health-check — and undo if unhealthy.
 
@@ -171,6 +222,13 @@ def apply_package_update(
     A release quarantined by an earlier failed update is refused unless
     ``retry_quarantined``; an unpinned update skips it. When a retry stays
     healthy, its quarantine record is set aside (kept, renamed).
+
+    ``baked_version`` (``() -> str``, '' when unknown) reads the DjangoLux baked
+    into the project image. It is asked only when the release declares an image
+    floor, and a release the image is below is refused before the backup.
+
+    The release already active is reported without unpacking it, and an
+    unpacked copy that is not staged is removed on every way out.
     """
     say = progress or _noop
     steps: List[str] = []
@@ -194,6 +252,25 @@ def apply_package_update(
             return refused
 
     try:
+        current = runtime.read_active()
+    except DluxRuntimeError as exc:
+        return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
+
+    def already_active(version) -> Optional[PackageUpdateResult]:
+        if current.get("version") != version or current.get("source") != "volume":
+            return None
+        step("already-active")
+        return PackageUpdateResult(
+            ok=True, version=version, previous_version=version,
+            message=f"DjangoLux {version} is already the active release.", steps=steps,
+        )
+
+    if target_version:
+        active = already_active(target_version)
+        if active:
+            return active
+
+    try:
         step("resolving", "Resolving the DjangoLux release")
         if channel is None:
             channel, _policy_error = dlux_channel.read_policy(runtime.state_dir)
@@ -209,29 +286,27 @@ def apply_package_update(
     except Exception as exc:
         return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
 
-    refused = refused_quarantine(candidate.version)
-    if refused:
-        return refused
-
-    try:
-        current = runtime.read_active()
-    except DluxRuntimeError as exc:
-        return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
-
-    if current.get("version") == candidate.version and current.get("source") == "volume":
-        step("already-active")
-        return PackageUpdateResult(
-            ok=True, version=candidate.version, previous_version=candidate.version,
-            message=f"DjangoLux {candidate.version} is already the active release.", steps=steps,
-        )
+    early = refused_quarantine(candidate.version) or already_active(candidate.version)
+    if early:
+        _discard(unpacked)
+        return early
 
     if runtime.quarantined_reason(candidate.version) is not None:
         say(f"Retrying DjangoLux {candidate.version}, quarantined by an earlier failed update")
+
+    floor = release_floor(unpacked)
+    if floor and baked_version is not None:
+        step("image-floor", "Reading the DjangoLux version baked into the image")
+        problem = image_floor_problem(candidate.version, floor, baked_version())
+        if problem:
+            _discard(unpacked)
+            return PackageUpdateResult(ok=False, version=candidate.version, message=problem, steps=steps)
 
     if before_swap is not None:
         step("backing-up", "Taking a pre-update DjangoLux backup")
         backed_up, backup_detail = before_swap()
         if not backed_up:
+            _discard(unpacked)
             return PackageUpdateResult(
                 ok=False, version=candidate.version,
                 message=f"Nothing was changed: {backup_detail}", steps=steps,
@@ -245,7 +320,8 @@ def apply_package_update(
         # never becomes the release the next container start would load.
         step("activating", f"Activating DjangoLux {candidate.version}")
         previous = runtime.activate(candidate.version)
-    except DluxRuntimeError as exc:
+    except (DluxRuntimeError, OSError) as exc:
+        _discard(unpacked)
         return PackageUpdateResult(ok=False, version=candidate.version,
                                    message=str(exc), steps=steps)
 
@@ -313,6 +389,77 @@ def apply_package_update(
     )
 
 
+ROLLBACK_SCHEMA_WARNING = (
+    "Rolling back runs older DjangoLux code on this database. The database keeps the "
+    "newer release's migrations; migrations are never reversed. Restoring a backup "
+    "taken before the update later needs \u201cIgnore version mismatch\u201d."
+)
+
+
+def _declares_rollback_compatible(manifest):
+    if not isinstance(manifest, dict):
+        return None
+    migrations = manifest.get("migrations")
+    value = migrations.get("rollback_compatible") if isinstance(migrations, dict) else None
+    if value is None:
+        value = manifest.get("rollback_compatible")
+    return value if isinstance(value, bool) else None
+
+
+def rollback_schema_blocker(runtime: DluxRuntime, current: str, target: str) -> str:
+    """The staged release that forbids running ``target`` on ``current``'s schema, or ''.
+
+    DjangoLux's rule, on what the volume holds: older code may run on a newer
+    schema only when the release being left and every staged release between
+    it and the target declare ``migrations.rollback_compatible: true``. An
+    empty target is the image's release, below every staged one.
+    """
+    current_key = version_sort_key(current)
+    target_key = version_sort_key(target) if target else (0,)
+    span = [
+        version for version in runtime.staged_versions()
+        if target_key < version_sort_key(version) <= current_key
+    ]
+    for version in reversed(span):
+        try:
+            manifest = json.loads(
+                (runtime.release_path(version) / "dlux" / "release-manifest.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, RecursionError, DluxRuntimeError):
+            continue
+        if _declares_rollback_compatible(manifest) is False:
+            return version
+    return ""
+
+
+def _recover_pointer(runtime, problem, *, restart, health_check, say, steps):
+    """`dlux rollback` on an unusable ``active.json``: set it aside, serve the image."""
+    steps.append("pointer-set-aside")
+    say(f"{problem} Setting it aside and returning to the DjangoLux release baked into the image")
+    try:
+        kept = runtime.set_aside_pointer()
+    except OSError as exc:
+        return PackageUpdateResult(ok=False, message=f"{problem} It could not be set aside: {exc}",
+                                   steps=steps)
+    steps.append("restarting")
+    ok, detail = restart()
+    if ok:
+        steps.append("health-check")
+        ok, detail = health_check()
+    where = f" (kept as state/{kept.name})" if kept is not None else ""
+    if not ok:
+        return PackageUpdateResult(ok=False, critical=True, steps=steps,
+                                   message=f"The unusable pointer was set aside{where}, but the "
+                                           f"deployment did not become healthy: {detail}")
+    steps.append("done")
+    return PackageUpdateResult(
+        ok=True, rolled_back=True, steps=steps,
+        message=(f"The unusable runtime pointer was set aside{where}; the DjangoLux release baked "
+                 "into the image is running. DjangoLux rebuilds the pointer from the release it "
+                 "recorded on its next tick."),
+    )
+
+
 @_exclusive
 def rollback_package_update(
     runtime: DluxRuntime,
@@ -322,18 +469,32 @@ def rollback_package_update(
     progress: Optional[Callable[[str], None]] = None,
     before_swap: Optional[Callable[[], tuple]] = None,
     baked_version: Optional[Callable[[], str]] = None,
+    target_version: str = "",
+    force: bool = False,
 ) -> PackageUpdateResult:
-    """Operator-requested rollback to the newest staged release below the active one.
+    """Operator-requested rollback below the active release.
+
+    Without ``target_version`` the target is the newest staged release below
+    the active one, else the image's release. With it, the target is that
+    staged release, which must be below the active one, or the image's release
+    when it names the baked version. ``force`` overrides a staged release in
+    between whose manifest forbids older code on its schema.
+
+    An unusable ``active.json`` is set aside (kept) and the image's release
+    restarted: the operator route out of a pointer nothing else can read.
 
     ``before_swap`` is the pre-rollback backup, taken before the pointer moves.
     ``baked_version`` (``() -> str``, ``''`` when unknown) reads the DjangoLux
     version baked into the project image; it is called only when a staged
-    release is a candidate.
+    release is a candidate or a target is named.
     """
     say = progress or _noop
     steps: List[str] = []
     try:
         active = runtime.read_active()
+    except UnusablePointer as exc:
+        return _recover_pointer(runtime, exc.problem, restart=restart, health_check=health_check,
+                                say=say, steps=steps)
     except DluxRuntimeError as exc:
         return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
 
@@ -359,7 +520,7 @@ def rollback_package_update(
         if version_sort_key(version) < version_sort_key(current)
     ]
     baked = ""
-    if targets and baked_version is not None:
+    if (targets or target_version) and baked_version is not None:
         say("Reading the DjangoLux version baked into the image")
         baked = baked_version()
         if baked:
@@ -373,6 +534,32 @@ def rollback_package_update(
             ]
         else:
             say("Could not read it; choosing among every staged release below the active one")
+    if target_version:
+        wanted = str(target_version).strip()
+        if wanted in targets:
+            targets = [wanted]
+        elif baked and version_sort_key(wanted) == version_sort_key(baked):
+            targets = []
+        else:
+            offered = ", ".join(targets + ([f"{baked} (the image)"] if baked else ["the image's release"]))
+            steps.append("refused")
+            return PackageUpdateResult(
+                ok=False, previous_version=current, steps=steps,
+                message=(f"DjangoLux {wanted} is not a rollback target here. A rollback goes to a "
+                         f"staged release below the active {current}, or to the image's release: "
+                         f"{offered}. Nothing was changed."),
+            )
+    chosen = targets[-1] if targets else ""
+    blocker = rollback_schema_blocker(runtime, current, chosen)
+    if blocker and not force:
+        steps.append("refused")
+        return PackageUpdateResult(
+            ok=False, previous_version=current, steps=steps,
+            message=(f"DjangoLux {blocker} declares that older code cannot run on its database "
+                     "schema (migrations.rollback_compatible is false). Restore a pre-update "
+                     "backup, then roll back with --force. Nothing was changed."),
+        )
+    say(ROLLBACK_SCHEMA_WARNING)
     if before_swap is not None:
         steps.append("backing-up")
         say("Taking a pre-rollback DjangoLux backup")
@@ -383,7 +570,7 @@ def rollback_package_update(
                                        steps=steps)
         say(backup_detail)
 
-    if not targets:
+    if not chosen:
         # No staged release that would run below the active one: fall back to
         # the image copy.
         steps.append("restore-image")
@@ -391,11 +578,10 @@ def rollback_package_update(
             + (f" ({baked})" if baked else ""))
         runtime.restore({})
     else:
-        target = targets[-1]
         steps.append("activating")
-        say(f"Activating DjangoLux {target}")
+        say(f"Activating DjangoLux {chosen}")
         try:
-            runtime.activate(target)
+            runtime.activate(chosen)
         except DluxRuntimeError as exc:
             return PackageUpdateResult(ok=False, message=str(exc), steps=steps)
 
