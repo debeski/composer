@@ -390,9 +390,10 @@ def apply_package_update(
 
 
 ROLLBACK_SCHEMA_WARNING = (
-    "Rolling back runs older DjangoLux code on this database. The database keeps the "
-    "newer release's migrations; migrations are never reversed. Restoring a backup "
-    "taken before the update later needs \u201cIgnore version mismatch\u201d."
+    "Rolling back changes code and static files only and never reverses database "
+    "migrations. The database keeps the newer release's migrations, so the pre-update "
+    "backup no longer matches it: to restore that backup later, update back to its "
+    "version first, or restore it with \u201cIgnore database version mismatch\u201d."
 )
 
 

@@ -350,8 +350,10 @@ A rollback runs older DjangoLux code on the newer database schema. It is refused
 when the release being left, or a staged release between it and the target,
 declares `migrations.rollback_compatible: false`: restore a pre-update backup, then
 roll back with `--force`. Otherwise it prints the same warning as the Updates
-card: the database keeps the newer migrations, migrations are never reversed, and
-restoring a pre-update backup later needs "Ignore version mismatch".
+card: a rollback changes code and static files only and never reverses
+migrations, so the pre-update backup no longer matches the database; restoring it
+later means updating back to its version first, or DjangoLux's **Ignore database
+version mismatch**.
 
 **An unusable pointer.** When `state/active.json` exists but cannot be used (not a
 JSON object, unreadable, a symbolic link or FIFO, or naming a release that is not
