@@ -54,6 +54,18 @@ refuse to run where the runtime volume is not mounted (the deployer behind
 docker compose exec composer-agent python -m composer maintenance publish
 ```
 
+The proxy sends this Content-Security-Policy with the page and its assets (the
+`/_dlux/maintenance/*` route and the 502/503/504 error page):
+
+```text
+default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'
+```
+
+A project page therefore loads its styles, scripts, images and fonts from its own
+folder (`/_dlux/maintenance/...`) and has no inline `<script>`, `style=""` or event
+handler; `fetch()` reaches only the site itself (`/_update/status.json`,
+`/_update/log.txt`).
+
 ## Migrating a stack from before schema 3
 
 Stacks generated before schema 3 serve `.proxy/maintenance.html` from a bind mount.
