@@ -4,7 +4,15 @@
   var logUrl = "/_update/log.txt";
   // A status older than this describes an earlier update, not this outage.
   var STALE_STATUS_MS = 15 * 60 * 1000;
-  var TERMINAL = { ready: true, completed: true, failed: true, rolled_back: true };
+  // The phases an update run reports while it is still working. Anything else
+  // (failed, rolled_back, ready, a status this page does not know) has ended.
+  var IN_PROGRESS = {
+    starting: true, preparing: true, queued: true, checking: true, downloading: true,
+    verifying: true, applying: true, staging: true, preflight: true, pulling: true,
+    pulled: true, recreating: true, restarting: true, migrating: true, backing_up: true,
+    maintenance: true, collecting_static: true, switching: true, verifying_health: true,
+    awaiting_recreate: true
+  };
   var STRINGS = {
     en: {
       dir: "ltr",
@@ -101,11 +109,13 @@
     return text.phases[key] || key.replace(/_/g, " ");
   }
 
-  // Update wording only while an update run is reporting progress; any other
-  // outage (a crash loop, a stopped service) gets the neutral page.
+  // Update wording only while an update run is reporting progress without an
+  // error; a failed or ended run and any other outage (a crash loop, a stopped
+  // service) get the neutral page.
   function isActiveUpdate(doc) {
     var status = String((doc && doc.status) || "");
-    if (!status || TERMINAL[status]) return false;
+    if (!Object.prototype.hasOwnProperty.call(IN_PROGRESS, status)) return false;
+    if (doc.error) return false;
     var stamp = doc.updated_at ? Date.parse(doc.updated_at) : NaN;
     return isNaN(stamp) || Date.now() - stamp < STALE_STATUS_MS;
   }
@@ -157,7 +167,7 @@
     updatedEl.textContent = doc && doc.updated_at ? text.updated + doc.updated_at : text.waiting;
     barEl.style.width = percent + "%";
     progressEl.setAttribute("aria-valuenow", String(percent));
-    statusTextEl.textContent = doc && doc.error ? doc.error : text.phase + label(status);
+    statusTextEl.textContent = text.phase + label(status);
   }
 
   function fetchStatus() {

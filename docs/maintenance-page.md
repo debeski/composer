@@ -26,8 +26,10 @@ folder holds:
   agent cannot see the project, where only a marker the agent itself wrote counts.
 
 The bundled page is neutral (the site is temporarily unavailable) and says an update
-is in progress only while `/_update/status.json` reports an update phase updated in
-the last 15 minutes; otherwise it waits for the site and returns to it. It follows
+is in progress only while `/_update/status.json` reports an in-progress update phase,
+with no `error`, updated in the last 15 minutes. A failed or ended run (`failed`,
+`rolled_back`, `ready`, `completed`, or a status the page does not know) gets the
+neutral text; the page waits for the site and returns to it. It follows
 the visitor's browser language: Arabic (right to left) or English.
 
 ## A project's own page

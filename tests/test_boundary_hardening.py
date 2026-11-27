@@ -9,8 +9,10 @@ Logs view keeps the newest lines and shows them as plain text.
 import io
 import json
 import os
+import shutil
 import socket
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -500,6 +502,64 @@ class MaintenancePageTests(unittest.TestCase):
         self.assertIn('ar: {', script)
         self.assertIn('dir: "rtl"', script)
         self.assertIn("isActiveUpdate", script)
+
+
+_PAGE_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+const [script, docJson, lang] = process.argv.slice(-3);
+const elements = {};
+const element = () => ({ textContent: "", hidden: false, style: {}, scrollTop: 0, scrollHeight: 0,
+  classList: { remove() {}, add() {} }, setAttribute() {} });
+const document = { title: "", documentElement: {},
+  getElementById: (id) => elements[id] || (elements[id] = element()) };
+const respond = (body) => Promise.resolve({ ok: true, json: () => Promise.resolve(body),
+  text: () => Promise.resolve("") });
+const context = { document, navigator: { languages: [lang] }, Date, String, isNaN, Promise,
+  fetch: (url) => url.endsWith("status.json") ? respond(JSON.parse(docJson)) : respond(""),
+  window: { location: { href: "https://site.test/" }, setInterval() {}, setTimeout() { return 1; } } };
+vm.runInNewContext(fs.readFileSync(script, "utf8"), context);
+setImmediate(() => setImmediate(() => process.stdout.write(JSON.stringify({
+  title: document.title, heading: elements.heading.textContent, meta_hidden: elements.meta.hidden }))));
+"""
+
+
+@unittest.skipUnless(shutil.which("node"), "node runs the maintenance page script")
+class MaintenancePageWordingTests(unittest.TestCase):
+    """R2-086(c): a failed or ended run gets the neutral page, never "update in progress"."""
+
+    def render(self, doc, lang="en"):
+        out = subprocess.run(
+            ["node", "-e", _PAGE_HARNESS, "--", str(mp.BUNDLE / "maintenance.js"), json.dumps(doc), lang],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        return json.loads(out.stdout)
+
+    def now(self, minutes=0):
+        return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+    def test_a_running_update_shows_the_update_wording(self):
+        page = self.render({"status": "recreating", "updated_at": self.now()})
+        self.assertEqual(page["title"], "Update in progress")
+        self.assertFalse(page["meta_hidden"])
+
+    def test_a_failed_or_ended_run_is_neutral_in_english_and_arabic(self):
+        failed = [
+            {"status": "failed", "updated_at": self.now(), "error": "Failed to start containers"},
+            {"status": "rolled_back", "updated_at": self.now()},
+            {"status": "recreating", "updated_at": self.now(), "error": "pre_start[0] exited with code 1"},
+            {"status": "rollback_failed", "updated_at": self.now()},
+            {"status": "error", "updated_at": self.now()},
+            {"status": "recreating", "updated_at": self.now(minutes=20)},
+        ]
+        for doc in failed:
+            with self.subTest(doc=doc):
+                english = self.render(doc)
+                self.assertEqual(english["title"], "Temporarily unavailable")
+                self.assertEqual(english["heading"], "This site is temporarily unavailable")
+                self.assertTrue(english["meta_hidden"])
+                arabic = self.render(doc, "ar")
+                self.assertEqual(arabic["title"], "الموقع غير متاح مؤقتًا")
+                self.assertTrue(arabic["meta_hidden"])
 
 
 if __name__ == "__main__":
