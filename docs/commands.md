@@ -50,11 +50,12 @@ the retired `-uo` and `update -o` forms.
 
 ### `restart`
 
-`composer restart [-f FILE] [-d] [--status-file PATH] [service]`
+`composer restart [-f FILE] [-d] [--status-file PATH] [service...]`
 
 Restarts running containers through `docker compose restart`, then waits for their
-health checks. Containers are preserved and post-start tasks are skipped. Pass a
-service to restart only that service. `composer -r ...` and `composer --restart ...`
+health checks. Containers are preserved and post-start tasks are skipped. Pass one
+or more services to restart only those, in one `docker compose restart` and in the
+order given (`./start.sh restart web worker`). `composer -r ...` and `composer --restart ...`
 are short leading aliases.
 
 ### `stop`
