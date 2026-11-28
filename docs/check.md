@@ -627,7 +627,11 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 - **OK** usable. **WARN** a root image whose data is not ready for uid 10001; an app
   image that is not on this host (its user cannot be read, so the message says so and
   judges the data for uid 10001); a named `USER` instead of a numeric `uid:gid`; a scan
-  error. **FAIL** a non-root image that cannot use its data, or a missing mount.
+  error. **FAIL** a non-root image that cannot use its data, or a missing mount, once an
+  app container exists. Before any app container exists (a stack that has not started
+  here), the entries it needs are named as OK: `./start.sh` grants them before the
+  first start ([before every start](app-permissions.md#before-every-start-of-the-app)),
+  even on volumes a proxy repair's recreate created meanwhile.
 - **`--fix`:** adds the group bits the app needs (only modes and groups change),
   writes a manifest for `app-permissions revert`, then re-checks deep. Once every app
   container exists, a writable named volume that is still empty gets

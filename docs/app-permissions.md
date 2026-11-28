@@ -12,7 +12,9 @@ it but cannot create, delete or rename anything; it reaches the data through gro
 - The image is not on this host: its user cannot be read, so the finding says so
   and judges the data for uid 10001, as for a root image.
 - The image runs as a non-root uid: **OK** when it can use its data, **FAIL** when
-  it cannot, because DjangoLux's entrypoint then refuses to start (exit 78).
+  it cannot, because DjangoLux's entrypoint then refuses to start (exit 78). While no
+  app container exists yet, what it cannot use is named as OK: the next `./start.sh`
+  grants it before the first start.
 
 A plain `check` looks at the top two levels of every mount; `--deep` and `--fix`
 walk everything. The mounts come from the merged compose config: every bind

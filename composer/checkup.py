@@ -1492,6 +1492,16 @@ print(json.dumps({'readable':readable,'host_uid':host_uid}))
             )
         if not count:
             return _result(OK, name, f"The app runs as {who} and can use its data{scope}.")
+        services = app_permissions.app_services(config)
+        if services and set(app_permissions.missing_app_containers(self, config)) == set(services):
+            # No app container yet: './start.sh' creates them and grants this data before
+            # the first start (app_permissions.ensure_for_image). A volume a proxy repair
+            # created meanwhile is still empty and Docker's 0755 is expected here.
+            return _result(
+                OK, name,
+                f"The app has not started here yet: './start.sh' gives {who} the {entries} it needs before the "
+                f"first start{scope}{detail}.",
+            )
         return _result(
             FAIL, name,
             f"The app runs as {who} but cannot use {entries} of its data{scope}{detail}. "
