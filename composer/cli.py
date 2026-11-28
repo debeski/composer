@@ -670,8 +670,8 @@ def parse_restart_args(argv):
     )
     parser.add_argument(
         "service",
-        nargs="?",
-        help="Restart only this Compose service (default: all services)",
+        nargs="*",
+        help="Restart only these Compose services, as Docker Compose does (default: all services)",
     )
     return parser.parse_args(argv)
 

@@ -17,6 +17,10 @@ _TERMINAL_SEQUENCE_RE = re.compile(
 )
 #: Control characters left after that, except tab and newline.
 _CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+#: Bidirectional embeddings, overrides and isolates: they reorder what a reader
+#: sees (``admin \u202egnp.exe`` shows as ``admin exe.png``), so they are shown
+#: as their code point instead. Marks (LRM, RLM, ALM) stay: Arabic text uses them.
+_BIDI_CONTROL_RE = re.compile("[\u202a-\u202e\u2066-\u2069]")
 
 
 def strip_terminal_controls(text) -> str:
@@ -27,6 +31,7 @@ def strip_terminal_controls(text) -> str:
     """
     plain = _TERMINAL_SEQUENCE_RE.sub("", str(text or ""))
     plain = plain.replace("\r\n", "\n").replace("\r", "\n")
+    plain = _BIDI_CONTROL_RE.sub(lambda match: f"<U+{ord(match.group()):04X}>", plain)
     return _CONTROL_CHARACTER_RE.sub("", plain)
 
 

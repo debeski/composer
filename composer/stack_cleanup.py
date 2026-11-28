@@ -312,6 +312,72 @@ def _active_proxy_mounts(
     return mounts
 
 
+#: ``docker run`` exits with these when Docker itself failed (125) or the
+#: validator could not be run (126, 127), not when the proxy rejected the file.
+DOCKER_RUN_ERRORS = {125: "Docker could not run the container", 126: "the validator could not be run",
+                     127: "the validator was not found in the image"}
+
+
+def proxy_validation_command(
+    model: Mapping[str, Any],
+    service: str,
+    candidate: Path,
+    target: str,
+    kind: str,
+    pull: str = "missing",
+) -> tuple[list[str], list[str]]:
+    """``(argv, env keys)``: validate ``candidate`` in ``service``'s image, with no network.
+
+    ``docker compose run`` gave the validator the service's networks and named
+    volumes, so a repair on a stack that never started created them (a full
+    address pool then made Caddy look like it rejected the file). This runs the
+    image the model names with the service's existing bind mounts (their own
+    read-only flags), its environment passed by key (the values stay out of the
+    command line), every service name resolving to 127.0.0.1 (nginx resolves its
+    upstreams at ``nginx -t``), and the candidate over ``target``. Nothing is
+    created but the throwaway container. ``pull`` is Docker's ``--pull`` policy;
+    a build-only proxy is never pulled.
+    """
+    services = model.get("services") if isinstance(model.get("services"), dict) else {}
+    spec = services.get(service) if isinstance(services.get(service), dict) else {}
+    image = str(spec.get("image") or "")
+    if not image and spec.get("build") and model.get("name"):
+        image, pull = f"{model['name']}-{service}".lower(), "never"
+    if not image:
+        raise StackCleanupError(f"The Compose model gives {service} no image to validate the proxy configuration in.")
+    argv = ["docker", "run", "--rm", "--pull", pull, "--network", "none"]
+    for name in sorted(services):
+        argv += ["--add-host", f"{name}:127.0.0.1"]
+    for volume in spec.get("volumes") or []:
+        if not isinstance(volume, dict) or volume.get("type") != "bind":
+            continue
+        source, mounted = str(volume.get("source") or ""), str(volume.get("target") or "")
+        if not source or not mounted or mounted == target or not os.path.exists(source):
+            continue
+        mount = f"type=bind,source={source},target={mounted}"
+        argv += ["--mount", mount + (",readonly" if volume.get("read_only") else "")]
+    argv += ["-v", f"{candidate}:{target}:ro"]
+    environment = spec.get("environment") if isinstance(spec.get("environment"), dict) else {}
+    keys = sorted(str(key) for key, value in environment.items() if value is not None)
+    for key in keys:
+        argv += ["-e", key]
+    if spec.get("user"):
+        argv += ["--user", str(spec["user"])]
+    entrypoint = spec.get("entrypoint")
+    prefix: list[str] = []
+    if isinstance(entrypoint, str) and entrypoint:
+        entrypoint = entrypoint.split()
+    if isinstance(entrypoint, list) and entrypoint:
+        argv += ["--entrypoint", str(entrypoint[0])]
+        prefix = [str(part) for part in entrypoint[1:]]
+    argv.append(image)
+    if kind == "caddy":
+        argv += [*prefix, "caddy", "validate", "--config", target, "--adapter", "caddyfile"]
+    else:
+        argv += [*prefix, "nginx", "-t"]
+    return argv, keys
+
+
 def _validate_proxy_candidates(
     command_runner,
     project_root: Path,
@@ -319,33 +385,34 @@ def _validate_proxy_candidates(
     environment: Mapping[str, str] | None,
     mounts: Sequence[tuple[str, Path, str, str]],
     staged: Mapping[Path, Path],
+    model: Mapping[str, Any] | None = None,
 ) -> list[str]:
+    """Validate each staged proxy file in its service's image (``proxy_validation_command``).
+
+    ``model`` is the candidate's resolved Compose model when the caller has it.
+    """
+    if not mounts:
+        return []
+    if model is None:
+        model = _compose_model(command_runner, project_root, compose_files, environment, "Proxy validation")
+    services = model.get("services") if isinstance(model.get("services"), dict) else {}
     validated = []
     for service, source, target, kind in mounts:
         candidate = staged[source]
-        action = [
-            "run",
-            "--rm",
-            "--no-deps",
-            "-v",
-            f"{candidate}:{target}:ro",
-            service,
-        ]
-        if kind == "caddy":
-            action.extend(
-                ["caddy", "validate", "--config", target, "--adapter", "caddyfile"]
-            )
-        else:
-            action.extend(["nginx", "-t"])
-        result = _run(
-            command_runner,
-            _compose_args(project_root, compose_files, *action),
-            project_root,
-            environment,
-        )
+        argv, keys = proxy_validation_command(model, service, candidate, target, kind)
+        values = (services.get(service) or {}).get("environment") or {}
+        run_env = dict(environment) if environment is not None else dict(os.environ)
+        run_env.update({key: str(values[key]) for key in keys})
+        result = _run(command_runner, argv, project_root, run_env)
         if result.returncode != 0:
             detail = str(result.stderr or result.stdout or "").strip()[:1000]
             suffix = f": {detail}" if detail else ""
+            docker = DOCKER_RUN_ERRORS.get(result.returncode)
+            if docker:
+                raise StackCleanupError(
+                    f"Could not validate the {service} configuration ({docker}); the file itself was not "
+                    f"judged{suffix}"
+                )
             raise StackCleanupError(
                 f"{service} rejected the cleaned proxy configuration{suffix}"
             )
@@ -498,6 +565,12 @@ def remove_obsolete_services(
     }
     if not updates:
         return result
+    from .stack_schema import read_only_files, read_only_message
+
+    blocked = read_only_files(updates)
+    if blocked:
+        # The candidate replaces the file by rename, which a read-only file does not stop.
+        raise StackCleanupError(read_only_message(project_root, blocked))
     if not shutil.which("docker"):
         raise StackCleanupError("Docker is required to validate the cleaned Compose configuration.")
 
@@ -563,6 +636,7 @@ def remove_obsolete_services(
             environment,
             proxy_mounts,
             staged,
+            candidate_model,
         )
         running_services = (
             _running_services(

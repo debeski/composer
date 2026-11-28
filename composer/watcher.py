@@ -24,13 +24,14 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .agent_protocol import redact_text
-from . import registry_login, safe_files, update_policy
+from . import registry_login, request_files, safe_files, update_policy
 from .registry import (
     DEFAULT_VERSION_LABEL,
     LOGIN_REQUIRED,
@@ -379,45 +380,43 @@ def run_agent_check(args) -> int:
     return 1 if publish_error or any(not entry["remote_digest"] for entry in payload["images"]) else 0
 
 
+def read_trigger(trigger: Path) -> Tuple[Optional[str], dict]:
+    """``(token, request)`` from one hardened read of a trigger, or ``(None, {})``.
+
+    A JSON object's ``token`` is the token; any other regular file stands for
+    its modification time. A FIFO, symlink or oversized entry is refused
+    (``request_files``), so a planted one can never block the loop.
+    """
+    got = request_files.read_bytes(trigger)
+    if got is None:
+        return None, {}
+    data, info = got
+    value = request_files.parse_json(data)
+    value = value if isinstance(value, dict) else {}
+    token = str(value.get("token") or "").strip()
+    return token or f"mtime:{info.st_mtime_ns}", value
+
+
 def _read_request_token(trigger: Path) -> Optional[str]:
-    if not trigger.exists():
-        return None
-    try:
-        data = json.loads(trigger.read_text(encoding="utf-8"))
-        token = str(data.get("token") or "").strip()
-        if token:
-            return token
-    except (OSError, ValueError, AttributeError):
-        pass
-    # Plain file / no token: use the modification time as an implicit token.
-    try:
-        return f"mtime:{trigger.stat().st_mtime_ns}"
-    except OSError:
-        return None
+    return read_trigger(trigger)[0]
 
 
 def read_request(trigger: Path) -> dict:
-    try:
-        value = json.loads(trigger.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    return read_trigger(trigger)[1]
+
+
+def _read_ack(ack: Path) -> dict:
+    return request_files.read_object(ack)
 
 
 def _read_ack_token(ack: Path) -> Optional[str]:
-    try:
-        token = str(json.loads(ack.read_text(encoding="utf-8")).get("token") or "").strip()
-        return token or None
-    except (OSError, ValueError, AttributeError):
-        return None
+    token = str(_read_ack(ack).get("token") or "").strip()
+    return token or None
 
 
 def _read_check_policy_seconds(path: Path) -> Optional[float]:
     """The interval DjangoLux published, or None when absent or unusable."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    data = request_files.read_json(path)
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         return None
     seconds = data.get("interval_seconds")
@@ -426,7 +425,8 @@ def _read_check_policy_seconds(path: Path) -> Optional[float]:
     return float(seconds)
 
 
-def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = ""):
+def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = "",
+               recent: Optional[request_files.RecentTokens] = None):
     payload = {
         "token": token,
         "exit_code": exit_code,
@@ -434,25 +434,38 @@ def _write_ack(ack: Path, token: str, exit_code: int, operation_id: str = ""):
     }
     if operation_id:
         payload["operation_id"] = operation_id
+    if recent is not None:
+        payload["recent_tokens"] = recent.persisted()
     try:
         safe_files.atomic_write_json(ack, payload, sort_keys=False)
     except OSError:
         pass
 
 
+#: How far ahead of this clock a status file's mtime may be and still count as "written since".
+FUTURE_MTIME_SLACK = 5.0
+
+
 def _describes_request(record: dict, token: str, operation_id: str, written, since) -> bool:
     """Is ``record`` about this request rather than an earlier run?
 
     It is when it names the request (the child's ``request_token``, or the
-    ``run_token`` of the DjangoLux run that wrote the request), its operation, or
-    when it was written after the request began: a package child publishes its
-    result without a token.
+    ``run_token`` of the DjangoLux run that wrote the request) or its operation.
+    A record naming none of them counts when it was written after the request
+    began, since a package child publishes its result without a token; one that
+    names another operation, or whose mtime is in the future (clock skew, a
+    restored file: R2-074), never does.
     """
+    recorded_operation = str(record.get("operation_id") or "")
     if token and token in {str(record.get("request_token") or ""), str(record.get("run_token") or "")}:
         return True
-    if operation_id and str(record.get("operation_id") or "") == operation_id:
+    if operation_id and recorded_operation == operation_id:
         return True
-    return since is not None and written is not None and written >= since
+    if operation_id and recorded_operation:
+        return False
+    if since is None or written is None or written > time.time() + FUTURE_MTIME_SLACK:
+        return False
+    return written >= since
 
 
 def _publish_terminal_failure(
@@ -473,12 +486,11 @@ def _publish_terminal_failure(
     update.
     """
     target = Path(status_file)
-    try:
-        current = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(current, dict):
-            current = {}
-        written = target.stat().st_mtime
-    except (OSError, ValueError, AttributeError):
+    got = request_files.read_bytes(target, safe_files.MAX_DOCUMENT_BYTES * 4)
+    current = request_files.parse_json(got[0]) if got else None
+    if isinstance(current, dict):
+        written = got[1].st_mtime
+    else:
         current, written = {}, None
     if current and not _describes_request(current, token, operation_id, written, since):
         current = {}
@@ -509,13 +521,7 @@ def _publish_terminal_failure(
 def _append_terminal_failure(log_file: Optional[str], error: str):
     if not log_file:
         return
-    try:
-        target = Path(log_file)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("a", encoding="utf-8") as stream:
-            stream.write(f"\nUpdate failed: {redact_text(error)}\n")
-    except OSError:
-        pass
+    request_files.append_text(log_file, f"\nUpdate failed: {redact_text(error)}\n")
 
 
 class WatchRuntime:
@@ -570,8 +576,13 @@ class WatchRuntime:
         self.local_digests: dict = {}
         self.local_probe_interval = LOCAL_DIGEST_PROBE_SECONDS
         self.next_local_probe = 0.0
-        self.last_token = _read_ack_token(self.ack)
-        self.last_package_token = _read_ack_token(self.package_ack)
+        image_ack = _read_ack(self.ack)
+        package_ack = _read_ack(self.package_ack)
+        self.last_token = str(image_ack.get("token") or "").strip() or None
+        self.last_package_token = str(package_ack.get("token") or "").strip() or None
+        # Every recent token, not just the last: a replayed older request runs once.
+        self.seen_tokens = request_files.RecentTokens.from_ack(image_ack)
+        self.seen_package_tokens = request_files.RecentTokens.from_ack(package_ack)
         # DjangoLux 1.8.0 stopped reaching PyPI from inside the container and
         # reads what we publish instead. Without this, its update tile would sit
         # at "unknown" forever. Same cadence as the image check.
@@ -583,8 +594,14 @@ class WatchRuntime:
         self.check_policy_file = self.package_trigger.with_name(CHECK_POLICY_FILENAME)
         self.check_request = self.package_trigger.with_name(CHECK_REQUEST_FILENAME)
         self.check_request_ack = Path(f"{self.check_request}.ack")
-        self.last_check_request_token = _read_ack_token(self.check_request_ack)
+        check_ack = _read_ack(self.check_request_ack)
+        self.last_check_request_token = str(check_ack.get("token") or "").strip() or None
+        self.seen_check_tokens = request_files.RecentTokens.from_ack(check_ack)
         self._ops_responder = None
+        self._ops_thread: Optional[threading.Thread] = None
+        # Operations run beside the loop; an update and an operation never overlap.
+        self.work_lock = threading.RLock()
+        self.ops_in_background = not getattr(args, "once", False)
         # The triggers live in <runtime root>/state/, and staging a wheel needs
         # the root itself (downloads/ sits beside state/).
         self.runtime_root = self.package_trigger.parent.parent
@@ -606,27 +623,46 @@ class WatchRuntime:
 
     def maybe_answer_check_request(self):
         """Re-check images and packages now when DjangoLux asks, then acknowledge."""
-        token = _read_ack_token(self.check_request)
-        if not token or token == self.last_check_request_token:
+        token = str(request_files.read_object(self.check_request).get("token") or "").strip()
+        if not token or token in self.seen_check_tokens:
             return
         self.maybe_check_availability(force=True)
         self.maybe_check_package_availability(force=True)
-        _write_ack(self.check_request_ack, token, 0)
+        self.seen_check_tokens.add(token)
+        _write_ack(self.check_request_ack, token, 0, recent=self.seen_check_tokens)
         self.last_check_request_token = token
 
     def maybe_answer_ops_request(self):
-        """Perform one DjangoLux Operations request, if a new one is waiting."""
+        """Start one DjangoLux Operations request, if a new one is waiting.
+
+        It runs beside the loop: an operation can wait minutes on the executor
+        (paused, or a slow `docker compose`), and check requests, the relay and
+        availability keep answering meanwhile. One operation runs at a time,
+        and an update waits for it (``work_lock``).
+        """
         if not self.package_trigger.parent.is_dir():
+            return
+        if self._ops_thread is not None and self._ops_thread.is_alive():
             return
         if self._ops_responder is None:
             from .ops import OpsResponder
 
             self._ops_responder = OpsResponder(self)
-        try:
-            self._ops_responder.answer()
-        except Exception as exc:
-            # An operation must never take the watch loop down with it.
-            print(f"⚠ operations request failed: {redact_text(exc)}", flush=True)
+        if not self.ops_in_background:
+            self._answer_ops()
+            return
+        if self._ops_responder.pending() is None:
+            return
+        self._ops_thread = threading.Thread(target=self._answer_ops, name="composer-ops", daemon=True)
+        self._ops_thread.start()
+
+    def _answer_ops(self):
+        with self.work_lock:
+            try:
+                self._ops_responder.answer()
+            except Exception as exc:
+                # An operation must never take the watch loop down with it.
+                print(f"⚠ operations request failed: {redact_text(exc)}", flush=True)
 
     def maybe_check_availability(self, force=False):
         if not self.availability_enabled:
@@ -700,18 +736,16 @@ class WatchRuntime:
         return False
 
     def pending_request(self):
-        token = _read_request_token(self.trigger)
-        if not token or token == self.last_token:
+        token, value = read_trigger(self.trigger)
+        if not token or token == self.last_token or token in self.seen_tokens:
             return None
-        value = read_request(self.trigger)
         value["token"] = token
         return value
 
     def pending_package_request(self):
-        token = _read_request_token(self.package_trigger)
-        if not token or token == self.last_package_token:
+        token, value = read_trigger(self.package_trigger)
+        if not token or token == self.last_package_token or token in self.seen_package_tokens:
             return None
-        value = read_request(self.package_trigger)
         value["token"] = token
         return value
 
@@ -748,6 +782,10 @@ class WatchRuntime:
         never let an unreadable request wedge the loop. The runner owns the
         rollback decision — see composer/dlux_package_update.py.
         """
+        with self.work_lock:
+            return self._process_package(request, runner)
+
+    def _process_package(self, request: dict, runner=None) -> int:
         token = str(request["token"])
         operation_id = str(request.get("operation_id") or "").strip()
         payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
@@ -776,7 +814,9 @@ class WatchRuntime:
                     error=launch_error, operation_id=operation_id, since=started,
                 )
             _append_terminal_failure(self.log_file, fallback)
-        _write_ack(self.package_ack, token, exit_code, operation_id=operation_id)
+        self.seen_package_tokens.add(token)
+        _write_ack(self.package_ack, token, exit_code, operation_id=operation_id,
+                   recent=self.seen_package_tokens)
         self.last_package_token = token
         # exit 3 is the orchestrator's "needs a human" signal; keep it distinct
         # in the log so an operator is not told a broken deployment is "failed".
@@ -791,11 +831,7 @@ class WatchRuntime:
 
     def read_package_ack(self) -> dict:
         """The inline package update's completion ack, or {}. Reads only."""
-        try:
-            value = json.loads(self.package_ack.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        return _read_ack(self.package_ack)
 
     def read_ack(self) -> dict:
         """Return the last completion ack ({token, exit_code, operation_id}) or {}.
@@ -803,21 +839,21 @@ class WatchRuntime:
         Reads only — the agent uses this to observe an update the executor
         performed, so it can report completion without holding Docker authority.
         """
-        try:
-            value = json.loads(self.ack.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        return _read_ack(self.ack)
 
     def process(self, request: dict) -> int:
+        with self.work_lock:
+            return self._process(request)
+
+    def _process(self, request: dict) -> int:
         token = str(request["token"])
         operation_id = str(request.get("operation_id") or "").strip()
         started = time.time()
         print(f"⟳ update request {token} — running `composer update`", flush=True)
         if self.log_file:
             try:
-                Path(self.log_file).parent.mkdir(parents=True, exist_ok=True)
-                Path(self.log_file).write_text("", encoding="utf-8")
+                # Replaced, not truncated in place: a planted link is not followed.
+                safe_files.atomic_write_text(self.log_file, "")
             except OSError:
                 pass
         child_env = self.env.copy()
@@ -848,7 +884,8 @@ class WatchRuntime:
                     since=started,
                 )
             _append_terminal_failure(self.log_file, fallback_error)
-        _write_ack(self.ack, token, exit_code, operation_id=operation_id)
+        self.seen_tokens.add(token)
+        _write_ack(self.ack, token, exit_code, operation_id=operation_id, recent=self.seen_tokens)
         self.last_token = token
         result = "ready" if exit_code == 0 else f"failed (exit {exit_code})"
         print(f"✔ update {token} → {result}", flush=True)

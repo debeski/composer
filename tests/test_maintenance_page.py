@@ -75,8 +75,8 @@ class PublishTests(unittest.TestCase):
         override = self.runtime / "project-override"
         override.mkdir()
         (override / "index.html").write_text("<p>ours</p>", encoding="utf-8")
-        self.assertEqual(mp.publish_override(override, self.runtime), 1)
-        self.assertFalse(mp.publish(self.runtime))
+        self.assertEqual(mp.publish_override(override, self.runtime), (1, []))
+        self.assertFalse(mp.publish(self.runtime, project_root=self.runtime / "elsewhere"))
         self.assertEqual((mp.published_dir(self.runtime) / "index.html").read_text(encoding="utf-8"), "<p>ours</p>")
 
 
@@ -117,7 +117,7 @@ class FakeDocker:
         out = ""
         if "config" in args:
             out = (
-                '{"services": {"caddy": {"volumes": [{"type": "bind", "source": "%s",'
+                '{"services": {"caddy": {"image": "caddy:2", "volumes": [{"type": "bind", "source": "%s",'
                 ' "target": "/etc/caddy/Caddyfile"}]}, "composer-agent": {}}}' % self.caddyfile
             )
         elif "ps" in args:

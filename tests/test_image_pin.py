@@ -387,7 +387,8 @@ class CheckupPinTests(unittest.TestCase):
         self.launcher.compose_file = None
         self.running = {}
         # No Docker: what runs is given per test.
-        for name, value in (("_resident_running_images", None), ("compose_config_json", {}), ("_container_states", [])):
+        for name, value in (("_resident_running_images", None), ("compose_config_json", {}), ("_container_states", []),
+                            ("_pin_image_version", "")):
             stub = (patch.object(self.launcher, name, side_effect=lambda: dict(self.running), create=True)
                     if value is None else patch.object(self.launcher, name, return_value=value))
             stub.start()
@@ -423,6 +424,19 @@ class CheckupPinTests(unittest.TestCase):
         self.assertEqual([f["level"] for f in fixed], ["warn"], fixed)
         self.assertEqual((self.project / "compose.yml").read_text(encoding="utf-8"), BLOCK)
 
+    def test_a_lock_that_cannot_be_read_warns(self):
+        """R2-024: a present but unreadable lock looked like a pin while the wrapper ran the channel tag."""
+        for text in ("debeski/composer:beta\n", f"debeski/composer:v1.11.0 @{DIGEST_A}\n", "\n\n"):
+            (self.project / ".composer-image").write_text(text, encoding="utf-8")
+            result = self._finding()
+            self.assertEqual(result["level"], "warn", (text, result))
+            self.assertIn(".composer-image is present and holds no pinned reference", result["message"])
+            self.assertIn("./start.sh agent update", result["fix"])
+
+    def test_a_readable_lock_with_a_blank_first_line_is_not_unreadable(self):
+        (self.project / ".composer-image").write_text(f"\n{image_pin.Pin('1.11.0', DIGEST_A).ref}\n", encoding="utf-8")
+        self.assertNotIn("holds no pinned reference", self._finding()["message"])
+
     def test_a_fresh_unpinned_project_is_ok(self):
         # The state `dlux startproject` writes: the scaffold alignment gate needs it clean.
         result = self._finding()
@@ -450,6 +464,19 @@ class CheckupPinTests(unittest.TestCase):
         self.assertEqual([f["level"] for f in fixed], ["ok"])
         self.assertEqual(self._finding()["level"], "ok")
         self.assertIn("pinned to Composer 1.11.0", self._finding()["message"])
+
+    def test_a_lock_whose_tag_and_digest_disagree_is_not_adopted(self):
+        # R2-025: v1.11.0b2@<b1 digest> was adopted, and both halves then ran 1.11.0b1.
+        image_pin.write_lock(image_pin.Pin("1.11.0b2", DIGEST_A), self.project)
+        with patch.object(self.launcher, "_pin_image_version", return_value="1.11.0b1"), \
+                patch("composer.agent_installer.pin_composer_image", side_effect=AssertionError("pinned")):
+            fixed = self.launcher._fix_composer_pin(SimpleNamespace(file=None, yes=True))
+            self.running = {"composer-agent": image_pin.read_lock(self.project).ref}
+            finding = self._finding()
+        self.assertEqual([f["level"] for f in fixed], ["fail"], fixed)
+        self.assertIn("names Composer 1.11.0b2 in its tag while its digest is Composer 1.11.0b1", fixed[0]["message"])
+        self.assertEqual((self.project / "compose.yml").read_text(encoding="utf-8"), BLOCK)
+        self.assertEqual(finding["level"], "fail", finding)
 
     def test_fix_without_a_lock_changes_nothing(self):
         self.assertEqual(self.launcher._fix_composer_pin(SimpleNamespace(file=None, yes=True)), [])
@@ -787,7 +814,8 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
             launcher.run()
         return compose_calls, out.getvalue(), launcher
 
-    def _start(self, *, tag_version, running_version="1.11.0b1", tag_id="sha256:tag", pair_running=True, env=None):
+    def _start(self, *, tag_version, running_version="1.11.0b1", tag_id="sha256:tag", pair_running=True, env=None,
+               resident_image="debeski/composer:beta"):
         """A plain `./start.sh` after the wrapper re-pointed the local `debeski/composer:beta`."""
         from composer.version import RELEASE_MANIFEST_LABEL
 
@@ -808,7 +836,7 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
             "get_compose_ps_entries": lambda include_all=False: (True, rows, ""),
             "image_labels": lambda image: {RELEASE_MANIFEST_LABEL: json.dumps({"version": versions.get(image, "")})},
         }
-        calls, out, _ = self._run([], env=env, effects=effects)
+        calls, out, _ = self._run([], env=env, effects=effects, resident_image=resident_image)
         return calls, out, commands
 
     def test_agent_update_with_nothing_to_pin_pulls_and_recreates_nothing(self):
@@ -872,12 +900,52 @@ class ResidentPairMovesOnlyThroughItsPinTests(unittest.TestCase):
     def test_a_start_with_an_explicit_composer_image_behaves_as_before(self):
         calls, _, commands = self._start(tag_version="1.10.4", env={"COMPOSER_SELF_IMAGE": "mirror/composer:1.10.4"})
         self.assertEqual(calls, [["up", "-d"]])
-        self.assertEqual(commands, [])
+        # Only the interrupted-recreate listing (R2-028); no resident version is read.
+        self.assertEqual([argv for argv in commands if argv[:3] != ["docker", "ps", "-a"]], [])
 
     def test_a_start_on_the_image_the_pair_already_runs_reads_no_versions(self):
         calls, _, commands = self._start(tag_version="1.10.4", tag_id="sha256:running")
         self.assertEqual(calls, [["up", "-d"]])
         self.assertFalse(any(argv[:2] == ["docker", "run"] for argv in commands))
+
+    def test_a_start_leaves_the_pair_off_an_older_pinned_block(self):
+        """R2-023: a b1-pinned compose.yml restored over a b2 pair moved it back to b1."""
+        b1 = f"debeski/composer:v1.11.0b1@{DIGEST_A}"
+        calls, out, _ = self._start(tag_version="1.11.0b1", running_version="1.11.0b2", resident_image=b1)
+        self.assertEqual(calls, [["up", "-d", "web", "worker"]])
+        self.assertIn("now names Composer 1.11.0b1, older than the running 1.11.0b2", out)
+
+    def test_an_older_pinned_block_not_pulled_yet_is_judged_by_its_tag(self):
+        b1 = f"debeski/composer:v1.11.0b1@{DIGEST_A}"
+        calls, out, _ = self._start(tag_version="", running_version="1.11.0b2", tag_id="", resident_image=b1)
+        self.assertEqual(calls, [["up", "-d", "web", "worker"]])
+        self.assertIn("now names Composer 1.11.0b1", out)
+
+    def test_a_newer_pinned_block_recreates_the_pair(self):
+        b3 = f"debeski/composer:v1.11.0b3@{DIGEST_A}"
+        calls, _, _ = self._start(tag_version="1.11.0b3", running_version="1.11.0b2", resident_image=b3)
+        self.assertEqual(calls, [["up", "-d"]])
+
+    def test_a_pin_whose_image_is_another_release_is_held(self):
+        """R2-025: `v1.11.0b2@<b1 digest>` ran b1 under a b2 name."""
+        lying = f"debeski/composer:v1.11.0b2@{DIGEST_A}"
+        calls, out, _ = self._start(tag_version="1.11.0b1", running_version="1.11.0b1", resident_image=lying)
+        self.assertEqual(calls, [["up", "-d", "web", "worker"]])
+        self.assertIn("names Composer 1.11.0b2 in its tag, but that image is Composer 1.11.0b1", out)
+
+    def test_a_pair_already_on_a_mislabelled_pin_is_warned_about(self):
+        lying = f"debeski/composer:v1.11.0b2@{DIGEST_A}"
+        _, out, _ = self._start(tag_version="1.11.0b1", running_version="1.11.0b1", tag_id="sha256:running",
+                                resident_image=lying)
+        self.assertIn("whose tag names Composer 1.11.0b2, but that image is Composer 1.11.0b1", out)
+
+    def test_a_pair_behind_the_deployer_is_named(self):
+        """C1-11: a beta-channel stack kept its pair on `:latest` 1.10.4 silently."""
+        calls, out, _ = self._start(tag_version="1.10.4", running_version="1.10.4", tag_id="sha256:running",
+                                    resident_image="debeski/composer:latest")
+        self.assertEqual(calls, [["up", "-d"]])
+        self.assertIn("run Composer 1.10.4, older than this deployer", out)
+        self.assertIn("./start.sh agent update", out)
 
     def test_a_start_leaves_the_pair_off_a_tag_it_cannot_read(self):
         calls, out, _ = self._start(tag_version="", tag_id="")

@@ -32,14 +32,27 @@ counts `results`; repairs `--fix` applied are listed separately under `fixes`.
 `check` exits `1` when any result or applied fix is a `fail`, and `0` otherwise: a
 WARN never makes it fail.
 
+Without `--fix`, `--beta` or `--stable`, `check` changes nothing, in the project or in
+Docker: it creates no volume, bind folder or network. The findings that need an
+image's DjangoLux version run `python -m dlux --version` in a throwaway container that
+mounts nothing and has no network, and [`proxy-config`](#proxy-config) validates the
+proxy file in the proxy's own image the same way (`--pull never`, no network, the
+proxy's existing bind mounts). So a stack that has never started gets nothing from a
+check, and an image that would have to be built is not built (the version then reads
+as unknown). The [`app-permissions`](#app-permissions) scan mounts only volumes that
+already exist, read-only.
+
 The Operations card runs the same checks in `composer-executor`, and previews the
 repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#operations-requests-from-djangolux)).
 
 ## How `--fix` is guarded
 
-0. **One at a time.** `--fix` holds `.xclude/composer-check/check-fix.lock` (`flock`)
-   for the whole run. A second `--fix` on the same project is refused at once with
-   `check-fix` FAIL, naming the holder's pid, host and start time, and changes
+0. **One at a time.** `--fix` holds the project's operation lock,
+   `.xclude/composer-check/check-fix.lock` (`flock`), for the whole run; deploys and
+   Operations applies hold the same lock ([one operation at a
+   time](deploying.md#one-operation-at-a-time)). A `--fix` started while another
+   operation runs on the same project is refused at once with `check-fix` FAIL,
+   naming the holder (its command, container, pid, host and start time), and changes
    nothing. A run keeps going when its terminal is closed or its `./start.sh` is
    killed (the Composer container finishes it), so wait for it (`docker ps` lists
    it). The system frees the lock when the holder ends, however it ends. The holder
@@ -58,14 +71,24 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    gains one line), so a `db` that merges it is listed too. Declining reports `fix`
    WARN "Changes declined."
 2. **Validate first.** Every repair validates its result with `docker compose config`
-   before writing; a changed proxy file mounted by Caddy or Nginx is validated as
-   well, in a throwaway container.
+   before writing. A changed proxy file mounted by Caddy or Nginx is validated as
+   well, with `caddy validate` or `nginx -t` in a throwaway `docker run --rm --network
+   none` of the proxy's image: the service's existing bind mounts, its environment
+   passed by name, every service name resolving to `127.0.0.1`, and the candidate in
+   place of the file. It creates no network or volume. When Docker itself cannot run
+   that container (exit 125 to 127), the repair says so instead of blaming the file.
 3. **Archive, then write as found.** Every changed deployment or proxy file is
    archived under `.xclude/composer-check/` first (the secrets file excepted: only
    its stamp changes, see [stamps](stack-migrations.md#stamps)). A rewritten file
-   keeps its line endings, so a CRLF `compose.yml` stays CRLF. A file Composer
-   cannot write stops the repair before anything is validated, archived or written,
-   with a message naming the file and the `chmod`/`chown` that fixes it.
+   keeps its line endings, so a CRLF `compose.yml` stays CRLF and a CR-only file stays
+   CR. While a stack file mixes endings ([`line-endings`](#line-endings)), no repair
+   that writes a stack file runs. A file Composer cannot write stops the repair before
+   anything is validated, archived or written, with a message naming the file and the
+   `chmod`/`chown` that fixes it; the repairs that replace a Compose or proxy file by
+   rename (the resident block, `executor enable`, `agent enable`, the Composer
+   install, init containers, the dev compose, updater runtime, post-start and restart
+   labels, obsolete services, pgAdmin routes, the maintenance page) are held together
+   with one `fix:read-only-files` FAIL that names them.
 4. **Apply in a fixed order:** wrappers, maintenance page, stored files, front proxy,
    update policy, relay settings, Redis recovery, Redis snapshots, obsolete services
    and routes, init containers, dev compose,
@@ -78,10 +101,11 @@ repairs `check --fix` would apply ([Operations requests](agent-protocol-v1.md#op
    (deep) and `redis-persistence` are always checked again. After a run that applied
    repairs, every check a repair can change is checked again, whatever it reported
    before: `resident-commands`, `docker-proxy`, `stored-files`, `stack-schema`,
-   `task-worker`, `services`, `redis-aof-corrupt`, `front-proxy`, `update-policy`,
-   `relay-env`, `removed-services`, `proxy-routes`, `topology`, `compose-config`, `celery`,
-   the `wrapper:` findings and `pending-recreate`. A run that applied nothing checks again
-   only the first seven of those that failed. The new results replace the old, and a
+   `task-worker`, `image-floor`, `proxy-config`, `services`, `redis-aof-corrupt`,
+   `front-proxy`, `update-policy`, `relay-env`, `removed-services`, `proxy-routes`,
+   `topology`, `compose-config`, `celery`, the `wrapper:` findings and
+   `pending-recreate`. A run that applied nothing checks again only the first nine of
+   those that failed. The new results replace the old, and a
    finding whose service the run removed (`docker-socket-proxy`, `celery`) leaves the
    report, as from a fresh `check`, so the report and the summary say what stands now.
 
@@ -147,13 +171,17 @@ archived) and the resident pair is left as it is. Every remaining step is a
 Some findings are the operator's choice rather than a defect. With a terminal on
 stdin and without `-y`, `COMPOSER_ASSUME_YES` or `--json`, `check --fix` asks them as
 short questions before it plans, each with the recommended answer as the default
-(Enter) and `s` to skip. A script, the resident pair and an Operations panel apply
+(Enter) and `s` to skip; `yes` and `no` answer `y` and `n`. A question nobody answers
+within 600 s (`COMPOSER_QUESTION_TIMEOUT_SECONDS`) counts as skipped, and an
+unanswered confirmation as not confirmed, so a run whose terminal went away ends and
+frees the lock. A script, the resident pair and an Operations panel apply
 are never asked: they keep the WARN and its advice, as without the questions.
 
 | Question | Asked when | Answer |
 | --- | --- | --- |
 | How do users reach this server? | [`front-proxy`](#front-proxy) is a WARN because `DLUX_FRONT_PROXY` is unset, and the stack is generated (or `--fix` makes it so) | `1` a front proxy: its addresses or CIDR ranges, space-separated, checked as Caddy would; `2` directly: empty (Caddy trusts no proxy); `3` (default) keep trusting every private network: `private_ranges` |
 | Which updates may the app request? | the secrets file does not set `DLUX_UPDATE_POLICY`, or sets an unknown value | `all`, `inline` or `none`; the default is the policy in force (`all` when unset) |
+| A password for the first admin account? | [`admin-pass`](#admin-pass) is a WARN (`ADMIN_PASS` empty or `admin`) | the password, typed twice and not shown, at least 8 characters; Enter skips. It is written to the secrets file through a new `0600` file renamed over it, and never shown in the plan, the fixes or the summary |
 | Switch Redis to snapshots? | [`redis-persistence`](#redis-persistence) is a WARN and Redis is not crash-looping on a damaged file | `y` (default) rewrites its command; `n` keeps the append-only file |
 
 An answer that sets a value adds it to the plan: the confirmation lists the line, and
@@ -172,10 +200,16 @@ entries:
 
 - **Healthy now:** the findings its repairs fixed (a repair whose finding still warns
   is not counted), and the findings that were not OK before and are now.
-- **Still needs you:** every finding and fix that is still not OK, each with one
-  `./start.sh` command: the first step its advice names (`./start.sh check --fix` when
-  the repair comes before a restart, `./start.sh logs <service>` for a service that
-  keeps restarting), else `./start.sh check` once its advice is followed.
+- **Still needs you:** every finding and fix that is still not OK, each with its next
+  step: the first `./start.sh` command its advice names (`./start.sh logs <service>`
+  for a service that keeps restarting or does not run), else `./start.sh check` once
+  its advice is followed. After a run that was not declined, `./start.sh check --fix`
+  is never the step for what that run left: the repair ran and did not clear it, or
+  there is none for this form of it (a proxy outside the generated block, a redis
+  command Composer cannot read, an entry the grant could not change). The step by hand
+  is named instead: the finding's own (`remove docker-socket-proxy … by hand`, the
+  host `chmod`), else its section here. A declined run still names `./start.sh check
+  --fix`.
 - **Skipped by your choice:** the questions you skipped.
 
 ## Findings
@@ -213,10 +247,22 @@ FAIL, the fix, and what `--fix` does.
 #### `compose-config`
 
 - **Checks:** that the Compose configuration resolves.
-- **OK** it does. **FAIL** it does not, and every check in the second group is
-  skipped.
+- **OK** it does. **FAIL** it does not, quoting the last lines of Compose's own error
+  (`line 72: mapping key "restart" already defined at line 70`), and every check in
+  the second group is skipped.
 - **Fix:** fix the reported YAML, interpolation or network error; missing variables
   are reported separately ([`env-vars`](#env-vars)).
+- **`--fix`:** nothing.
+
+#### `project-name`
+
+- **Checks:** that the active Compose files (`-f`, `-d`) agree on the top-level
+  `name:`. No finding when they do, or when at most one names the project.
+- **FAIL** they differ: Compose takes the last one, so `./start.sh -d` with a
+  `compose.dev.yml` that keeps another name would start a second project with its own
+  containers, fresh volumes and a second resident pair.
+- **Fix:** give every Compose file the deployed project's `name:`, or drop `name:`
+  from the override.
 - **`--fix`:** nothing.
 
 #### `secrets`
@@ -233,10 +279,15 @@ FAIL, the fix, and what `--fix` does.
   Compose file's built-in defaults, a placeholder secret key and default database
   credentials. The message lists the keys, credentials first. Also FAIL: unreadable,
   unparseable or empty (an empty file falls through to Compose defaults), or
-  unreadable by the executor.
+  unreadable by the executor. Also WARN: the file found shadows another candidate
+  (a stray project-root `.env` beside `.secrets/.env`: only the first is read, so the
+  deploy runs on the Compose defaults for what it lacks), named without reading
+  either; or its group or other users on the host may read or write it (any mode bit
+  beyond `0600`; only the mode is read).
 - **Fix:** restore the secrets file from your backup, or supply the values through the
   environment; for an unreadable file, the `sudo setfacl` commands for the mapped host
-  UID ([when the executor cannot read the file](deploying.md#when-the-executor-cannot-read-the-file)).
+  UID ([when the executor cannot read the file](deploying.md#when-the-executor-cannot-read-the-file));
+  for a loose mode, `chmod 600` on it (the executor reads it through `DAC_OVERRIDE`).
 - **`--fix`:** nothing to the file. The resident-block repair gives `composer-executor`
   the `DAC_OVERRIDE` capability it needs to read it
   ([executor hardening](executor-hardening.md#capabilities)).
@@ -264,13 +315,20 @@ FAIL, the fix, and what `--fix` does.
   channel tag ("not pinned yet": the next Composer update pins it); or no Composer
   image is declared in the generated block. A `COMPOSER_SELF_IMAGE` pin is noted.
 - **WARN** the block names another image than the pin, or than the channel tag when
-  there is no pin; the block names the pin but a running container of the pair was
+  there is no pin (the message names the block's image, then what each running
+  container of the pair runs and its Composer version); the block names the pin but a running container of the pair was
   created from another image (not recreated since the pin moved); the pin is a beta
-  while the channel is stable; or the pin names a release from before 1.11.0b1, which
-  cannot run a pinned stack.
+  while the channel is stable; the pin names a release from before 1.11.0b1, which
+  cannot run a pinned stack; or `.composer-image` is present but its first non-empty
+  line is not a whole pinned reference, so the wrappers and Composer read it as no
+  lock and the deployer runs the channel tag. **FAIL** the lock's tag and digest disagree: the image
+  the digest names (when it is on this host) carries another Composer release than the
+  tag says, read from its release-manifest label, else `/app/VERSION`.
 - **Fix:** `composer check --fix` for a block that does not follow the pin;
   `./start.sh` for a pair still running the old image (it recreates both on the pin);
-  `composer check --stable` for a beta pin on the stable channel; `--beta` or
+  `composer check --stable` for a beta pin on the stable channel; `./start.sh agent
+  update` for an unreadable `.composer-image` (or move the file into `.xclude/` to
+  follow the channel tag); `--beta` or
   `--stable` to move both halves to a channel. For a pin from before 1.11.0b1:
   `docker pull debeski/composer:beta`, then
   `COMPOSER_SELF_IMAGE=debeski/composer:beta ./start.sh check --beta -y`
@@ -280,7 +338,8 @@ FAIL, the fix, and what `--fix` does.
   `.xclude/dlux-agent-bootstrap/<UTC>/`), then [recreates the pair](#after-the-repairs).
   It never resolves a new pin, so `check` stays offline. It preserves the channel, and
   it never pins the block to a release from before 1.11.0b1 (`fix:composer-pin` warns
-  instead). See [channels](updates.md#channels).
+  instead) or to a lock whose tag and digest disagree (`fix:composer-pin` FAILs and
+  changes nothing). See [channels](updates.md#channels).
 
 ### Stack
 
@@ -370,7 +429,11 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   itself; other files are stamped but compose is not; or compose is stamped in a
   comment only, without the `DLUX_STACK_SCHEMA` value DjangoLux reads. **FAIL**
   compose's own stamps disagree, the trace of a restamp that changed only some of
-  them: DjangoLux runs the stack as the schema `DLUX_STACK_SCHEMA` names.
+  them: DjangoLux runs the stack as the schema `DLUX_STACK_SCHEMA` names. Also FAIL:
+  a `DLUX_STACK_SCHEMA` value in compose that is not a plain schema number from 1 to
+  the newest Composer knows (`"99"`, `"0"`, `"5x"`, `"-1"`, empty), named as written.
+  Such a value counts as no schema for the inline-update floor, and `--fix` adds no
+  `worker` and restamps nothing until it is set by hand.
 - **Fix:** for a file at odds with itself, `check --fix`, which names the schema the
   stack's layout follows; otherwise bring the older files up to date using
   DjangoLux's `docs/stack-schema.md`, then restamp, or add `DLUX_STACK_SCHEMA: "<n>"`
@@ -379,31 +442,73 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   A file whose own stamps disagree is restamped to the schema the stack's layout
   follows, last of all repairs. Details: [stamps](stack-migrations.md#stamps).
 
+#### `line-endings`
+
+- **Checks:** whether a Compose file, `compose.dev.yml`, `.proxy/Caddyfile` or
+  `.proxy/default.conf.template` mixes LF, CRLF and CR-only line endings. No finding
+  otherwise.
+- **WARN** it does: a rewrite writes one ending for the whole file, so the operator's
+  diff would show every line of the other kind as changed.
+- **Fix:** convert the file to one style by hand (`dos2unix`, `unix2dos`, or the
+  editor's line-ending setting), then `check --fix`.
+- **`--fix`:** changes no stack file while one is mixed (a `line-endings` WARN says
+  so); the grant, the page publish, the Redis recovery and the secrets answers still
+  run.
+
+#### `proxy-config`
+
+- **Checks:** for `caddy` and `nginx`, that every file they bind-mount from `.proxy/`
+  or `.nginx/` exists, then that the proxy accepts `.proxy/Caddyfile`,
+  `.proxy/default.conf.template` and `.nginx/nginx.conf`: `caddy validate` or
+  `nginx -t` in the proxy's own image, as the repairs validate
+  ([guarded](#how---fix-is-guarded)), with `--pull never`. No finding without either
+  proxy.
+- **OK** present and accepted, or present and not validated because the image is not
+  on this host (named). **FAIL** a mounted proxy file is missing: Docker creates an
+  empty directory in its place and the proxy does not start on the next deploy; or the
+  proxy rejects the file (a truncated Caddyfile, for example), quoting its words.
+- **Fix:** put the file back (originals Composer replaced are under
+  `.xclude/composer-check/`; a fresh `python -m dlux startproject` has the generated
+  one), then `./start.sh restart caddy` (or `nginx`).
+- **`--fix`:** nothing.
+
 #### `maintenance-page`
 
 - **Checks:** how the proxy serves the maintenance page, and whether the agent has
   published it. No finding without `composer-agent`.
-- **OK** the published page is served (Composer's, or the project's override).
+- **OK** the published page is served (Composer's, or the project's override); or
+  `composer-agent` is not running, since it publishes the page when it starts.
   **WARN** the legacy bind-mounted `.proxy/maintenance.html` (schema 2); or the page is
   not published on the runtime volume; or `.proxy/maintenance/` exists but the
   published page lacks the `.custom` marker.
 - **`--fix`:** migrates a legacy stack (needs resident agent 1.7+), or publishes the
-  page through the agent. Details: [maintenance page](maintenance-page.md).
+  page through the agent. While `composer-agent` is not running (a stopped or
+  never-started stack), `fix:maintenance-page` is a WARN: `./start.sh` starts it, and
+  it publishes the page; a legacy stack then needs one more `check --fix`. Details:
+  [maintenance page](maintenance-page.md).
 
 #### `stored-files`
 
 - **Checks:** that the proxy does not serve private `/media/` files without
-  DjangoLux's check.
-- **OK** no `/media/` route, or private. **WARN** custom `/media/` rules. **FAIL**
-  (security) the legacy public `/media/` route.
+  DjangoLux's check, and serves every stored file so an upload never runs as the
+  site: `nosniff`, the sandboxing `Content-Security-Policy` and
+  `Content-Disposition: attachment` on the `/media/` routes, and the maintenance
+  page's `Content-Security-Policy`.
+- **OK** no `/media/` route, or private with every header. **WARN** custom `/media/`
+  rules, or only the maintenance page's CSP missing. **FAIL** (security) the legacy
+  public `/media/` route, or a private proxy file missing a `/media/` header; the
+  message names each missing header and file.
 - **Fix:** on DjangoLux 1.15.3+, `check --fix` (stack schema 4). On an older one, the
   way there, worked out from the release data: `./start.sh dlux update --version X`
   with X the newest release this stack still takes inline, or, when none reaches
   1.15.3, a project image on 1.15.3 or later; then `check --fix`
   ([the way out of an old stack](stack-migrations.md#the-way-out-of-an-old-stack)).
 - **`--fix`:** rewrites an unmodified generated proxy, then re-checks; refuses on
-  DjangoLux older than 1.15.3, naming the same way there. Details:
-  [stored files](proxy.md#stored-files).
+  DjangoLux older than 1.15.3, naming the same way there. Adds missing serving
+  headers to a generated schema 4 proxy in place on any DjangoLux, and leaves a
+  route with its own serving headers to a human. Details:
+  [stored files](proxy.md#stored-files) and
+  [how stored files are served](proxy.md#how-stored-files-are-served).
 
 #### `fetch-metadata`
 
@@ -464,8 +569,9 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 #### `update-policy`
 
 - **Checks:** which update requests the deployment allows (`DLUX_UPDATE_POLICY`
-  in the secrets file), and that the resolved stack passes it to `web`, `worker`,
-  `composer-agent` and `composer-executor`.
+  in the secrets file), and that the resolved stack passes it to those of `web`,
+  `worker`, `composer-agent` and `composer-executor` it has; the messages name only
+  those.
 - **OK** names the policy. **WARN** a reader does not receive it (the resident pair
   cannot enforce it, or DjangoLux cannot show it); an unknown value, which counts
   as `none`.
@@ -477,6 +583,33 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   ([questions](#questions-at-a-terminal)). Details:
   [what the application may request](updates.md#what-the-application-may-request).
 
+#### `admin-pass`
+
+- **Checks:** the `ADMIN_PASS` the Compose files give the migrator, resolved as Compose
+  would (environment, secrets file, default). No finding when no Compose file reads it.
+- **OK** set. **WARN** empty or `admin`: DjangoLux's migrator then creates no `admin`
+  account, so a stack that has none starts with no account to sign in with. The
+  password is used only to create the first admin; an existing admin is never
+  changed, so a stack that already has one needs nothing.
+- **Fix:** set `ADMIN_PASS` in the secrets file and run `./start.sh`, or
+  `./start.sh run -m web createsuperuser`.
+- **`--fix`:** at a terminal it asks for the password ([questions](#questions-at-a-terminal)),
+  writes it and recreates the services that read it, so the migrator creates the
+  account. Elsewhere, nothing. The first `./start.sh` asks too
+  ([the first admin account](deploying.md#the-first-admin-account)).
+
+#### `postgres-password`
+
+- **Checks:** the `POSTGRES_PASSWORD` the Compose files use, resolved as Compose would.
+  No finding when no Compose file reads it.
+- **OK** another value. **WARN** the published default `admin_pass`, set in the secrets
+  file or applied as the Compose default because nothing sets it.
+- **Fix:** before the first start, a long random value in the secrets file. A database
+  already in use keeps the password it was created with: change it inside PostgreSQL
+  first (`ALTER USER … PASSWORD …`), then set the same value in the secrets file and
+  run `./start.sh`.
+- **`--fix`:** nothing; Composer does not rotate the database password.
+
 #### `redis-persistence`
 
 - **Checks:** how the resolved `redis` service keeps its data, from its command. No
@@ -487,7 +620,10 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   the append-only file half-written, and Redis then refuses to start and restarts in
   a loop ([`redis-aof-corrupt`](#redis-aof-corrupt)).
 - **Fix:** `check --fix`; at a terminal it asks first, and `n` keeps the append-only
-  file.
+  file. A command Composer cannot read (a YAML alias, a comment inside it) or a
+  `redis` service written in flow style is a `redis-persistence` WARN under the fixes,
+  and the summary names the edit by hand: `--appendonly no --save 60 1`, other flags
+  kept.
 - **`--fix`:** rewrites the `redis` command in the Compose file that sets it, in that
   file's own style (flow list, block list or string): `--appendonly no`, then
   `--save 60 1` unless the command already has a `--save`, `--appendfsync` dropped and
@@ -506,11 +642,21 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 - **Checks:** that the uid the app image runs as can use the data its services mount
   (top two levels; every entry with `--deep` or `--fix`). No finding without an app
   image.
-- **OK** usable. **WARN** a root image whose data is not ready for uid 10001; a named
-  `USER` instead of a numeric `uid:gid`; a scan error. **FAIL** a non-root image that
-  cannot use its data, or a missing mount.
+- **OK** usable. **WARN** a root image whose data is not ready for uid 10001; an app
+  image that is not on this host (its user cannot be read, so the message says so and
+  judges the data for uid 10001); a named `USER` instead of a numeric `uid:gid`; a scan
+  error. **FAIL** a non-root image that cannot use its data, or a missing mount, once an
+  app container exists. Before any app container exists (a stack that has not started
+  here), the entries it needs are named as OK: `./start.sh` grants them before the
+  first start ([before every start](app-permissions.md#before-every-start-of-the-app)),
+  even on volumes a proxy repair's recreate created meanwhile.
 - **`--fix`:** adds the group bits the app needs (only modes and groups change),
-  writes a manifest for `app-permissions revert`, then re-checks deep. Details:
+  writes a manifest for `app-permissions revert`, then re-checks deep. Once every app
+  container exists, a writable named volume that is still empty gets
+  `.composer-keep`, so Docker does not reset its root. App containers that stopped on
+  DjangoLux's refusal (exit 78, or looping on it) are restarted. An entry it cannot
+  change is named with its owner, mode, what it needs and the OS error, with the host
+  command to run (`sudo chmod g+rwX <path>`); the summary names that command. Details:
   [app data permissions](app-permissions.md).
 
 #### `task-worker`
@@ -520,9 +666,43 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 - **OK** `worker` present, or not needed yet (the reason is given), or the image the
   stack is set to run is on DjangoLux 1.16+ and present here: run `--fix` before
   deploying it. **FAIL** DjangoLux 1.16+ running and no `worker`: its tasks are
-  queued and never run, so scheduled backups and jobs stop.
+  queued and never run, so scheduled backups and jobs stop. No finding when `worker`
+  is present on a DjangoLux without `dlux_worker`: [`image-floor`](#image-floor)
+  reports it.
 - **`--fix`:** adds `worker` (stack schema 5), after the other migrations. Details:
   [schema 4 to 5](stack-migrations.md#schema-4-to-5-worker).
+
+#### `image-floor`
+
+- **Checks:** that the DjangoLux the stack runs (the active inline release, else the
+  image's) has what the layout of its files needs: the private `/media/` route
+  (stack schema 4) needs 1.15.3, the `worker` service (schema 5) needs 1.16.0. No
+  finding before schema 4, with custom `/media/` rules, or when the version cannot be
+  read.
+- **OK** it has. **FAIL** the files are newer than the image (an image rolled back
+  under files `check --fix` moved on): `worker` crash-loops on a DjangoLux without
+  `dlux_worker`, and the proxy refuses every private file. The message names each
+  unmet need.
+- **Fix:** deploy a project image on the DjangoLux named, or put back the stack files
+  that match this image (the originals are under `.xclude/composer-check/`).
+- **`--fix`:** nothing.
+
+#### `scaffold-drift`
+
+- **Checks:** what a stack walked forward by `check --fix` still lacks from the current
+  DjangoLux scaffold in the files `check --fix` does not write: the Dockerfile's
+  preparation of each writable app mount point (`chmod g+rwX`), `umask 0002` and
+  `python -m dlux.mount_access gate` in `entrypoint.sh`, a `manage.py` that resolves
+  the active inline release (`dlux.updater.supervisor.resolve_release`, so a command
+  run outside the runtime supervisor uses the DjangoLux the site runs), and a `db`
+  service that merges the shared `x-environment` block (the database container then
+  receives the app's secrets). No finding without a Dockerfile or `entrypoint.sh` in the project
+  folder (a deploy folder of a pulled image).
+- **OK** none missing. **WARN** names each gap, an operator mount point the
+  Dockerfile does not prepare included (`/app/exports`).
+- **Fix:** copy the missing lines from a fresh `python -m dlux startproject` by hand,
+  then rebuild the project image.
+- **`--fix`:** nothing: these are the project's own files.
 
 #### `celery`
 
@@ -546,12 +726,18 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
 
 - **Checks:** the stack's containers (`docker compose ps --all`, with each one's
   restart count from `docker inspect`). No finding when Docker reports none.
-- **OK** nothing restarting or unhealthy. **WARN** a service is unhealthy. **FAIL** a
-  service is crash-looping: restarting now, or restarted 3+ times and started less
-  than 2 minutes ago. The message gives the restart count and the last error line of
-  its log.
+- **OK** nothing restarting, unhealthy or down. **WARN** a service is unhealthy; or,
+  while the rest of the stack runs, `composer-executor` or `composer-agent` does not
+  run (updates, rollbacks and the Operations panel stop). **FAIL** a service is
+  crash-looping: restarting now, or restarted 3+ times and started less than 2
+  minutes ago, with the restart count and the last error line of its log (container
+  addresses shown as `<address>`); or, while
+  the rest of the stack runs, `web` or `worker` has no container, was created and
+  never started (its `pre_start` step failed), or has stopped (with its exit code). A
+  stack that is stopped as a whole is not a finding.
 - **Fix:** read the service's log (`./start.sh logs <service>`) and fix the cause;
-  for celery in an image without Celery, `check --fix` ([`celery`](#celery)).
+  for celery in an image without Celery, `check --fix` ([`celery`](#celery)); for a
+  stopped resident pair, `./start.sh`.
 - **`--fix`:** nothing for this finding; re-checked after the repairs.
 
 #### `redis-aof-corrupt`
@@ -571,8 +757,11 @@ Details: [topology migrations](stack-migrations.md#topology-migrations).
   volume: nothing is deleted. It switches Redis to snapshots
   ([`redis-persistence`](#redis-persistence)) and recreates `redis` even with
   `--no-recreate`, since it is down until then. Redis starts from its last snapshot,
-  or empty, so users sign in once more. When the files cannot be moved, `redis` is
-  still recreated on snapshots, which ignore them.
+  or empty, so users sign in once more. Composer moves no directory whose name it does
+  not expect (one with a space, for example). When the files cannot be moved, Redis
+  stays down: Redis 7 reads the append-only manifest at start even with
+  `--appendonly no`. The `fix:redis-aof-corrupt` FAIL then gives the `docker run …
+  mv` that moves the directory aside by hand, after which `./start.sh` starts it.
 
 #### `pending-recreate`
 

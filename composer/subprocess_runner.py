@@ -75,6 +75,7 @@ class SubprocessRunnerMixin:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 env=env,
                 **self._detached_child_kwargs(),
             )
@@ -141,6 +142,7 @@ class SubprocessRunnerMixin:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                errors="replace",
                 env=env,
                 bufsize=1,
                 **self._detached_child_kwargs(),

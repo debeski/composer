@@ -537,6 +537,25 @@ class AgentPairingTests(unittest.TestCase):
             self.assertEqual(status["composer_version"], agent.composer_version,
                              "the agent's own version is a separate fact")
 
+    def test_the_status_file_is_rewritten_at_least_every_heartbeat(self):
+        """R2-102: an unchanged status was never rewritten, so its age said nothing."""
+        from composer import agent as agent_module
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent = ComposerAgent(agent_args(Path(temp_dir)))
+            clock = [1000.0]
+            with patch.object(agent_module.time, "monotonic", side_effect=lambda: clock[0]):
+                agent.publish_agent_status()
+                first = json.loads(agent.agent_status_path.read_text())
+                self.assertEqual(first["heartbeat_seconds"], 60)
+                agent.agent_status_path.write_text("{}")
+                clock[0] += 30
+                agent.publish_agent_status()
+                self.assertEqual(agent.agent_status_path.read_text(), "{}", "unchanged within the heartbeat")
+                clock[0] += 31
+                agent.publish_agent_status()
+                self.assertEqual(json.loads(agent.agent_status_path.read_text())["heartbeat_seconds"], 60)
+
     def test_an_unknown_deployer_is_empty_not_guessed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             agent = ComposerAgent(agent_args(Path(temp_dir)))

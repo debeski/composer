@@ -9,8 +9,12 @@ it but cannot create, delete or rename anything; it reaches the data through gro
 
 - The image runs as root: **OK** when the data is ready for uid 10001, **WARN**
   when it is not (fixable at any time, because root ignores the bits).
+- The image is not on this host: its user cannot be read, so the finding says so
+  and judges the data for uid 10001, as for a root image.
 - The image runs as a non-root uid: **OK** when it can use its data, **FAIL** when
-  it cannot, because DjangoLux's entrypoint then refuses to start (exit 78).
+  it cannot, because DjangoLux's entrypoint then refuses to start (exit 78). While no
+  app container exists yet, what it cannot use is named as OK: the next `./start.sh`
+  grants it before the first start.
 
 A plain `check` looks at the top two levels of every mount; `--deep` and `--fix`
 walk everything. The mounts come from the merged compose config: every bind
@@ -38,9 +42,37 @@ services are every service built from the same `build:` section as `web`, so
 
 Nothing is moved, renamed or rewritten, links are never followed, the walk stays on
 each mount's filesystem, and a file with more than one hard link is reported, never
-changed. The walk runs in a short-lived container from Composer's own image with
-`--network none`, `no-new-privileges` and only `DAC_READ_SEARCH`, plus `FOWNER` and
-`CHOWN` when it grants.
+changed. The one file Composer adds is `.composer-keep` (`0664`, a line that says
+why) in a writable named volume that is still empty once the app's containers exist
+([empty volumes](#empty-volumes)). The walk runs in a short-lived container from
+Composer's own image with `--network none`, `no-new-privileges` and only
+`DAC_READ_SEARCH`, plus `FOWNER` and `CHOWN` when it grants. It carries the label
+`io.dlux.composer.app-permissions=<project>`; a walk container left `Created` or
+`Exited` by a deployer killed mid-walk is removed at the next walk.
+
+An entry the grant cannot change (a host folder on Docker Desktop, a read-only
+filesystem) is named with its owner, mode, what it needs and the OS error, with the
+command to run on the host: `sudo chmod g+rwX <path>` for a bind-mounted folder
+(`sudo chgrp 0 <path>` first when its group is neither 0 nor the app's). On a named
+volume it names the volume driver, since the walk already runs as root there.
+
+After a grant that changed something, app containers that stopped on DjangoLux's
+refusal are restarted: a container looping in Docker's restart backoff keeps its
+definition, so neither `up` nor `check --fix` would recreate it, and the health check
+would read the old loop. `check --fix` also starts the ones that exited 78.
+`docker restart` creates no container, so Docker does not refill a volume.
+
+## Empty volumes
+
+Docker fills a named volume from the image's mount point whenever it creates a
+container that mounts the volume while the volume is empty, and gives the volume's
+root that mount point's owner and mode again. On an image whose mount point is root
+`0755` (a plain `USER 10001:0` image, or an operator mount point such as
+`/app/exports` that the Dockerfile does not prepare) that takes back the grant at
+every create: `up` after an image update, a force-recreate, a `compose run`. A volume
+that holds one entry is never filled again, so a grant adds `.composer-keep` to each
+writable named volume still empty after Docker filled it, and the grant stays. Leave
+the file in place; `app-permissions revert` leaves it too.
 
 ## Undoing a grant
 
@@ -64,14 +96,22 @@ Composer reads the app image's `Config.User`:
   section, as `up --build` would), so the uid comes from the image about to run.
   This holds in development mode too: the stack's own build is built and read, and
   a `USER 10001:0` dev image gets its data granted before `up`, as in production;
-- for a non-root uid, when a named volume an app service mounts does not exist yet
-  (a fresh install), Compose creates the app services' containers without starting
-  them (`up --no-start --no-deps --no-recreate` for those services; an existing
-  container is left as it is). Docker fills each new volume
-  from the image and gives its root the owner and mode of the image's mount point,
-  which for a plain `USER 10001:0` image is root `0755`; the volumes carry Compose's
-  own labels. The grant then reaches them, and `up` starts the same containers;
+- for a non-root uid, when a named volume an app service mounts does not exist yet,
+  or an app service has no container yet (a fresh install, also after a `check` or
+  `check --fix` that left volumes behind), Compose creates the missing app
+  containers without starting them (`up --no-start --no-deps --no-recreate` for
+  those services; an existing container is left as it is). Docker fills each empty
+  volume from the image and gives its root the owner and mode of the image's mount
+  point, which for a plain `USER 10001:0` image is root `0755`; the volumes carry
+  Compose's own labels. The grant then reaches them, and `up` starts the same
+  containers;
 - for a non-root uid it scans and, when something is missing, grants access first;
+- when a writable named volume is still empty after that, the app containers `up`
+  would recreate (a changed definition or image) are recreated now without starting
+  (`up --no-start --no-deps`, Compose deciding as `up` does, so a current container
+  is left running), Docker fills or resets the volume, and a second grant adds
+  `.composer-keep` ([empty volumes](#empty-volumes)); `up` then only starts them;
+- app containers looping on the refusal are restarted;
 - when the image cannot be read or the grant fails, it reports `failed` and
   recreates nothing, so the running stack keeps serving;
 - a user name instead of a numeric `uid:gid` is refused, because Composer cannot

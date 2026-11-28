@@ -125,6 +125,12 @@ class RenderingMixin:
             end = "\n" if index < total_lines - 1 else ""
             print(f"\033[2K{line}", end=end)
 
+        if error_message:
+            # An error frame is the last one: end its line so the next output,
+            # and the shell prompt, start on their own.
+            self.last_render_line_count = 0
+            print("", flush=True)
+            return
         self.last_render_line_count = len(lines)
         print("", end="", flush=True)
 

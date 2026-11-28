@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 from typing import Set
@@ -25,9 +26,47 @@ class ConfigMixin:
 
             text = p.read_text()
             if m := re.search(r"BASE_URL:\s*(.+)", text):
-                self.app_url = m.group(1).strip(" '\"")
+                self.app_url = self.resolve_compose_value(m.group(1).strip(" '\"")) or self.app_url
             if m := re.search(r"DEBUG_STATUS:\s*['\"]?(true|false)['\"]?", text, re.I):
                 self.debug_mode = m.group(1).lower() == "true"
+
+    def resolve_compose_value(self, raw: str) -> str:
+        """``raw`` with its ``${VAR:-default}`` / ``${VAR-default}`` / ``${VAR}`` / ``$VAR``
+        references resolved the way Compose would: the environment, then the
+        secrets file ``./start.sh`` loads, then the reference's default. The
+        banner showed ``${BASE_URL:-http://localhost}`` as written (R2-126).
+        Only the referenced names are looked up; nothing is printed or kept.
+        """
+        values = None
+
+        def lookup(name: str):
+            nonlocal values
+            if name in os.environ:
+                return os.environ[name]
+            if values is None:
+                values = {}
+                for candidate in getattr(self, "plaintext_env_candidates", lambda: [])()[:1]:
+                    try:
+                        values = self.parse_env_file(candidate)
+                    except (OSError, ValueError):
+                        values = {}
+            return values.get(name)
+
+        def substitute(match) -> str:
+            name = match.group(1) or match.group(3)
+            op = match.group(2) or ""
+            value = lookup(name)
+            if op.startswith(":-"):
+                return value if value else op[2:]
+            if op.startswith("-"):
+                return value if value is not None else op[1:]
+            if op.startswith(":+"):
+                return op[2:] if value else ""
+            if op.startswith("+"):
+                return op[1:] if value is not None else ""
+            return value or ""
+
+        return _VAR_REF_RE.sub(substitute, _ESCAPED_DOLLAR_RE.sub("\x00", raw)).replace("\x00", "$").strip()
 
     def required_compose_vars(self) -> Set[str]:
         """Names of environment variables the active compose files reference and

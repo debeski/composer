@@ -16,7 +16,9 @@ copy of the secrets outlives their rotation.
 
 from __future__ import annotations
 
+import os
 import re
+import select
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -30,8 +32,66 @@ ASK_AGAIN = "./start.sh check --fix asks again"
 # Lifecycle fixes are what was done to the stack, not a finding made healthy.
 _LIFECYCLE = {"fix:recreate", "fix:recreate-resident", "fix:remove-services", "fix:secrets"}
 _START_SH = re.compile(r"'(\./start\.sh[^']*)'")
-_SERVICE_PROBLEM = re.compile(r"(?:^|; )([A-Za-z0-9_.-]+) (?:keeps restarting|is unhealthy)")
+_SERVICE_PROBLEM = re.compile(
+    r"(?:^|; )([A-Za-z0-9_.-]+) (?:keeps restarting|is unhealthy|never started|has stopped|has no container)"
+)
+_REPAIR = "./start.sh check --fix"
+_DOCS = "docs/check.md"
 _UNSAFE_VALUE = re.compile(r"[\r\n\"'#\\]")
+#: How long a question waits for an answer before it counts as skipped.
+QUESTION_TIMEOUT_ENV = "COMPOSER_QUESTION_TIMEOUT_SECONDS"
+DEFAULT_QUESTION_TIMEOUT = 600.0
+#: Words accepted for a one-letter answer.
+_ALIASES = {"yes": "y", "no": "n", "skip": SKIP}
+
+
+class QuestionTimeout(EOFError):
+    """Nobody answered in time: the terminal may be gone while its client still runs (R2-017)."""
+
+
+def question_timeout() -> float:
+    raw = os.environ.get(QUESTION_TIMEOUT_ENV, "").strip()
+    try:
+        value = float(raw) if raw else DEFAULT_QUESTION_TIMEOUT
+    except ValueError:
+        value = DEFAULT_QUESTION_TIMEOUT
+    return max(1.0, value)
+
+
+def timed_input(prompt: str = "", *, stdin=None, timeout: Optional[float] = None) -> str:
+    """``input()`` that gives up after ``question_timeout()`` seconds.
+
+    A terminal that goes away while ``docker run -t`` keeps running never sends
+    end of input, so a plain ``input()`` waited for good and held the operation
+    lock (R2-017, R2-078). Where stdin cannot be waited on (Windows consoles),
+    it is a plain ``input()``.
+    """
+    stream = sys.stdin if stdin is None else stdin
+    try:
+        fd = stream.fileno()
+        select.select([fd], [], [], 0)
+    except (AttributeError, ValueError, OSError, TypeError):
+        return input(prompt)
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    ready, _, _ = select.select([fd], [], [], question_timeout() if timeout is None else timeout)
+    if not ready:
+        raise QuestionTimeout()
+    line = stream.readline()
+    if not line:
+        raise EOFError()
+    return line.rstrip("\r\n")
+
+
+def _reader(reader):
+    return timed_input if reader is None or reader is input else reader
+
+
+def _gave_up(error: BaseException, out) -> None:
+    if isinstance(error, QuestionTimeout):
+        print(f"\n  No answer in {question_timeout():g}s: skipped, nothing changed.", file=out, flush=True)
+    else:
+        print("", file=out)
 
 
 def interactive(args, *, resident: bool = False, stdin=None) -> bool:
@@ -54,11 +114,13 @@ def ask(
     *,
     intro: Sequence[str] = (),
     skip: bool = True,
-    reader: Callable[[str], str] = input,
+    reader: Optional[Callable[[str], str]] = None,
     stream=None,
 ) -> Optional[str]:
-    """The key of the chosen option, ``default`` on Enter, None for a skip, end of input or three wrong answers."""
+    """The key of the chosen option, ``default`` on Enter, None for a skip, end of input, no answer
+    within ``question_timeout()`` or three wrong answers. ``yes``/``no`` answer ``y``/``n``."""
     out = stream or sys.stderr
+    reader = _reader(reader)
     keys = [key for key, _label in options]
     lines = ["", f"? {question}", *(f"  {line}" for line in intro)]
     lines += [f"  [{key}] {label}" for key, label in options]
@@ -68,11 +130,13 @@ def ask(
     for _attempt in range(3):
         try:
             answer = str(reader(f"  Choice [{default}]: ")).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("", file=out)
+        except (EOFError, KeyboardInterrupt) as error:
+            _gave_up(error, out)
             return None
         if not answer:
             return default
+        if answer not in keys and _ALIASES.get(answer) in keys + ([SKIP] if skip else []):
+            answer = _ALIASES[answer]
         if skip and answer == SKIP:
             return None
         if answer in keys:
@@ -81,14 +145,15 @@ def ask(
     return None
 
 
-def ask_text(prompt: str, check: Callable[[str], str], *, reader=input, stream=None) -> Optional[str]:
-    """A typed value that ``check`` accepts (it returns an error, or ``""``); None when left empty."""
+def ask_text(prompt: str, check: Callable[[str], str], *, reader=None, stream=None) -> Optional[str]:
+    """A typed value that ``check`` accepts (it returns an error, or ``""``); None when left empty or unanswered."""
     out = stream or sys.stderr
+    reader = _reader(reader)
     for _attempt in range(3):
         try:
             value = " ".join(str(reader(prompt)).split())
-        except (EOFError, KeyboardInterrupt):
-            print("", file=out)
+        except (EOFError, KeyboardInterrupt) as error:
+            _gave_up(error, out)
             return None
         if not value:
             return None
@@ -99,7 +164,7 @@ def ask_text(prompt: str, check: Callable[[str], str], *, reader=input, stream=N
     return None
 
 
-def ask_front_proxy(*, reader=input, stream=None) -> Optional[str]:
+def ask_front_proxy(*, reader=None, stream=None) -> Optional[str]:
     """The ``DLUX_FRONT_PROXY`` value for the operator's answer, or None when skipped."""
     from . import front_proxy
 
@@ -136,7 +201,7 @@ def ask_front_proxy(*, reader=input, stream=None) -> Optional[str]:
     return None
 
 
-def ask_update_policy(current: str, *, reader=input, stream=None) -> Optional[str]:
+def ask_update_policy(current: str, *, reader=None, stream=None) -> Optional[str]:
     """The ``DLUX_UPDATE_POLICY`` value for the operator's answer (default: the policy in force), or None."""
     from . import update_policy
 
@@ -158,7 +223,7 @@ def ask_update_policy(current: str, *, reader=input, stream=None) -> Optional[st
     return by_key.get(choice) if choice else None
 
 
-def ask_redis(*, reader=input, stream=None) -> bool:
+def ask_redis(*, reader=None, stream=None) -> bool:
     """True to switch Redis to snapshots (the default), False to keep its append-only file."""
     choice = ask(
         "Redis keeps an append-only file, which a hard stop can leave half-written. Switch it to snapshots?",
@@ -172,6 +237,66 @@ def ask_redis(*, reader=input, stream=None) -> bool:
         stream=stream,
     )
     return choice == "y"
+
+
+ADMIN_KEY = "ADMIN_PASS"
+ADMIN_DEFAULT = "admin"
+ADMIN_WHY = (
+    "It is used only to create the first admin account (user 'admin'); an admin that already exists is "
+    "never changed."
+)
+ADMIN_MIN_LENGTH = 8
+
+
+def admin_pass_unset(value: Optional[str]) -> bool:
+    """True for an ``ADMIN_PASS`` with which DjangoLux's migrator creates no admin: empty or ``admin``."""
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return not text or text == ADMIN_DEFAULT
+
+
+def _hidden(prompt: str) -> str:
+    import getpass
+
+    return getpass.getpass(prompt)
+
+
+def ask_admin_pass(*, reader: Callable[[str], str] = _hidden, stream=None) -> Optional[str]:
+    """A new ``ADMIN_PASS``, typed twice without echo; None on Enter, end of input or three failed tries.
+
+    The value is never printed: not in the question, an error or the summary.
+    """
+    out = stream or sys.stderr
+    print("\n".join([
+        "",
+        "? The admin account has no password yet (ADMIN_PASS is empty or 'admin'), so none will be created.",
+        f"  {ADMIN_WHY}",
+        "  Type one (it is not shown), or press Enter to skip.",
+    ]), file=out, flush=True)
+    for _attempt in range(3):
+        try:
+            first = str(reader("  Admin password: "))
+            if not first:
+                return None
+            problem = ""
+            if len(first) < ADMIN_MIN_LENGTH:
+                problem = f"Use at least {ADMIN_MIN_LENGTH} characters."
+            elif first.strip() != first or first == ADMIN_DEFAULT:
+                problem = "Use a password without leading or trailing spaces, other than 'admin'."
+            elif _UNSAFE_VALUE.search(first):
+                problem = "Use a password without quotes, '#', backslashes or line breaks (the secrets file keeps them)."
+            if problem:
+                print(f"  {problem}", file=out)
+                continue
+            second = str(reader("  The same again: "))
+        except (EOFError, KeyboardInterrupt):
+            print("", file=out)
+            return None
+        if second == first:
+            return first
+        print("  The two entries differ.", file=out)
+    return None
 
 
 def secret_values(root) -> Optional[Dict[str, str]]:
@@ -203,11 +328,54 @@ def set_secret_values(root, values: Mapping[str, str]) -> Path:
     quote, ``#``, a backslash or a line break is refused: ``./start.sh`` hands
     the file to Docker's ``--env-file``, which keeps them as part of the value.
     """
-    from .stack_schema import line_ending
+    path = secrets_file(root)
+    if path is None:
+        raise OSError("There is no secrets file (.env, secrets/.env or .secrets/.env) to write to.")
+    text = _with_values(path, values)
+    write_updates(Path(root).resolve(), {path: text}, Path(root).resolve() / ".xclude" / "composer-check")
+    return path
+
+
+def set_secret_atomically(root, values: Mapping[str, str]) -> Path:
+    """Set ``KEY=value`` lines as ``set_secret_values`` does, through a new file renamed over the old one.
+
+    For a password: a crash leaves the old file or the new one, never half of
+    either. The new file is created 0600 (never readable by anyone else, even
+    for a moment), takes the old file's owner and group where this process may
+    give them, and stays 0600. Nothing is copied or logged.
+    """
+    import os
+    import tempfile
 
     path = secrets_file(root)
     if path is None:
         raise OSError("There is no secrets file (.env, secrets/.env or .secrets/.env) to write to.")
+    text = _with_values(path, values)
+    before = path.stat()
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.composer-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            try:
+                os.fchown(stream.fileno(), before.st_uid, before.st_gid)
+            except OSError:
+                pass
+            stream.write(text.encode("utf-8", "surrogateescape"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        # The half-written copy holds the secrets: it is not kept.
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+        raise
+    return path
+
+
+def _with_values(path: Path, values: Mapping[str, str]) -> str:
+    """The secrets file's text with ``values`` set; refuses a value ``--env-file`` would misread."""
+    from .stack_schema import line_ending
+
     for key, value in values.items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or _UNSAFE_VALUE.search(str(value)):
             raise ValueError(f"Composer does not write {key} with that value; set it by hand.")
@@ -225,8 +393,7 @@ def set_secret_values(root, values: Mapping[str, str]) -> Path:
         body = line.rstrip("\r\n")
         prefix = pattern.match(line).group(1)
         lines[index] = f"{prefix}{key}={value}{line[len(body):] or ''}"
-    write_updates(Path(root).resolve(), {path: "".join(lines)}, Path(root).resolve() / ".xclude" / "composer-check")
-    return path
+    return "".join(lines)
 
 
 # --- The end-of-run summary -------------------------------------------------------
@@ -251,15 +418,46 @@ def next_command(entry: Mapping[str, Any]) -> str:
     return "./start.sh check"
 
 
+def next_step(entry: Mapping[str, Any], *, ran: bool, manual: str = "") -> str:
+    """The operator's next step for ``entry`` once a ``--fix`` run is over.
+
+    After a run that was not declined, sending the operator back to ``check
+    --fix`` for a finding it left goes in a circle: the repair ran and did not
+    clear it, or there is none for this form of it. The step by hand is named
+    instead: the finding's own ``manual``, or its repair's, or the doc section.
+    A finding whose only advice is ``check`` gets its step by hand too.
+    """
+    command = next_command(entry)
+    manual = str(entry.get("manual") or manual or "")
+    if command == "./start.sh check" and manual:
+        return manual
+    if not ran or command != _REPAIR:
+        return command
+    if manual:
+        return manual
+    name = str(entry.get("name") or "")
+    name = name[len("fix:"):] if name.startswith("fix:") else name
+    return f"by hand, as {_DOCS} describes for {name}: check --fix cannot repair it"
+
+
 def summary(
     results: Sequence[Mapping[str, Any]],
     fixes: Sequence[Mapping[str, Any]],
     skipped: Sequence[Mapping[str, str]],
     *,
     before: Optional[Mapping[str, str]] = None,
+    declined: bool = False,
 ) -> Dict[str, List]:
-    """``{"healthy": [name], "still": [(name, command)], "skipped": [(name, command)]}`` for a ``--fix`` run."""
+    """``{"healthy": [name], "still": [(name, command)], "skipped": [(name, command)]}`` for a ``--fix`` run.
+
+    ``declined``: the operator answered no, so ``check --fix`` is still the way forward.
+    """
     before = before or {}
+    ran = not declined
+    manuals = {
+        str(entry.get("name") or ""): str(entry.get("manual") or "")
+        for entry in fixes if entry.get("manual")
+    }
     now = {entry.get("name"): entry.get("level") for entry in results}
     # A repair counts once its finding reads OK (or has gone); one that still warns still needs you.
     healthy = [
@@ -277,11 +475,12 @@ def summary(
     for entry in results:
         name = str(entry.get("name") or "")
         if entry.get("level") != "ok" and name not in healthy and name not in skipped_names:
-            still.setdefault(name, next_command(entry))
+            manual = manuals.get(f"fix:{name}") or manuals.get(name, "")
+            still.setdefault(name, next_step(entry, ran=ran, manual=manual))
     for entry in fixes:
         name = str(entry.get("name") or "")
         if entry.get("level") != "ok" and name[len("fix:"):] not in skipped_names:
-            still.setdefault(name, next_command(entry))
+            still.setdefault(name, next_step(entry, ran=ran))
     return {
         "healthy": healthy,
         "still": list(still.items()),

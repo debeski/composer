@@ -24,8 +24,13 @@ from .service_selection import (
 from .version import read_composer_version
 from .watcher import WatchRuntime
 
+#: How often the agent puts the published maintenance page back as it should be.
+MAINTENANCE_PAGE_RECHECK_SECONDS = 10.0
+
 # DjangoLux's snapshot.json is the largest document the agent reads off the
 # shared volume; anything bigger is not a snapshot it wrote.
+#: agent-status.json is rewritten at least this often while the agent runs (R2-102).
+STATUS_HEARTBEAT_SECONDS = 60
 MAX_SNAPSHOT_BYTES = 256 * 1024
 
 
@@ -78,6 +83,7 @@ class ComposerAgent:
         self.agent_status_path = self.bridge_dir / "agent-status.json"
         self.watch = WatchRuntime(args)
         self._relay = None
+        self._next_page_check = 0.0
         self.args.log_file = self.watch.log_file
         self.client = self._build_client(self.control_url)
         self.stop_event = threading.Event()
@@ -269,6 +275,10 @@ class ComposerAgent:
         status = {
             "schema_version": 1,
             "observed_at": utc_now(),
+            # The file is rewritten at least this often while the agent runs, so its
+            # age says whether the agent is alive (DjangoLux's doctor: older than 3x
+            # is stale). Unchanged content alone used to leave it untouched for days.
+            "heartbeat_seconds": STATUS_HEARTBEAT_SECONDS,
             "enrolled": enrolled,
             "control_url": self.control_url,
             "agent_id": credentials.get("agent_id") if credentials else "",
@@ -302,10 +312,14 @@ class ComposerAgent:
         digest = hashlib.sha256(
             json.dumps({k: v for k, v in status.items() if k != "observed_at"}, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        if not force and self.store.get_meta("agent_status_digest") == digest:
+        now = time.monotonic()
+        written = getattr(self, "_status_written_at", None)
+        fresh = written is not None and now - written < STATUS_HEARTBEAT_SECONDS
+        if not force and fresh and self.store.get_meta("agent_status_digest") == digest:
             return
         self.store.set_meta("agent_status_digest", digest)
         self._atomic_json(self.agent_status_path, status)
+        self._status_written_at = now
 
     def _atomic_json(self, path: Path, payload: Dict[str, Any]):
         safe_files.atomic_write_json(path, payload)
@@ -746,7 +760,12 @@ class ComposerAgent:
             )
         self._relay.answer()
 
+    def maybe_publish_maintenance_page(self) -> None:
+        if time.monotonic() >= getattr(self, "_next_page_check", 0.0):
+            self.publish_maintenance_page()
+
     def run_once(self):
+        self.maybe_publish_maintenance_page()
         self.watch.apply_check_policy()
         self.watch.maybe_answer_check_request()
         self.watch.maybe_answer_ops_request()
@@ -766,11 +785,15 @@ class ComposerAgent:
     def publish_maintenance_page(self) -> None:
         """Put this image's maintenance page on the runtime volume for the proxy.
 
-        On every start, so `agent update` refreshes it; a project override
-        (`.custom` marker) is left alone. Failure must not stop the agent.
+        On every start, so `agent update` refreshes it, and again every few
+        seconds (`maybe_publish_maintenance_page`), so a page an app service
+        changed on the shared volume is put back. Failure must not stop the agent.
         """
         from . import maintenance_page
 
+        self._next_page_check = time.monotonic() + MAINTENANCE_PAGE_RECHECK_SECONDS
+        if not Path(self.watch.runtime_root).is_dir():
+            return  # no runtime volume here: nothing for the proxy to serve
         try:
             if maintenance_page.publish(self.watch.runtime_root):
                 print("✔ maintenance page published", flush=True)

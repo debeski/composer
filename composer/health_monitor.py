@@ -10,6 +10,9 @@ HEALTH_TIMEOUT = 180
 POLL_INTERVAL = 0.5
 SETTLE_ENV = "COMPOSER_HEALTH_SETTLE_SECONDS"
 DEFAULT_SETTLE_SECONDS = 10.0
+CONFIRM_ENV = "COMPOSER_HEALTH_CONFIRM_SECONDS"
+DEFAULT_CONFIRM_SECONDS = 30.0
+CONFIRM_POLL_INTERVAL = 1.0
 
 _STARTED_AT = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d)?$")
 
@@ -22,6 +25,20 @@ def settle_seconds() -> float:
     except ValueError:
         value = DEFAULT_SETTLE_SECONDS
     return max(0.0, value)
+
+
+def confirm_seconds() -> float:
+    """How long every container must have been up, without a restart, when the deploy ends.
+
+    Never shorter than the settle window. A container that crashes every 25 s
+    passed a 10 s settle window and the deploy reported it healthy (R2-031).
+    """
+    raw = os.environ.get(CONFIRM_ENV, "").strip()
+    try:
+        value = float(raw) if raw else DEFAULT_CONFIRM_SECONDS
+    except ValueError:
+        value = DEFAULT_CONFIRM_SECONDS
+    return max(0.0, value, settle_seconds())
 
 
 def started_epoch(text: str) -> Optional[float]:
@@ -89,6 +106,7 @@ class HealthMonitorMixin:
             markers = self.container_restart_markers()
             if baseline is None:
                 baseline = {service: dict(containers) for service, containers in markers.items()}
+                self.health_baseline = baseline
             restarts = restarted_services(baseline, markers)
             for service in getattr(self, "restarting_services", ()) or ():
                 restarts.setdefault(service, 1)
@@ -152,6 +170,43 @@ class HealthMonitorMixin:
             details = f"{details}\n\n{diagnostics}".strip()
         return False, details or "Containers failed to become healthy before the timeout."
 
+    def confirm_stable(self) -> Tuple[bool, str]:
+        """After the post-start tasks: no restart since the first health poll, and every
+        container up ``confirm_seconds()``, waiting the rest of that window when needed.
+
+        The restart counts are compared with the ones the health check started
+        from, so a crash loop slower than the settle window still fails.
+        """
+        baseline = getattr(self, "health_baseline", None)
+        if baseline is None:
+            return True, ""
+        window = confirm_seconds()
+        deadline = time.time() + window + HEALTH_TIMEOUT
+        first_healthy: Dict[str, float] = {}
+        while True:
+            if not self.update_service_states():
+                return False, self.last_runtime_diagnostic or "Failed to inspect compose service state."
+            markers = self.container_restart_markers()
+            restarts = restarted_services(baseline, markers)
+            for service in getattr(self, "restarting_services", ()) or ():
+                restarts.setdefault(service, 1)
+            if restarts:
+                return False, self.unstable_detail(restarts, [], phase="after the post-start tasks")
+            dropped = [s for s in self.services if self.service_state.get(s) != SERVICE_HEALTHY]
+            if dropped:
+                return False, self.unstable_detail({}, dropped, phase="after the post-start tasks")
+            now = time.time()
+            for service in self.services:
+                first_healthy.setdefault(service, now)
+            young = [
+                service for service in self.services
+                if self.container_uptime(service, markers, first_healthy, now) < window
+            ]
+            if not young or now >= deadline:
+                return True, ""
+            self.emit_status("Health", f"Confirming {', '.join(young)} stay{'s' if len(young) == 1 else ''} up {window:g}s")
+            time.sleep(CONFIRM_POLL_INTERVAL)
+
     @staticmethod
     def container_uptime(
         service: str,
@@ -175,19 +230,20 @@ class HealthMonitorMixin:
             since = first_healthy.get(service, now)
         return now - since
 
-    def unstable_detail(self, restarts: Dict[str, int], dropped: List[str]) -> str:
+    def unstable_detail(self, restarts: Dict[str, int], dropped: List[str], phase: str = "") -> str:
         lines: List[str] = []
         for service in sorted(restarts):
             count = restarts[service]
             times = "once" if count == 1 else f"{count} times"
             lines.append(
-                f"{service} restarted {times} during the health check: it is crash-looping."
+                f"{service} restarted {times} {phase or 'during the health check'}: it is crash-looping."
             )
         for service in dropped:
             state = self.service_state.get(service, SERVICE_NOT_SEEN)
             lines.append(
-                f"{service} was healthy, then went to {state} before the "
-                f"{settle_seconds():g}s settle window ended."
+                f"{service} was healthy, then went to {state} " + (
+                    phase if phase else f"before the {settle_seconds():g}s settle window ended"
+                ) + "."
             )
         names = sorted(set(restarts) | set(dropped))
         diagnostics = self.collect_service_diagnostics(log_services=names)

@@ -168,7 +168,7 @@ class ExecutorHandlerTests(unittest.TestCase):
         self.assertEqual(result["state"], "succeeded")
         self.assertLessEqual(proto.encoded_size(result), proto.MAX_EXECUTOR_MESSAGE_BYTES)
         self.assertTrue(result["logs"], "the newest lines are kept")
-        self.assertTrue(ops.redact_text(self.compose.logs).endswith(result["logs"]))
+        self.assertTrue(self.compose.logs.rstrip().endswith(result["logs"]))
 
     def test_image_digests_only_for_the_images_the_deployment_checks(self):
         with patch.dict(os.environ, {"WEB_IMAGE": "acme/app:latest"}), \

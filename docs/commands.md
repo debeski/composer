@@ -50,11 +50,12 @@ the retired `-uo` and `update -o` forms.
 
 ### `restart`
 
-`composer restart [-f FILE] [-d] [--status-file PATH] [service]`
+`composer restart [-f FILE] [-d] [--status-file PATH] [service...]`
 
 Restarts running containers through `docker compose restart`, then waits for their
-health checks. Containers are preserved and post-start tasks are skipped. Pass a
-service to restart only that service. `composer -r ...` and `composer --restart ...`
+health checks. Containers are preserved and post-start tasks are skipped. Pass one
+or more services to restart only those, in one `docker compose restart` and in the
+order given (`./start.sh restart web worker`). `composer -r ...` and `composer --restart ...`
 are short leading aliases.
 
 ### `stop`
@@ -174,7 +175,7 @@ What each step does: [inline DjangoLux updates](updates.md#inline-djangolux-upda
 | --- | --- |
 | `composer dlux check [--version V] [--availability-file PATH] [-f FILE] [-d]` | publishes what is available to `state/package-available.json` |
 | `composer dlux update [--dry-run] [--version V] [--retry-quarantined] [--backup data\|full\|skip] [--restart-service SERVICE] [--status-file PATH] [-f FILE] [-d]` | applies the newest release on the channel, or `--version V` |
-| `composer dlux rollback [--backup data\|full\|skip] [--restart-service SERVICE] [--status-file PATH] [-f FILE] [-d]` | restores the previous release |
+| `composer dlux rollback [--version X] [--force] [--backup data\|full\|skip] [--restart-service SERVICE] [--status-file PATH] [-f FILE] [-d]` | restores the previous release, or the staged release (or image version) `--version` names; `--force` overrides a release in between that forbids older code on its schema; sets an unusable `state/active.json` aside |
 | `composer dlux channel [stable\|beta] [-f FILE] [-d]` | reports or requests DjangoLux's channel ([channels](updates.md#djangoluxs-channel)) |
 
 `dlux update` and `dlux rollback` exit `0` on success (and when a rollback has

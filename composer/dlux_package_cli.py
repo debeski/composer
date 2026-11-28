@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import safe_files
 from .dlux_package_update import apply_package_update, rollback_package_update
-from .dlux_runtime import DluxRuntime
+from .dlux_runtime import DluxRuntime, DluxRuntimeError
 from .service_selection import parse_service_list
 
 DEFAULT_RUNTIME_ROOT = "/opt/dlux-runtime"
@@ -39,7 +39,11 @@ def parse_dlux_update_args(argv, *, action="update"):
         prog=f"composer dlux {action}",
         description="Check, apply, or roll back an inline DjangoLux release on the runtime volume.",
     )
-    parser.add_argument("--version", default="", help="Target version (default: newest eligible)")
+    parser.add_argument(
+        "--version", default="",
+        help=("Target version (default: the newest eligible release; for rollback, the newest "
+              "staged release below the active one)"),
+    )
     parser.add_argument(
         "--runtime-root",
         default=os.environ.get("DLUX_UPDATE_RUNTIME_ROOT", DEFAULT_RUNTIME_ROOT),
@@ -93,6 +97,14 @@ def parse_dlux_update_args(argv, *, action="update"):
         )
     else:
         parser.set_defaults(dry_run=False, staged_wheel="", staged_sha256="", retry_quarantined=False)
+    if action == "rollback":
+        parser.add_argument(
+            "--force", action="store_true",
+            help=("Roll back although a staged release in between declares that older code "
+                  "cannot run on its database schema (restore a pre-update backup first)"),
+        )
+    else:
+        parser.set_defaults(force=False)
     parser.add_argument(
         # Set on the child composer this command starts when the runtime volume
         # is not mounted where it runs. Not for hand use: it turns the missing
@@ -283,7 +295,12 @@ def run_availability_check(args, runtime) -> int:
         print(f"✖ {payload['error']}", file=sys.stderr)
         print(f"  published to {path}", file=sys.stderr)
         return 1
-    installed, verified = installed_release(runtime.read_active() if runtime.exists() else {})
+    installed, verified, pointer_problem = _installed_or_problem(runtime)
+    if not installed:
+        # No usable pointer: the baked package is what runs, so compare with it
+        # and never offer an older release as an update.
+        installed = _baked_version_probe(args)()
+        verified = bool(installed)
     print(f"✔ {availability_summary(payload, installed, verified)} — published to {path}")
     if not payload.get("inline_safe") and payload.get("reason"):
         print(f"  ↳ {payload['reason']}")
@@ -296,7 +313,21 @@ def run_availability_check(args, runtime) -> int:
             "(retry one with 'dlux update --version V --retry-quarantined')",
             file=sys.stderr,
         )
+    if pointer_problem:
+        print(f"✖ {pointer_problem}", file=sys.stderr)
+        return 1
     return 0
+
+
+def _installed_or_problem(runtime):
+    """``(version, verified, problem)``: what is installed, or why the pointer is unusable."""
+    if not runtime.exists():
+        return "", False, ""
+    try:
+        version, verified = installed_release(runtime.read_active())
+    except DluxRuntimeError as exc:
+        return "", False, str(exc)
+    return version, verified, ""
 
 
 def _resolved_channel(runtime) -> str:
@@ -323,6 +354,21 @@ def _restart_services(args):
     return list(DEFAULT_RESTART_SERVICES), False
 
 
+def restarts_on_generation(service) -> bool:
+    """Does this compose service run DjangoLux's supervisor with its generation watch?"""
+    if not isinstance(service, dict):
+        return False
+    parts = []
+    for key in ("entrypoint", "command"):
+        value = service.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, list):
+            parts.extend(str(item) for item in value)
+    text = " ".join(parts)
+    return "dlux.updater.supervisor" in text and "--no-watch" not in text
+
+
 def _build_operations(args, services, *, only_defined=False):
     """Return `(restart, health_check)` bound to a configured launcher.
 
@@ -335,11 +381,15 @@ def _build_operations(args, services, *, only_defined=False):
     launcher.compose_file = args.file
     launcher.dev_mode = args.dev
     launcher.resolve_active_compose_files()
-    if only_defined:
-        config = launcher.compose_config_json() or {}
-        defined = config.get("services") if isinstance(config, dict) else None
-        if isinstance(defined, dict):
-            services = [name for name in services if name in defined]
+    config = launcher.compose_config_json() or {}
+    defined = config.get("services") if isinstance(config, dict) else None
+    if not isinstance(defined, dict):
+        defined = {}
+    if only_defined and defined:
+        services = [name for name in services if name in defined]
+    self_restarting = {
+        name for name in services if name != "web" and restarts_on_generation(defined.get(name))
+    }
     launcher.restart_mode = True
     launcher.restart_service = None
     launcher.restart_services = list(services)
@@ -364,7 +414,11 @@ def _build_operations(args, services, *, only_defined=False):
         ok, _out, err = launcher.recreate_containers(appliers)
         if not ok:
             return False, err or ""
-        rest = [name for name in services if name not in appliers]
+        # A task service under the watching supervisor restarts itself when the
+        # activation bumps the generation; a second restart from here stopped it
+        # again mid-task. web is still restarted: the health gate reads a fresh
+        # container.
+        rest = [name for name in services if name not in appliers and name not in self_restarting]
         if not rest:
             return True, ""
         launcher.restart_services = list(rest)
@@ -562,12 +616,13 @@ def run_dlux_update(args, argv=None) -> int:
         result = rollback_package_update(
             runtime, restart=restart, health_check=health_check, progress=progress,
             before_swap=before_swap, baked_version=_baked_version_probe(args),
+            target_version=args.version, force=args.force,
         )
     else:
         result = apply_package_update(
             runtime, restart=restart, health_check=health_check,
             target_version=args.version, progress=progress, before_swap=before_swap,
-            retry_quarantined=args.retry_quarantined,
+            retry_quarantined=args.retry_quarantined, baked_version=_baked_version_probe(args),
             **({"source": staged} if staged else {}),
         )
 
@@ -644,7 +699,9 @@ def run_dlux_channel(args, argv=None) -> int:
         return 0
 
     status = dlux_channel.describe(runtime.state_dir)
-    installed, verified = installed_release(runtime.read_active() if runtime.exists() else {})
+    installed, verified, pointer_problem = _installed_or_problem(runtime)
+    if pointer_problem:
+        print(f"✖ {pointer_problem}", file=sys.stderr)
     print(f"Channel:   {status['channel']}")
     if installed:
         note = "" if verified else " (baked into the image, as recorded; not verified)"
@@ -657,4 +714,4 @@ def run_dlux_channel(args, argv=None) -> int:
     if status["error"]:
         print(f"✖ {status['error']}", file=sys.stderr)
         return 1
-    return 0
+    return 1 if pointer_problem else 0

@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from . import safe_files
 from .app_permissions import SHARED_FILE_MODE
 from .versions import try_parse
 
@@ -72,6 +73,21 @@ class DluxRuntimeError(RuntimeError):
 
 class PackageOperationBusy(DluxRuntimeError):
     """Another update or rollback holds the runtime volume's operation lock."""
+
+
+#: What an operator runs to recover from an unusable ``active.json``.
+POINTER_RECOVERY_HINT = (
+    "Run './start.sh dlux rollback' to set it aside and return to the DjangoLux "
+    "release baked into the image."
+)
+
+
+class UnusablePointer(DluxRuntimeError):
+    """``state/active.json`` exists but cannot be used; ``set_aside_pointer`` recovers."""
+
+    def __init__(self, problem: str):
+        self.problem = problem
+        super().__init__(f"{problem} {POINTER_RECOVERY_HINT}")
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -151,7 +167,7 @@ class DluxRuntime:
 
     def read_generation(self) -> int:
         try:
-            return max(0, int(self.generation_file.read_text(encoding="utf-8").strip()))
+            return max(0, int(safe_files.read_bounded(self.generation_file, 64).decode("ascii").strip()))
         except (OSError, ValueError):
             return 0
 
@@ -169,18 +185,21 @@ class DluxRuntime:
         none. It does raise for a file that exists but is unusable, because
         silently treating that as "no release" would mask a broken swap.
         """
-        if not self.active_file.exists():
+        if not (self.active_file.exists() or self.active_file.is_symlink()):
             return {}
         try:
-            payload = json.loads(self.active_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise DluxRuntimeError("active.json is unreadable or not JSON.") from exc
+            payload = json.loads(safe_files.read_bounded(self.active_file).decode("utf-8"))
+        except (OSError, ValueError, RecursionError) as exc:
+            raise UnusablePointer("state/active.json is unreadable or not JSON.") from exc
         if not isinstance(payload, dict):
-            raise DluxRuntimeError("active.json is not a JSON object.")
+            raise UnusablePointer("state/active.json is not a JSON object.")
         source = payload.get("source")
         if source not in VALID_SOURCES:
-            raise DluxRuntimeError(f"active.json has an invalid source: {source!r}")
-        version = normalize_version(payload.get("version"))
+            raise UnusablePointer(f"state/active.json has an invalid source: {str(source)[:40]!r}.")
+        try:
+            version = normalize_version(payload.get("version"))
+        except DluxRuntimeError as exc:
+            raise UnusablePointer(f"state/active.json names {exc}.") from exc
         result = {
             "version": version,
             "source": source,
@@ -194,9 +213,29 @@ class DluxRuntime:
             except ValueError as exc:
                 raise DluxRuntimeError("active.json points outside releases/.") from exc
             if not release.is_dir():
-                raise DluxRuntimeError(f"active.json points at a missing release: {version}")
+                raise UnusablePointer(f"state/active.json points at a missing release: {version}.")
             result["path"] = str(release)
         return result
+
+    def set_aside_pointer(self) -> Optional[Path]:
+        """Move an unusable ``active.json`` aside, keep it, and restart on the image.
+
+        The file is renamed (never deleted) to ``active.json.unusable-<UTC time>``
+        and the generation bumped, so every supervisor serves the baked package.
+        DjangoLux reads a missing pointer under a new generation as a return to the
+        image: it records the baked release and writes no pointer back.
+        """
+        if not (self.active_file.exists() or self.active_file.is_symlink()):
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = self.state_dir / f"{self.active_file.name}.unusable-{stamp}"
+        suffix = 1
+        while target.exists() or target.is_symlink():
+            suffix += 1
+            target = self.state_dir / f"{self.active_file.name}.unusable-{stamp}-{suffix}"
+        os.replace(self.active_file, target)
+        self.bump_generation()
+        return target
 
     def write_active(self, version, *, source="volume", generation=None) -> dict:
         version = normalize_version(version)

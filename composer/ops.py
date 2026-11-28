@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from . import safe_files
+from . import request_files, safe_files
 from .agent_protocol import redact_text
 from .output_utils import strip_terminal_controls
 
@@ -47,11 +47,8 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 
 def _read_json(path: Path) -> dict:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    """A request or ack on the runtime volume: never blocks, never follows a link."""
+    return request_files.read_object(path)
 
 
 def _plain(value):
@@ -845,8 +842,9 @@ def _read_logs(launcher, service: str, lines: int) -> str:
     # `--no-color` drops Compose's own colours, not what a service printed (the
     # resident pair's progress lines erase and redraw with ESC[2K).
     out = strip_terminal_controls(out)
-    text = redact_text(out if service else _merge_logs(out, lines))
-    return text[-MAX_LOG_CHARS:] if len(text) > MAX_LOG_CHARS else text
+    # The newest lines are the point of a tail: trim from the front, after the
+    # whole text is redacted.
+    return redact_text(out if service else _merge_logs(out, lines), MAX_LOG_CHARS, keep="tail")
 
 
 def _tail_logs(runtime, request) -> dict:
@@ -862,7 +860,7 @@ def _tail_logs(runtime, request) -> dict:
     lines = max(1, min(LOG_LINES_MAX, lines))
     if executor_client.reads_via_executor():
         result = executor_client.read("logs_tail", {**_compose_target(runtime), "service": service, "lines": lines})
-        text = redact_text(strip_terminal_controls(result.get("logs")))[-MAX_LOG_CHARS:]
+        text = redact_text(strip_terminal_controls(result.get("logs")), MAX_LOG_CHARS, keep="tail")
     else:
         text = _read_logs(_stack_launcher(runtime), service, lines)
     return {"exit_code": 0, "service": service, "lines": lines, "logs": text, "findings": []}
@@ -895,14 +893,21 @@ class OpsResponder:
         self.request = state_dir / REQUEST_FILENAME
         self.ack = state_dir / ACK_FILENAME
         self.result = state_dir / RESULT_FILENAME
-        self.last_token: Optional[str] = str(_read_json(self.ack).get("token") or "") or None
+        ack = _read_json(self.ack)
+        self.last_token: Optional[str] = str(ack.get("token") or "") or None
+        # Once per token: a replay of any recent token is skipped, not only the last.
+        self.seen = request_files.RecentTokens.from_ack(ack)
 
     def pending(self) -> Optional[dict]:
         request = _read_json(self.request)
         token = str(request.get("token") or "").strip()
-        if not token or token == self.last_token:
+        if not token or token == self.last_token or token in self.seen:
             return None
         return request
+
+    def _remember(self, token: str) -> None:
+        self.seen.add(token)
+        self.last_token = token
 
     def answer(self) -> Optional[str]:
         """Perform a pending operation and publish its result. Never raises."""
@@ -936,7 +941,7 @@ class OpsResponder:
         if isinstance(result, dict) and result.pop("deferred", False) and not error:
             # The helper container owns this answer. Remember the token so the
             # loop does not start it twice while it runs.
-            self.last_token = token
+            self._remember(token)
             return token
         error = strip_terminal_controls(error)
         payload = {
@@ -957,9 +962,10 @@ class OpsResponder:
                 "exit_code": payload.get("exit_code", 0),
                 "error": error,
                 "finished_at": payload["finished_at"],
+                "recent_tokens": self.seen.persisted_with(token),
             })
         except OSError as exc:
             print(f"⚠ operation {operation} could not be published: {redact_text(str(exc))}", flush=True)
             return None
-        self.last_token = token
+        self._remember(token)
         return token

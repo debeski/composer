@@ -41,6 +41,7 @@ ALLOWED_WARNINGS = {
     "front-proxy": "DLUX_FRONT_PROXY is the operator's choice (owner, 1.16.1)",
     "registry-login": "depends on this machine's certificate store and the image name",
     "app-permissions": "warns until the scaffold image runs non-root",
+    "admin-pass": "ADMIN_PASS is the operator's choice: the scaffold leaves it empty (owner, 1.17.0b3)",
 }
 
 

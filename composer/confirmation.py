@@ -17,7 +17,7 @@ def confirm(
     consequences: Sequence[str] = (),
     *,
     assume_yes: bool = False,
-    reader=input,
+    reader=None,
     interactive: Optional[bool] = None,
     stream=None,
 ) -> bool:
@@ -51,9 +51,12 @@ def confirm(
         return False
 
     print("\n".join([f"⚠ {action}", *detail]), file=out, flush=True)
+    if reader is None or reader is input:
+        from .guidance import timed_input as reader
     try:
         answer = reader("   Type 'y' or 'yes' to continue: ")
     except (EOFError, KeyboardInterrupt):
+        # End of input, or no answer in time (a terminal gone while its client runs): not confirmed.
         print("", file=out)
         answer = ""
     if str(answer).strip().lower() in ACCEPTED_ANSWERS:

@@ -180,8 +180,52 @@ class CheckTests(unittest.TestCase):
         self.write(LEGACY_CADDY.replace("\t\trespond /media/dlux_backups/* 404\n",
                                         "\t\trespond /media/dlux_backups/* 404\n\t\trespond /media/receipts/* 404\n"))
         self.assertEqual(DockerComposeLauncher()._check_media_privacy()["level"], WARN)
-        self.write(media.migrate_caddyfile(LEGACY_CADDY))
+        self.write(media.harden(media.migrate_caddyfile(LEGACY_CADDY), "caddy"))
         self.assertEqual(DockerComposeLauncher()._check_media_privacy()["level"], OK)
+
+    def test_missing_serving_headers_are_a_security_failure_that_names_them(self):
+        self.write(SCHEMA_4_CADDY)
+        result = DockerComposeLauncher()._check_media_privacy()
+        self.assertEqual(result["level"], FAIL)
+        self.assertIn("SECURITY", result["message"])
+        for name in ("X-Content-Type-Options on /media/", "Content-Security-Policy on /media/",
+                     "Content-Disposition on /media/", "the maintenance page's Content-Security-Policy"):
+            self.assertIn(name, result["message"])
+        self.assertIn(".proxy/Caddyfile", result["message"])
+        self.assertIn("check --fix", result["fix"])
+
+    def test_headers_a_human_must_add_say_how(self):
+        self.write(SCHEMA_4_CADDY.replace(
+            '\t\t\t\theader Cache-Control "private, no-cache"\n',
+            '\t\t\t\theader Cache-Control "private, no-cache"\n\t\t\t\theader X-Content-Type-Options "nosniff"\n',
+        ))
+        result = DockerComposeLauncher()._check_media_privacy()
+        self.assertEqual(result["level"], FAIL)
+        self.assertNotIn("check --fix", result["fix"])
+        self.assertIn("dlux_media_headers", result["fix"])
+        self.assertIn("./start.sh restart caddy", result["fix"])
+
+    def test_only_the_maintenance_csp_missing_is_a_warning(self):
+        hardened = media.harden(SCHEMA_4_CADDY, "caddy")
+        self.write(hardened.replace(f'\t\t\theader Content-Security-Policy "{media.MAINTENANCE_CSP}"\n', "", 1))
+        result = DockerComposeLauncher()._check_media_privacy()
+        self.assertEqual(result["level"], WARN)
+        self.assertIn("maintenance page", result["message"])
+        self.write(hardened)
+        self.assertEqual(DockerComposeLauncher()._check_media_privacy()["level"], OK)
+
+    def test_fix_adds_the_headers_whatever_djangolux_runs(self):
+        self.write(SCHEMA_4_CADDY)
+        launcher = DockerComposeLauncher()
+        launcher.services = ["web", "caddy"]
+        outcome = {"files": [".proxy/Caddyfile"], "recreated": ["caddy"], "backup_root": "/x"}
+        with patch.object(launcher, "_running_dlux_version", side_effect=AssertionError("not needed")), \
+                patch("composer.media_migration.migrate", return_value=outcome) as migrate:
+            fixes = self._fix(launcher)
+        migrate.assert_called_once()
+        stored = [entry for entry in fixes if entry["name"] == "fix:stored-files"]
+        self.assertEqual(stored[0]["level"], OK)
+        self.assertIn("serving headers", stored[0]["message"])
 
     def _fix(self, launcher):
         args = SimpleNamespace(fix=True, yes=True, file="", dry_run=False, json=False)
@@ -219,7 +263,7 @@ class CheckTests(unittest.TestCase):
         launcher.services = ["web", "caddy"]
 
         def fix(args, results):
-            self.write(media.migrate_caddyfile(LEGACY_CADDY))
+            self.write(media.harden(media.migrate_caddyfile(LEGACY_CADDY), "caddy"))
             return [{"level": OK, "name": "fix:stored-files", "message": "Made stored files private."}]
 
         ok = {"level": OK, "name": "other", "message": ""}
@@ -278,3 +322,168 @@ class DjangoLuxScaffoldTests(unittest.TestCase):
         nginx_text = _without_fetch_metadata(nginx.read_text(encoding="utf-8"))
         self.assertIn(media.caddy_media_blocks("\t\t"), caddy_text)
         self.assertIn(media.nginx_media_blocks("    "), nginx_text)
+
+    def test_the_scaffold_serves_stored_files_with_the_same_headers(self):
+        caddyfile = DLUX_PROJECT / ".proxy" / "Caddyfile.tmpl"
+        nginx = DLUX_PROJECT / ".proxy" / "default.conf.template.tmpl"
+        if not caddyfile.is_file() or media.CADDY_SNIPPET not in caddyfile.read_text(encoding="utf-8"):
+            self.skipTest("No DjangoLux checkout with the stored-file serving headers alongside")
+        caddy_text = caddyfile.read_text(encoding="utf-8")
+        nginx_text = nginx.read_text(encoding="utf-8")
+        self.assertIn(media.caddy_media_snippet(), caddy_text)
+        self.assertIn(media.nginx_media_maps(), nginx_text)
+        self.assertEqual(media.serving_gaps(caddy_text, "caddy"), [])
+        self.assertEqual(media.serving_gaps(nginx_text, "nginx"), [])
+
+
+SCHEMA_4_CADDY = (Path(__file__).resolve().parent / "fixtures" / "schema-4-unhardened" / ".proxy" / "Caddyfile").read_text(
+    encoding="utf-8"
+)
+
+SCHEMA_4_NGINX = """# dlux stack schema 4
+map $http_x_forwarded_proto $forwarded_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+
+server {
+    listen 80;
+    error_page 502 503 504 =503 /dlux-maintenance.html;
+    set $web_upstream "web:8000";
+
+    location = /dlux-maintenance.html {
+        alias /opt/dlux-runtime/proxy/maintenance/index.html;
+        internal;
+    }
+
+    location ^~ /_dlux/maintenance/ {
+        alias /opt/dlux-runtime/proxy/maintenance/;
+        add_header Cache-Control "no-store";
+    }
+
+    location ^~ /media/dlux_backups/ {
+        return 404;
+    }
+
+    # Public media (branding, managed images and fonts, the project's public/
+    # folder). Keep in step with dlux.files.media.PUBLIC_MEDIA.
+    location ^~ /media/public/ { root /app; }
+    location ^~ /media/dlux/branding/ { root /app; }
+    location ^~ /media/dlux/assets/image/ { root /app; }
+    location ^~ /media/dlux/assets/font/ { root /app; }
+
+    # Every other stored file is private: the app decides who gets it before
+    # nginx sends it (403 when refused).
+    location /media/ {
+        if ($cross_site_request) { return 403; }
+        auth_request /_dlux_media_access;
+        root /app;
+        add_header Cache-Control "private, no-cache";
+    }
+
+    location = /_dlux_media_access {
+        internal;
+        proxy_pass http://$web_upstream/sys/files/media-access/;
+    }
+
+    location / {
+        proxy_pass http://$web_upstream;
+    }
+}
+"""
+
+ALL_GAPS = [media.NOSNIFF, media.MEDIA_CSP_HEADER, media.DISPOSITION, media.MAINTENANCE_GAP]
+
+
+class ServingHeaderTests(unittest.TestCase):
+    """Break-it R2-001 / R2-022: a schema 4 proxy served an uploaded page inline, and the maintenance page without a CSP."""
+
+    def test_a_schema_4_proxy_names_every_missing_header(self):
+        self.assertEqual(media.classify(SCHEMA_4_CADDY, "caddy"), media.PRIVATE)
+        self.assertEqual(media.serving_gaps(SCHEMA_4_CADDY, "caddy"), ALL_GAPS)
+        self.assertEqual(media.serving_gaps(SCHEMA_4_NGINX, "nginx"), ALL_GAPS)
+
+    def test_harden_closes_every_gap_and_is_idempotent(self):
+        for text, kind in ((SCHEMA_4_CADDY, "caddy"), (SCHEMA_4_NGINX, "nginx")):
+            with self.subTest(kind=kind):
+                hardened = media.harden(text, kind)
+                self.assertEqual(media.serving_gaps(hardened, kind), [])
+                self.assertEqual(media.harden(hardened, kind), hardened)
+                self.assertEqual(media.classify(hardened, kind), media.PRIVATE)
+
+    def test_caddy_gets_the_snippet_before_the_site_and_imports_in_both_routes(self):
+        hardened = media.harden(SCHEMA_4_CADDY, "caddy")
+        snippet = hardened.index(f"({media.CADDY_SNIPPET}) {{")
+        self.assertLess(snippet, hardened.index("{$CADDY_SITE_ADDRESS::80} {"))
+        self.assertGreater(snippet, hardened.index("trusted_proxies"))
+        self.assertEqual(hardened.count(f"import {media.CADDY_SNIPPET}\n"), 2)
+        self.assertEqual(hardened.count(f'header Content-Security-Policy "{media.MAINTENANCE_CSP}"'), 2)
+        self.assertIn(f'\t\t\t\theader Cache-Control "private, no-cache"\n\t\t\t\timport {media.CADDY_SNIPPET}\n'
+                      "\t\t\t\tfile_server\n", hardened)
+
+    def test_nginx_gets_the_maps_and_headers_in_every_media_location(self):
+        hardened = media.harden(SCHEMA_4_NGINX, "nginx")
+        self.assertLess(hardened.index(media.nginx_media_maps()), hardened.index("server {"))
+        self.assertIn(
+            "    location ^~ /media/public/ {\n        root /app;\n"
+            + "".join(f"    {line}\n" for line in media._NGINX_HEADER_LINES) + "    }\n",
+            hardened,
+        )
+        self.assertEqual(hardened.count('add_header X-Content-Type-Options "nosniff";'), 5)
+        self.assertIn(f'add_header Content-Security-Policy "{media.MAINTENANCE_CSP}" always;', hardened)
+        self.assertIn(f'add_header Content-Security-Policy "{media.MAINTENANCE_CSP}";', hardened)
+        self.assertNotIn("dlux_media_csp", hardened.split("location ^~ /media/dlux_backups/ {", 1)[1].split("}", 1)[0])
+
+    def test_a_legacy_proxy_is_migrated_straight_to_the_hardened_blocks(self):
+        caddy = media.harden(media.migrate_caddyfile(LEGACY_CADDY), "caddy")
+        nginx = media.harden(media.migrate_nginx(LEGACY_NGINX), "nginx")
+        self.assertIn(media.caddy_media_snippet(), caddy)
+        self.assertEqual(media.serving_gaps(caddy, "caddy"), [])
+        self.assertEqual(media.serving_gaps(nginx, "nginx"), [])
+
+    def test_a_route_with_its_own_serving_headers_is_left_for_a_human(self):
+        custom = SCHEMA_4_CADDY.replace(
+            '\t\t\t\theader Cache-Control "private, no-cache"\n',
+            '\t\t\t\theader Cache-Control "private, no-cache"\n\t\t\t\theader X-Content-Type-Options "nosniff"\n',
+        )
+        self.assertNotEqual(custom, SCHEMA_4_CADDY)
+        self.assertIn(media.MEDIA_CSP_HEADER, media.serving_gaps(custom, "caddy"))
+        with self.assertRaises(media.StackCleanupError):
+            media.harden(custom, "caddy")
+
+    def test_a_maintenance_gap_alone_is_reported_on_its_own(self):
+        hardened = media.harden(SCHEMA_4_CADDY, "caddy")
+        without = hardened.replace(f'\t\t\theader Content-Security-Policy "{media.MAINTENANCE_CSP}"\n', "", 1)
+        self.assertEqual(media.serving_gaps(without, "caddy"), [media.MAINTENANCE_GAP])
+
+
+class ServingHeaderPlanTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / ".proxy").mkdir()
+        (self.root / ".proxy" / "Caddyfile").write_text(SCHEMA_4_CADDY, encoding="utf-8")
+        (self.root / ".proxy" / "default.conf.template").write_text(SCHEMA_4_NGINX, encoding="utf-8")
+        (self.root / "compose.yml").write_text('x-environment: &env\n  DLUX_STACK_SCHEMA: "5"\n', encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_inspect_lists_the_gaps_and_what_can_be_fixed(self):
+        state = media.inspect(self.root)
+        self.assertFalse(state["exposed"])
+        self.assertEqual(state["gaps"], {".proxy/Caddyfile": ALL_GAPS, ".proxy/default.conf.template": ALL_GAPS})
+        self.assertEqual(state["hardenable"], [".proxy/Caddyfile", ".proxy/default.conf.template"])
+
+    def test_the_plan_hardens_both_files_and_restamps_nothing(self):
+        _sources, updates = media._plan(self.root.resolve(), ["compose.yml"])
+        self.assertEqual(sorted(path.name for path in updates), ["Caddyfile", "default.conf.template"])
+        for path, text in updates.items():
+            self.assertEqual(media.serving_gaps(text, "caddy" if path.name == "Caddyfile" else "nginx"), [])
+
+    def test_a_hardened_stack_plans_nothing(self):
+        for name, kind in (("Caddyfile", "caddy"), ("default.conf.template", "nginx")):
+            path = self.root / ".proxy" / name
+            path.write_text(media.harden(path.read_text(encoding="utf-8"), kind), encoding="utf-8")
+        self.assertEqual(media._plan(self.root.resolve(), ["compose.yml"])[1], {})
+        self.assertEqual(media.inspect(self.root)["gaps"], {})

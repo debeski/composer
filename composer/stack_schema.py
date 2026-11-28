@@ -48,6 +48,10 @@ STAMPED_FILES = (
 
 
 _ENV_STAMP_RE = re.compile(r"""DLUX_STACK_SCHEMA["']?\s*[:=]\s*["']?\d+""")
+# The whole value after ``DLUX_STACK_SCHEMA:`` (or ``=``), quoted or bare, for a strict read.
+_ENV_VALUE_RE = re.compile(
+    r"""DLUX_STACK_SCHEMA["']?[ \t]*[:=][ \t]*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s#,}\]]*)"""
+)
 
 
 def read_stamp(text: str) -> Optional[int]:
@@ -64,6 +68,30 @@ def read_stamps(text: str) -> List[int]:
 def has_env_stamp(text: str) -> bool:
     """Whether ``text`` carries the ``DLUX_STACK_SCHEMA`` value DjangoLux reads at runtime."""
     return bool(_ENV_STAMP_RE.search(text or ""))
+
+
+def env_stamp_values(text: str) -> List[str]:
+    """Every ``DLUX_STACK_SCHEMA`` value in ``text`` as written, quotes removed."""
+    values = []
+    for match in _ENV_VALUE_RE.finditer(text or ""):
+        value = match.group("value")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values.append(value.strip())
+    return values
+
+
+def invalid_env_stamps(text: str, newest: int) -> List[str]:
+    """The ``DLUX_STACK_SCHEMA`` values in ``text`` that are not a schema from 1 to ``newest``.
+
+    ``read_stamps`` takes the digits it finds, so ``"5x"`` reads as 5, ``"-1"``
+    as no stamp and ``"99"`` passes every floor; DjangoLux reads the value
+    itself, so anything but a plain known number is reported as written.
+    """
+    return [
+        value for value in env_stamp_values(text)
+        if not re.fullmatch(r"[1-9][0-9]*", value) or int(value) > newest
+    ]
 
 
 def restamp(text: str, schema: int) -> str:
@@ -94,12 +122,19 @@ def deployment_schema(root: str = ".") -> Optional[int]:
     its most behind stamp says, and ``check`` reports the disagreement. Composer
     runs from the project root, on the host and in its resident services alike.
     """
+    from .worker_migration import TARGET_SCHEMA
+
     for name in ("compose.yml", "docker-compose.yml"):
         path = Path(root) / name
         if path.is_file():
             try:
-                stamps = read_stamps(path.read_text(encoding="utf-8", errors="replace"))
+                text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
+                return None
+            stamps = read_stamps(text)
+            # A value DjangoLux cannot read as a known schema is no schema: it
+            # must not pass a floor ("99"), nor read as the digits in it ("5x").
+            if invalid_env_stamps(text, TARGET_SCHEMA) or any(not 1 <= stamp <= TARGET_SCHEMA for stamp in stamps):
                 return None
             return min(stamps) if stamps else None
     return None
@@ -192,18 +227,37 @@ def secrets_note(root, updates: Mapping[Path, str], target: int) -> str:
 
 
 def line_ending(path: Path) -> str:
-    """``"\r\n"`` when the file at ``path`` uses CRLF line endings, else ``"\n"``.
+    """``"\r\n"`` when the file at ``path`` uses CRLF line endings, ``"\r"`` for CR alone, else ``"\n"``.
 
     The text Composer rewrites is read with universal newlines (LF), so the
-    file's own endings are restored when it is written back; a mixed file goes
-    by its majority.
+    file's own endings are restored when it is written back. ``check --fix``
+    leaves a file that mixes endings alone (``mixed_line_endings``); for any
+    other caller a mixed file goes by its majority.
     """
     try:
         data = path.read_bytes()
     except OSError:
         return "\n"
     crlf = data.count(b"\r\n")
-    return "\r\n" if crlf and crlf * 2 >= data.count(b"\n") else "\n"
+    lf = data.count(b"\n")
+    if not lf and data.count(b"\r"):
+        return "\r"
+    return "\r\n" if crlf and crlf * 2 >= lf else "\n"
+
+
+def mixed_line_endings(path: Path) -> bool:
+    """Whether the file at ``path`` uses more than one of LF, CRLF and CR alone.
+
+    A rewrite writes one ending for the whole file, so the operator's diff
+    would show every line of the other kind as changed.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    crlf = data.count(b"\r\n")
+    kinds = [crlf, data.count(b"\n") - crlf, data.count(b"\r") - crlf]
+    return sum(1 for count in kinds if count) > 1
 
 
 def write_text_keeping_endings(path: Path, text: str, *, newline: Optional[str] = None) -> None:

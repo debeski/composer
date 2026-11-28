@@ -37,6 +37,64 @@ class CheckArgTests(unittest.TestCase):
         self.assertEqual(args.deep_command, "python manage.py dlux_doctor")
 
 
+class DluxRuntimeVersionProbeTests(unittest.TestCase):
+    """`check` created a never-started stack's volumes and bind folders.
+
+    The probe ran `compose run --no-deps <service>`, which gives the throwaway
+    container the service's mounts.
+    """
+
+    CONFIG = {
+        "name": "shop",
+        "services": {
+            "web": {"image": "registry.example/shop:2.0", "volumes": [{"type": "volume", "source": "static"}]},
+            "worker": {"build": {"context": "."}},
+        },
+    }
+
+    def setUp(self):
+        self.launcher = DockerComposeLauncher()
+        self.launcher.active_compose_files = ["compose.yml"]
+        self.launcher.services = ["web", "worker"]
+
+    def _probe(self, service, ok=True, out="dlux 1.17.0b2\n"):
+        calls = []
+
+        def run_command(argv, **kwargs):
+            calls.append(argv)
+            return ok, out, ""
+
+        with patch.object(self.launcher, "compose_config_json", return_value=self.CONFIG), \
+             patch.object(self.launcher, "run_command", side_effect=run_command), \
+             patch.object(self.launcher, "run_docker_compose", side_effect=AssertionError("compose run mounts the service's data")):
+            version = self.launcher._dlux_runtime_version(service)
+        return version, calls
+
+    def test_the_image_is_read_in_a_container_that_mounts_nothing(self):
+        version, calls = self._probe("web")
+        self.assertEqual(version, (1, 17, 0))
+        argv = calls[0]
+        self.assertEqual(argv[:3], ["docker", "run", "--rm"])
+        self.assertNotIn("-v", argv)
+        self.assertNotIn("--mount", argv)
+        self.assertNotIn("--volumes-from", argv)
+        self.assertEqual(argv[argv.index("--network") + 1], "none")
+        self.assertEqual(argv[argv.index("--pull") + 1], "missing")
+        self.assertIn("registry.example/shop:2.0", argv)
+
+    def test_a_build_only_service_is_never_built_or_pulled(self):
+        version, calls = self._probe("worker", ok=False, out="")
+        self.assertIsNone(version)
+        argv = calls[0]
+        self.assertEqual(argv[argv.index("--pull") + 1], "never")
+        self.assertIn("shop-worker", argv)
+
+    def test_an_unknown_service_is_not_probed(self):
+        version, calls = self._probe("nope")
+        self.assertIsNone(version)
+        self.assertEqual(calls, [])
+
+
 class CheckupCheckTests(unittest.TestCase):
     def setUp(self):
         self.launcher = DockerComposeLauncher()

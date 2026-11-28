@@ -294,6 +294,7 @@ class StackCleanupApplyTests(unittest.TestCase):
                     "services": {
                         "web": {},
                         "caddy": {
+                            "image": "caddy:latest",
                             "volumes": [
                                 {
                                     "type": "bind",
@@ -361,6 +362,7 @@ class StackCleanupApplyTests(unittest.TestCase):
                     "services": {
                         "web": {},
                         "nginx": {
+                            "image": "nginx:latest",
                             "volumes": [
                                 {
                                     "type": "bind",
@@ -399,7 +401,10 @@ class StackCleanupApplyTests(unittest.TestCase):
             self.assertEqual(result["proxy_services_restarted"], ["nginx"])
             self.assertNotIn("pgadmin", proxy.read_text(encoding="utf-8").lower())
             validation = runner.call_args_list[4].args[0]
-            self.assertEqual(validation[-3:], ["nginx", "nginx", "-t"])
+            self.assertEqual(validation[-3:], ["nginx:latest", "nginx", "-t"])
+            # R2-060: no `compose run`, so the validation creates no network or volume.
+            self.assertEqual(validation[:2], ["docker", "run"])
+            self.assertEqual(validation[validation.index("--network") + 1], "none")
             restart_command = runner.call_args_list[8].args[0]
             self.assertEqual(
                 restart_command[-2:],
@@ -433,3 +438,75 @@ class StackCleanupApplyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProxyValidationCommandTests(unittest.TestCase):
+    """R2-060: the validator is a network-free ``docker run`` of the proxy image."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "certs").mkdir()
+        self.candidate = self.root / ".Caddyfile.composer-check-x.tmp"
+        self.candidate.write_text(":80\n", encoding="utf-8")
+        self.model = {
+            "name": "shop",
+            "services": {
+                "web": {"image": "shop/web"},
+                "caddy": {
+                    "image": "caddy:2.8",
+                    "environment": {"DLUX_FRONT_PROXY": "10.0.0.5", "UNSET": None},
+                    "volumes": [
+                        {"type": "bind", "source": str(self.root / "Caddyfile"), "target": "/etc/caddy/Caddyfile"},
+                        {"type": "bind", "source": str(self.root / "certs"), "target": "/certs", "read_only": True},
+                        {"type": "bind", "source": str(self.root / "missing"), "target": "/srv/missing"},
+                        {"type": "volume", "source": "caddy_data", "target": "/data"},
+                    ],
+                },
+            },
+        }
+
+    def test_no_network_no_volume_no_missing_bind_and_no_values_on_the_command_line(self):
+        from composer.stack_cleanup import proxy_validation_command
+
+        argv, keys = proxy_validation_command(self.model, "caddy", self.candidate, "/etc/caddy/Caddyfile", "caddy")
+        self.assertEqual(argv[:2], ["docker", "run"])
+        self.assertEqual(argv[argv.index("--network") + 1], "none")
+        self.assertIn("web:127.0.0.1", argv)
+        mounts = [argv[i + 1] for i, token in enumerate(argv) if token == "--mount"]
+        self.assertEqual(mounts, [f"type=bind,source={self.root / 'certs'},target=/certs,readonly"])
+        self.assertIn(f"{self.candidate}:/etc/caddy/Caddyfile:ro", argv)
+        self.assertNotIn("caddy_data", " ".join(argv))
+        self.assertEqual(keys, ["DLUX_FRONT_PROXY"])
+        self.assertNotIn("10.0.0.5", " ".join(argv))
+        self.assertEqual(argv[-7:], ["caddy:2.8", "caddy", "validate", "--config", "/etc/caddy/Caddyfile",
+                                     "--adapter", "caddyfile"])
+
+    def test_a_build_only_proxy_uses_composes_image_name_without_pulling(self):
+        from composer.stack_cleanup import proxy_validation_command
+
+        self.model["services"]["caddy"].pop("image")
+        self.model["services"]["caddy"]["build"] = {"context": "."}
+        argv, _keys = proxy_validation_command(self.model, "caddy", self.candidate, "/etc/caddy/Caddyfile", "caddy")
+        self.assertIn("shop-caddy", argv)
+        self.assertEqual(argv[argv.index("--pull") + 1], "never")
+
+    def test_a_docker_failure_is_not_reported_as_a_rejected_file(self):
+        from composer.stack_cleanup import StackCleanupError, _validate_proxy_candidates
+
+        source = self.root / "Caddyfile"
+        runner = Mock(return_value=_completed(125, stderr="docker: Error response from daemon: all predefined "
+                                                     "address pools have been fully subnetted"))
+        with self.assertRaises(StackCleanupError) as raised:
+            _validate_proxy_candidates(runner, self.root, [], {}, [("caddy", source, "/etc/caddy/Caddyfile", "caddy")],
+                                       {source: self.candidate}, self.model)
+        self.assertIn("Docker could not run the container", str(raised.exception))
+        self.assertNotIn("rejected", str(raised.exception))
+        self.assertEqual(runner.call_args.kwargs["env"]["DLUX_FRONT_PROXY"], "10.0.0.5")
+
+        runner.return_value = _completed(1, stderr="Error: adapting config using caddyfile: unrecognized directive")
+        with self.assertRaises(StackCleanupError) as raised:
+            _validate_proxy_candidates(runner, self.root, [], {}, [("caddy", source, "/etc/caddy/Caddyfile", "caddy")],
+                                       {source: self.candidate}, self.model)
+        self.assertIn("caddy rejected the cleaned proxy configuration", str(raised.exception))
