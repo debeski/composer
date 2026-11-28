@@ -531,6 +531,26 @@ class AppPermissionsCheckTests(_Project):
         self.assertNotIn("runs as root", result["message"])
         self.assertIn("cannot read which user shop/web:1 runs as", result["message"])
 
+    def _scan_wrong(self, containers):
+        summary = {"missing": [], "targets": [{"label": "volume static", "wrong": 1, "sample": [
+            {"path": ".", "kind": "dir", "owner": "0:0", "mode": "0755", "needs": "rwx"}]}]}
+        with patch.object(self.launcher, "compose_config_json", return_value=self.MODEL), \
+                patch.object(app_permissions, "image_identity", return_value=("user", 10001, 0)), \
+                patch.object(app_permissions, "missing_app_containers", return_value=containers), \
+                patch.object(app_permissions, "run", return_value=summary):
+            return self.launcher._check_app_permissions(deep=True)
+
+    def test_a_stack_whose_app_never_started_is_granted_at_the_first_start(self):
+        # b3 re-run: a proxy repair's recreate created static and dlux_runtime (0755, empty), and the
+        # recheck failed `check --fix` with "by hand", though './start.sh' grants them before web starts.
+        result = self._scan_wrong(["web"])
+        self.assertEqual(result["level"], OK)
+        self.assertIn("before the first start", result["message"])
+        self.assertIsNone(dict(guidance.summary([result], [], [])["still"]).get("app-permissions"))
+
+    def test_a_started_app_that_cannot_use_its_data_still_fails(self):
+        self.assertEqual(self._scan_wrong([])["level"], FAIL)
+
     def test_a_refused_grant_names_the_entry_and_the_host_step(self):
         summary = {"manifest": "", "targets": [{"label": "./media", "host": "/srv/shop/media", "errors": 1,
                    "changed": 0, "failed": [{"path": ".", "kind": "dir", "owner": "0:0", "mode": "0555",
