@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "1.11.0b3",
+  "version": "1.11.0",
   "summary": "Composer 1.11 is a fix and security line, paired with DjangoLux 1.17. check and check --fix name the real way out of an old stack, re-stamp every schema stamp, fail on a missing worker or secrets file, keep line endings, and finish the job: dropped services are removed, changed ones recreated and health-checked. A plain check now changes nothing on a stack that never started. Deploys wait until every container stays healthy, keep the proxy up on failure, name the service that really crashed, and refuse an older image, also after a host move. Deploys and check --fix take one lock, and a stray .env can no longer replace .secrets/.env. check --fix adds the headers that stop an uploaded file from running as the site, and Composer reads the files the app writes and the maintenance folder defensively. Redis moves to crash-safe snapshots. The agent no longer reads other containers' secrets. Composer pins its own image to a digest its release job signs and never moves it backwards. From 1.11.0b1, update with ./start.sh agent update.",
   "highlights": [
     "Security: check --fix adds the /media/ headers that keep uploaded HTML and SVG from running as the site.",
@@ -13,5 +13,5 @@
     "Composer pins its own image to a signed digest; updates verify it and never move back.",
     "Pairs with DjangoLux 1.17; run ./start.sh check --fix after updating. From 1.11.0b1, use ./start.sh agent update."
   ],
-  "release_url": "https://github.com/debeski/composer/releases/tag/v1.11.0b3"
+  "release_url": "https://github.com/debeski/composer/releases/tag/v1.11.0"
 }
