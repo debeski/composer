@@ -16,7 +16,7 @@ class RestartCommandTests(unittest.TestCase):
         self.assertTrue(args.dev)
         self.assertEqual(args.file, "compose.alt.yml")
         self.assertEqual(args.status_file, "restart.json")
-        self.assertEqual(args.service, "web")
+        self.assertEqual(args.service, ["web"])
 
     def test_restart_configuration_uses_command_arguments(self):
         launcher = DockerComposeLauncher()

@@ -898,10 +898,16 @@ class DockerComposeLauncher(
         return confirm(action, consequences, assume_yes=self.assume_yes)
 
     def configure_restart(self, argv):
-        """Configure `composer restart [opts] [service]` for the restart pipeline."""
+        """Configure `composer restart [opts] [service...]` for the restart pipeline.
+
+        One service keeps the single-service form; several go to Compose in one
+        `restart`, in the order given, like `docker compose restart web worker`.
+        """
         restart_args = parse_restart_args(argv)
         self.restart_mode = True
-        self.restart_service = restart_args.service
+        named = list(dict.fromkeys(restart_args.service or []))
+        self.restart_service = named[0] if len(named) == 1 else None
+        self.restart_services = named if len(named) > 1 else []
         self.compose_file = restart_args.file
         self.dev_mode = restart_args.dev
         self.resolve_active_compose_files()
@@ -914,7 +920,7 @@ class DockerComposeLauncher(
         self.exclude_services = parse_service_list(
             os.environ.get("COMPOSER_EXCLUDE_SERVICES")
         )
-        if not self.restart_service:
+        if not self.restart_service and not self.restart_services:
             self.restart_services = parse_service_list(
                 os.environ.get("COMPOSER_RESTART_SERVICES")
             )
