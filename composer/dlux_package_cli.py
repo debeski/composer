@@ -296,6 +296,11 @@ def run_availability_check(args, runtime) -> int:
         print(f"  published to {path}", file=sys.stderr)
         return 1
     installed, verified, pointer_problem = _installed_or_problem(runtime)
+    if not installed:
+        # No usable pointer: the baked package is what runs, so compare with it
+        # and never offer an older release as an update.
+        installed = _baked_version_probe(args)()
+        verified = bool(installed)
     print(f"✔ {availability_summary(payload, installed, verified)} — published to {path}")
     if not payload.get("inline_safe") and payload.get("reason"):
         print(f"  ↳ {payload['reason']}")

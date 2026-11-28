@@ -456,8 +456,8 @@ def _recover_pointer(runtime, problem, *, restart, health_check, say, steps):
     return PackageUpdateResult(
         ok=True, rolled_back=True, steps=steps,
         message=(f"The unusable runtime pointer was set aside{where}; the DjangoLux release baked "
-                 "into the image is running. DjangoLux rebuilds the pointer from the release it "
-                 "recorded on its next tick."),
+                 "into the image is running. With no pointer the stack keeps the baked release "
+                 "until the next 'dlux update'."),
     )
 
 
