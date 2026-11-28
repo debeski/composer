@@ -99,6 +99,49 @@ class UnusablePointerTests(_Base):
         self.assertIn("not a JSON object", stderr.getvalue())
         self.assertIn("./start.sh dlux rollback", stderr.getvalue())
 
+    def _check(self, *, baked, latest="1.17.0b2"):
+        args = cli.parse_dlux_update_args(["--runtime-root", str(self.runtime.root)], action="check")
+        payload = {"available": True, "version": latest, "inline_safe": True, "channel": "beta",
+                   "quarantined": [], "error": "", "reason": ""}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(cli, "build_availability_payload", return_value=payload), \
+                mock.patch.object(cli, "_baked_version_probe", return_value=lambda: baked), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            code = cli.run_availability_check(args, self.runtime)
+        return code, stdout.getvalue()
+
+    def test_check_never_offers_a_release_older_than_the_baked_one(self):
+        """b3 re-run: an unusable pointer made `check` offer 1.17.0b2 on an image baking 1.17.0b3."""
+        for content in ("null", None):
+            with self.subTest(pointer=content):
+                if content is None:
+                    self.runtime.active_file.unlink(missing_ok=True)
+                else:
+                    self.runtime.active_file.write_text(content, encoding="utf-8")
+                code, out = self._check(baked="1.17.0b3")
+                self.assertNotIn("1.17.0b2 available", out)
+                self.assertIn("1.17.0b3 is newer than 1.17.0b2", out)
+                self.assertEqual(code, 1 if content else 0)
+
+    def test_check_still_offers_a_newer_release_on_the_baked_one(self):
+        code, out = self._check(baked="1.17.0b1")
+        self.assertEqual(code, 0)
+        self.assertIn("DjangoLux 1.17.0b2 available", out)
+
+    def test_the_rollback_does_not_promise_a_pointer_rebuild(self):
+        """DjangoLux reads a missing pointer under a new generation as a return to the
+        image and writes none back; the b3 re-run found it absent after the rollback."""
+        self.runtime.active_file.write_text("null", encoding="utf-8")
+        ops = _Ops()
+        result = rollback_package_update(self.runtime, restart=ops.restart, health_check=ops.health)
+        self.assertTrue(result.ok, result.message)
+        self.assertNotIn("rebuild", result.message)
+        self.assertIn("baked release", result.message)
+        with self.assertRaises(UnusablePointer) as caught:
+            self.runtime.active_file.write_text("[]", encoding="utf-8")
+            self.runtime.read_active()
+        self.assertNotIn("rebuild", str(caught.exception))
+
 
 def _wheel(path, members):
     with zipfile.ZipFile(path, "w") as archive:

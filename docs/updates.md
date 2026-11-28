@@ -372,8 +372,12 @@ JSON object, unreadable, a symbolic link or FIFO, or naming a release that is no
 staged), `dlux check` and `dlux channel` say so and exit `1`, and `dlux update`
 refuses; each names `dlux rollback` as the way out. `dlux rollback` then renames the
 file to `state/active.json.unusable-<UTC time>` (kept, never deleted), advances
-`state/generation` and restarts on the image's own release. DjangoLux rebuilds the
-pointer from the release it recorded on its next state tick.
+`state/generation` and restarts on the image's own release. DjangoLux reads a
+missing pointer under a new generation as a return to the image: it records the
+baked release as active and writes no pointer back, so `state/active.json` stays
+absent until the next `dlux update`. While there is no usable pointer, `dlux check`
+compares the channel's newest release with the DjangoLux baked into the image, so
+an older release is never reported as available.
 
 ### Backups
 

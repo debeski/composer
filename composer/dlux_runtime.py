@@ -78,7 +78,7 @@ class PackageOperationBusy(DluxRuntimeError):
 #: What an operator runs to recover from an unusable ``active.json``.
 POINTER_RECOVERY_HINT = (
     "Run './start.sh dlux rollback' to set it aside and return to the DjangoLux "
-    "release baked into the image; DjangoLux then rebuilds the pointer."
+    "release baked into the image."
 )
 
 
@@ -221,8 +221,9 @@ class DluxRuntime:
         """Move an unusable ``active.json`` aside, keep it, and restart on the image.
 
         The file is renamed (never deleted) to ``active.json.unusable-<UTC time>``
-        and the generation bumped, so every supervisor serves the baked package and
-        DjangoLux's reconcile rebuilds the pointer from the release it recorded.
+        and the generation bumped, so every supervisor serves the baked package.
+        DjangoLux reads a missing pointer under a new generation as a return to the
+        image: it records the baked release and writes no pointer back.
         """
         if not (self.active_file.exists() or self.active_file.is_symlink()):
             return None
