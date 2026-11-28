@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.11.0
+
+- **Stable 1.11.0 For DjangoLux 1.17.0 (fix line, security)**: Promote the published and accepted 1.11.0b3, which includes 1.11.0b1 and b2. The resident pair is pinned to a Sigstore-signed digest (`.composer-image`, wrapper 8), the executor serves Docker reads (`docker-socket-proxy` removed), and every break-it round 1 and 2 finding is fixed: `check --fix` adds the `/media/` serving headers and the maintenance-page CSP, request, relay and maintenance files are opened without following links, the downgrade guard holds across restored volumes, one lock covers deploys and `check --fix`, failed deploys name the failing service, and `./start.sh` asks for `ADMIN_PASS` before a stack's first deploy at a terminal. No changes from the beta.
+
 ## v1.11.0b3
 
 - **`check` Warns On An Unreadable `.composer-image` (R2-024)**: a lock file that is present but whose first non-empty line is not a whole pinned reference reads as no lock in both wrappers and in Composer, so the deployer ran the moving channel tag while the file looked like a pin. `_check_composer_channel` now WARNs on it (`image_pin.lock_state`), with `./start.sh agent update` as the fix.
